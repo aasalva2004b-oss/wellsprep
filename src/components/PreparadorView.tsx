@@ -1,22 +1,31 @@
 import React, { useState, useMemo, useEffect } from "react";
 import { 
-  Calendar, Mic, Clock, CheckCircle2, AlertTriangle, 
-  XCircle, Plus, Trash2, Play, Pause, RotateCcw, 
-  Sparkles, BookOpen, Star, ChevronRight, X, Search,
-  Award, ShieldAlert, ArrowUpRight, Flame, Volume2, Save
+  Calendar, Clock, CheckCircle2, AlertTriangle, 
+  XCircle, Plus, Trash2, BookOpen, Star, ChevronRight, X, Search,
+  Award, Sparkles, Save, ArrowUpDown, Brain, Timer, Target, Flame, Info
 } from "lucide-react";
 import { useFirebase } from "../lib/FirebaseProvider";
 import { initialSubjects, initialTopics } from "../data/initialData";
-import { Topic, Session } from "../types";
+import { Topic } from "../types";
 import { calculateTopicCycle } from "../lib/oposicionCycle";
 import { getLocalDateString, safeParseDate, cn } from "../lib/utils";
 import { getLatestCantoForTopic, isCantoSession, sessionMatchesTopic, getCantoDuration } from "../lib/cantoUtils";
+import { 
+  evaluateTopicPreparation, 
+  getDefaultPreparadorDay, 
+  getPreparadorScheduleStatus,
+  OPTIMAL_CANTO_SECS,
+  WINDOW_MIN_SECS,
+  WINDOW_MAX_SECS,
+  TopicPreparationEvaluation
+} from "../lib/preparationScore";
 import { motion, AnimatePresence } from "motion/react";
 import { toast } from "sonner";
 import { doc, getDoc, setDoc, serverTimestamp } from "firebase/firestore";
 import { db } from "../lib/firebase";
 
 type DayOption = "lunes" | "jueves" | "historial";
+type SortOption = "menor_nota" | "mayor_nota" | "orden_numero";
 
 interface PreparadorSchedule {
   lunes: string[];   // Topic IDs
@@ -33,13 +42,15 @@ const LOCAL_STORAGE_KEY = "wellsprep_preparador_schedule_v2";
 export function PreparadorView() {
   const { user, userProgress, recentSessions, addStudySession } = useFirebase();
 
-  // Active day: Lunes or Jueves or Historial
+  // Active day: Lunes or Jueves (defaults according to strict 22:00h rule) or Historial
   const [activeDay, setActiveDay] = useState<DayOption>(() => {
-    // Pick upcoming day based on current day of week (0 Sun, 1 Mon, 2 Tue, 3 Wed, 4 Thu, 5 Fri, 6 Sat)
-    const day = new Date().getDay();
-    if (day >= 1 && day <= 3) return "jueves"; // Mon-Wed -> target Thursday
-    return "lunes"; // Thu-Sun -> target Monday
+    return getDefaultPreparadorDay();
   });
+
+  // Schedule status message (e.g., "Activo hasta las 22:00h")
+  const scheduleStatus = useMemo(() => {
+    return getPreparadorScheduleStatus();
+  }, []);
 
   const [schedule, setSchedule] = useState<PreparadorSchedule>(() => {
     try {
@@ -50,6 +61,9 @@ export function PreparadorView() {
     }
     return DEFAULT_SCHEDULE;
   });
+
+  // Sorting state for topic cards
+  const [sortOption, setSortOption] = useState<SortOption>("menor_nota");
 
   // Sync schedule with Firestore when user is loaded
   useEffect(() => {
@@ -99,11 +113,11 @@ export function PreparadorView() {
   const [pickerSearch, setPickerSearch] = useState("");
   const [pickerSubjectId, setPickerSubjectId] = useState<string>("constitucional");
 
-  // State for recording feedback / cante directly from external stopwatch or preparador
+  // State for recording feedback / cante directly
   const [feedbackTopic, setFeedbackTopic] = useState<Topic | null>(null);
   const [prepGrade, setPrepGrade] = useState<number>(7.5);
-  const [prepMinutes, setPrepMinutes] = useState<number>(13);
-  const [prepSeconds, setPrepSeconds] = useState<number>(0);
+  const [prepMinutes, setPrepMinutes] = useState<number>(12);
+  const [prepSeconds, setPrepSeconds] = useState<number>(30);
   const [prepNotes, setPrepNotes] = useState("");
 
   // Topic lookup map
@@ -124,14 +138,14 @@ export function PreparadorView() {
       .filter((t): t is Topic => Boolean(t));
   }, [assignedTopicIds, topicMap]);
 
-  // Detailed preparation analysis for each assigned topic
+  // Master Scientific Preparation Analysis for each assigned topic
   const topicsAnalysis = useMemo(() => {
     return assignedTopics.map((topic) => {
       const prog = userProgress[topic.id];
       const sessions = recentSessions.filter((s) => sessionMatchesTopic(s, topic));
       const cycle = calculateTopicCycle(topic.id, prog, sessions);
 
-      // Extract accurate cante metrics via rock-solid engine
+      // Extract cante metrics
       const cantoData = getLatestCantoForTopic(recentSessions, topic, prog);
       const hasCanto = cantoData.hasCanto;
       const lastCantoMins = cantoData.mins;
@@ -141,59 +155,27 @@ export function PreparadorView() {
       const lastCantoDate = cantoData.date;
       const cantoCount = cantoData.count;
 
-      // Benchmark against 13 minutes (780 seconds)
-      const targetSecs = 13 * 60; // 780s
-      const diffSecs = hasCanto ? lastCantoTotalSecs - targetSecs : 0;
-      const diffMinsFormatted = diffSecs === 0 ? "Exacto (13m 00s)" :
-        diffSecs > 0 
-          ? `+${Math.floor(diffSecs / 60)}m ${(diffSecs % 60).toString().padStart(2, "0")}s`
-          : `-${Math.floor(Math.abs(diffSecs) / 60)}m ${(Math.abs(diffSecs) % 60).toString().padStart(2, "0")}s`;
-
-      // Status classification
-      // 🟢 OPTIMAL: 12:00 <= time <= 13:30 AND (grade >= 7 or no grade)
-      // 🟡 WARNING: 13:31 <= time <= 15:00 OR time < 12:00 OR grade 5-6.9
-      // 🔴 CRITICAL: time > 15:00 OR no canto OR grade < 5
-      let status: "green" | "yellow" | "red" = "red";
-      let statusText = "Crítico: Sin cante grabado";
-      let statusAdvice = "No se ha registrado ningún cante previo. Es urgente realizar un ensayo cronometrado antes del preparador.";
-
-      if (!hasCanto) {
-        status = "red";
-        statusText = "Sin cante grabado";
-        statusAdvice = "Debes registrar el cante para calibrar si entra en la ventana oficial de 13 minutos.";
-      } else if (lastCantoTotalSecs > 15 * 60) {
-        status = "red";
-        statusText = `Excedido (+${Math.floor(diffSecs / 60)}m)`;
-        statusAdvice = "Tiempo muy largo (>15m). El preparador o el tribunal te cortará. Urge podar epígrafes secundarios.";
-      } else if (lastGrade !== null && lastGrade < 5) {
-        status = "red";
-        statusText = `Suspenso (${lastGrade.toFixed(1)})`;
-        statusAdvice = "La última calificación fue suspensa. Repasa los artículos clave y jurisprudencia antes de ir.";
-      } else if (lastCantoTotalSecs >= 12 * 60 && lastCantoTotalSecs <= 13.5 * 60 && (lastGrade === null || lastGrade >= 7)) {
-        status = "green";
-        statusText = "Listo para el Tribunal";
-        statusAdvice = "Tiempo impecable clavado a ~13 minutos y solvencia demostrada. ¡Listo para cantar!";
-      } else {
-        status = "yellow";
-        if (lastCantoTotalSecs > 13.5 * 60) {
-          statusText = `Algo largo (+${Math.floor(diffSecs / 60)}m)`;
-          statusAdvice = "Se pasa 1-2 minutos de la meta de 13m. Ajusta el ritmo de dicción para entrar sin agobio.";
-        } else if (lastCantoTotalSecs < 12 * 60) {
-          statusText = `Tiempo escaso (${lastCantoMins}m)`;
-          statusAdvice = "Ha durado menos de 12 minutos. Asegúrate de desarrollar los fundamentos y no saltarte epígrafes.";
-        } else {
-          statusText = "Aprobado justo";
-          statusAdvice = "Asegura la estructura y los números de los artículos para subir la nota con el preparador.";
-        }
-      }
-
       // Check last touch date
       const lastSessionDate = sessions[0]?.date || prog?.lastReviewDate || prog?.firstStudyDate;
       const daysSinceTouch = lastSessionDate 
-        ? Math.floor((new Date().getTime() - safeParseDate(lastSessionDate).getTime()) / (1000 * 3600 * 24))
+        ? Math.max(0, Math.floor((new Date().getTime() - safeParseDate(lastSessionDate).getTime()) / (1000 * 3600 * 24)))
         : null;
 
       const subject = initialSubjects.find((s) => s.id === topic.subjectId);
+      const vueltas = prog?.vueltas || 0;
+      const reviewsCount = sessions.length;
+
+      // Complete master scientific evaluation (1.0 to 10.0)
+      const evaluation: TopicPreparationEvaluation = evaluateTopicPreparation({
+        topicNumber: topic.number,
+        topicTitle: topic.title,
+        totalCantoSecs: hasCanto ? lastCantoTotalSecs : null,
+        lastGrade: lastGrade,
+        daysSinceTouch,
+        vueltas,
+        reviewsCount,
+        difficulty: topic.difficulty || 5
+      });
 
       return {
         topic,
@@ -207,34 +189,68 @@ export function PreparadorView() {
         lastGrade,
         lastCantoDate,
         cantoCount,
-        diffSecs,
-        diffMinsFormatted,
-        status,
-        statusText,
-        statusAdvice,
         daysSinceTouch,
-        vueltas: prog?.vueltas || 0
+        vueltas,
+        reviewsCount,
+        evaluation
       };
     });
   }, [assignedTopics, userProgress, recentSessions]);
 
+  // Sorted list of topics according to user preference
+  const sortedTopicsAnalysis = useMemo(() => {
+    const list = [...topicsAnalysis];
+    if (sortOption === "menor_nota") {
+      // Urgent focus first (lowest scores first)
+      return list.sort((a, b) => a.evaluation.overallScore - b.evaluation.overallScore);
+    }
+    if (sortOption === "mayor_nota") {
+      // Strongest first
+      return list.sort((a, b) => b.evaluation.overallScore - a.evaluation.overallScore);
+    }
+    // By topic number
+    return list.sort((a, b) => a.topic.number - b.topic.number);
+  }, [topicsAnalysis, sortOption]);
+
   // Overall KPIs for the day
   const kpis = useMemo(() => {
     const total = topicsAnalysis.length;
-    const green = topicsAnalysis.filter((t) => t.status === "green").length;
-    const yellow = topicsAnalysis.filter((t) => t.status === "yellow").length;
-    const red = topicsAnalysis.filter((t) => t.status === "red").length;
-    const totalMinutes = total * 13; // 13 min per topic
-    const grades = topicsAnalysis.map((t) => t.lastGrade).filter((g): g is number => g !== null);
-    const avgGrade = grades.length > 0 ? grades.reduce((a, b) => a + b, 0) / grades.length : null;
+    if (total === 0) {
+      return {
+        total: 0,
+        avgScore: null,
+        listosTribunal: 0,
+        enAjuste: 0,
+        enRiesgo: 0,
+        totalMinutes: 0,
+        avgRetention: null
+      };
+    }
+
+    const scores = topicsAnalysis.map((t) => t.evaluation.overallScore);
+    const avgScore = scores.reduce((a, b) => a + b, 0) / total;
+
+    const listosTribunal = topicsAnalysis.filter((t) => t.evaluation.overallScore >= 7.5).length;
+    const enAjuste = topicsAnalysis.filter((t) => t.evaluation.overallScore >= 5.0 && t.evaluation.overallScore < 7.5).length;
+    const enRiesgo = topicsAnalysis.filter((t) => t.evaluation.overallScore < 5.0).length;
+
+    // Total estimated time in minutes (based on actual cantes or 12:30 default)
+    const totalSecs = topicsAnalysis.reduce((acc, t) => {
+      return acc + (t.hasCanto ? t.lastCantoTotalSecs : OPTIMAL_CANTO_SECS);
+    }, 0);
+    const totalMinutes = Math.round(totalSecs / 60);
+
+    const retentions = topicsAnalysis.map((t) => t.evaluation.retentionPct);
+    const avgRetention = Math.round(retentions.reduce((a, b) => a + b, 0) / total);
 
     return {
       total,
-      green,
-      yellow,
-      red,
+      avgScore,
+      listosTribunal,
+      enAjuste,
+      enRiesgo,
       totalMinutes,
-      avgGrade
+      avgRetention
     };
   }, [topicsAnalysis]);
 
@@ -277,7 +293,7 @@ export function PreparadorView() {
     toast.success("Temas cargados para el Jueves: 3, 16 y 17 de Constitucional");
   };
 
-  // Save preparador feedback
+  // Save preparador feedback / cante session
   const handleSavePreparadorFeedback = async () => {
     if (!feedbackTopic) return;
     try {
@@ -295,7 +311,7 @@ export function PreparadorView() {
           notes: `Sesión de cante ante preparador: ${prepMinutes}m ${prepSeconds}s. Nota: ${prepGrade}. Feedback: ${prepNotes}`
         }
       );
-      toast.success(`Feedback del preparador registrado: Nota ${prepGrade}`);
+      toast.success(`Evaluación del preparador guardada (Nota ${prepGrade.toFixed(1)})`);
       setFeedbackTopic(null);
       setPrepNotes("");
     } catch (e) {
@@ -324,23 +340,33 @@ export function PreparadorView() {
   return (
     <div className="flex flex-col h-full bg-[#F5F5F7] overflow-hidden select-none">
       {/* APPLE FROSTED HEADER */}
-      <div className="bg-white/85 backdrop-blur-2xl border-b border-slate-200/60 px-4 py-4 md:px-8 md:py-6 sticky top-0 z-20 shrink-0 shadow-[0_4px_24px_rgba(0,0,0,0.02)]">
+      <div className="bg-white/90 backdrop-blur-2xl border-b border-slate-200/70 px-4 py-4 md:px-8 md:py-5 sticky top-0 z-20 shrink-0 shadow-[0_4px_24px_rgba(0,0,0,0.02)]">
         <div className="flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4">
           <div>
-            <div className="flex items-center gap-2.5">
+            <div className="flex flex-wrap items-center gap-2.5">
               <div className="w-8 h-8 md:w-9 md:h-9 rounded-xl bg-slate-900 text-white flex items-center justify-center shadow-md shadow-slate-900/10">
                 <Award size={18} strokeWidth={2.2} />
               </div>
               <h1 className="text-xl md:text-2xl font-black text-slate-900 tracking-tight font-serif">
-                Sección del Preparador
+                Panel del Preparador (L/J)
               </h1>
-              <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-indigo-50 text-indigo-700 border border-indigo-200/80">
-                Lunes & Jueves · Meta 13 min
+              <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] font-black uppercase tracking-wider bg-indigo-50 text-indigo-700 border border-indigo-200/80">
+                <Target size={12} className="text-indigo-600" />
+                <span>Meta Tribunal: 12:30 min (Ventana 11:50 - 13:40)</span>
               </span>
             </div>
-            <p className="text-slate-500 text-xs md:text-sm font-medium mt-1">
-              Selecciona los temas para tu cante semanal y comprueba por colores, tiempos y notas si estás listo para el tribunal.
-            </p>
+            
+            {/* Status explanation pill (shows that Thursday stays active until 22:00) */}
+            <div className="flex items-center gap-2 mt-1.5">
+              <span className="inline-flex items-center gap-1 text-[11px] font-bold text-slate-600 bg-slate-100 px-2.5 py-0.5 rounded-md border border-slate-200/60">
+                <Clock size={11} className="text-slate-500" />
+                <span>{scheduleStatus.timeRemainingMessage}</span>
+              </span>
+              <span className="text-slate-400 text-xs hidden sm:inline">·</span>
+              <p className="text-slate-500 text-xs font-medium hidden sm:inline">
+                Evaluación integral 1-10: tiempo óptimo (12:30), curva de olvido Ebbinghaus, vueltas y notas.
+              </p>
+            </div>
           </div>
 
           {/* DAY SEGMENTED CONTROLLER (LUNES / JUEVES / HISTORIAL) */}
@@ -410,64 +436,77 @@ export function PreparadorView() {
         {/* OVERVIEW BENCHMARK CARDS */}
         {activeDay !== "historial" && (
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 sm:gap-3.5 mt-4">
-            {/* Total temas */}
-            <div className="bg-slate-50/80 rounded-2xl p-3 border border-slate-200/60 flex items-center gap-3">
-              <div className="w-9 h-9 rounded-xl bg-white border border-slate-200/80 flex items-center justify-center text-slate-700 shadow-sm">
-                <BookOpen size={16} />
+            {/* 1. Nota Media de Preparación (1-10) */}
+            <div className="bg-slate-50/90 rounded-2xl p-3.5 border border-slate-200/70 flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-white border border-slate-200/80 flex items-center justify-center shadow-sm text-indigo-600">
+                <Award size={18} strokeWidth={2.2} />
               </div>
-              <div>
+              <div className="min-w-0">
                 <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                  Temas a Cantar
+                  Nota Media Preparación
                 </div>
-                <div className="text-lg font-black text-slate-900">
-                  {kpis.total} <span className="text-xs font-medium text-slate-500">temas</span>
+                <div className="flex items-baseline gap-1.5">
+                  <span className={cn(
+                    "text-xl font-black font-serif",
+                    kpis.avgScore === null ? "text-slate-400" :
+                    kpis.avgScore >= 8.5 ? "text-emerald-700" :
+                    kpis.avgScore >= 7.0 ? "text-indigo-700" :
+                    kpis.avgScore >= 5.0 ? "text-amber-700" : "text-rose-600"
+                  )}>
+                    {kpis.avgScore !== null ? `${kpis.avgScore.toFixed(1)}` : "—"}
+                  </span>
+                  <span className="text-xs font-bold text-slate-400">/ 10</span>
                 </div>
               </div>
             </div>
 
-            {/* Tiempo Estimado Total */}
-            <div className="bg-slate-50/80 rounded-2xl p-3 border border-slate-200/60 flex items-center gap-3">
-              <div className="w-9 h-9 rounded-xl bg-white border border-slate-200/80 flex items-center justify-center text-indigo-600 shadow-sm">
-                <Clock size={16} />
-              </div>
-              <div>
-                <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                  Tiempo de Cante
-                </div>
-                <div className="text-lg font-black text-indigo-700">
-                  ~{kpis.totalMinutes}m <span className="text-xs font-medium text-slate-500">(13m c/u)</span>
+            {/* 2. Diagnóstico del Tribunal */}
+            <div className="bg-slate-50/90 rounded-2xl p-3.5 border border-slate-200/70 flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-white border border-slate-200/80 flex items-center justify-center shadow-sm">
+                <div className="flex -space-x-1">
+                  <span className="w-3 h-3 rounded-full bg-emerald-500 ring-2 ring-white inline-block" />
+                  <span className="w-3 h-3 rounded-full bg-amber-500 ring-2 ring-white inline-block" />
+                  <span className="w-3 h-3 rounded-full bg-rose-500 ring-2 ring-white inline-block" />
                 </div>
               </div>
-            </div>
-
-            {/* Semáforo de Preparación */}
-            <div className="bg-slate-50/80 rounded-2xl p-3 border border-slate-200/60 flex items-center gap-3">
-              <div className="flex -space-x-1">
-                <span className="w-3.5 h-3.5 rounded-full bg-emerald-500 ring-2 ring-white inline-block" />
-                <span className="w-3.5 h-3.5 rounded-full bg-amber-500 ring-2 ring-white inline-block" />
-                <span className="w-3.5 h-3.5 rounded-full bg-rose-500 ring-2 ring-white inline-block" />
-              </div>
-              <div>
+              <div className="min-w-0">
                 <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                  Diagnóstico 13m
+                  Estado Tribunal
                 </div>
                 <div className="text-xs font-bold text-slate-700">
-                  <span className="text-emerald-600 font-black">{kpis.green} Listos</span> · <span className="text-amber-600 font-black">{kpis.yellow} Justos</span> · <span className="text-rose-600 font-black">{kpis.red} Riesgo</span>
+                  <span className="text-emerald-600 font-black">{kpis.listosTribunal} Listos</span> · <span className="text-amber-600 font-black">{kpis.enAjuste} Ajustar</span> · <span className="text-rose-600 font-black">{kpis.enRiesgo} Riesgo</span>
                 </div>
               </div>
             </div>
 
-            {/* Calificación Media */}
-            <div className="bg-slate-50/80 rounded-2xl p-3 border border-slate-200/60 flex items-center gap-3">
-              <div className="w-9 h-9 rounded-xl bg-white border border-slate-200/80 flex items-center justify-center text-amber-500 shadow-sm">
-                <Star size={16} />
+            {/* 3. Retención Media de Ebbinghaus */}
+            <div className="bg-slate-50/90 rounded-2xl p-3.5 border border-slate-200/70 flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-white border border-slate-200/80 flex items-center justify-center shadow-sm text-cyan-600">
+                <Brain size={18} strokeWidth={2.2} />
               </div>
-              <div>
+              <div className="min-w-0">
                 <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                  Nota Media
+                  Curva de Ebbinghaus
                 </div>
                 <div className="text-lg font-black text-slate-900">
-                  {kpis.avgGrade !== null ? `${kpis.avgGrade.toFixed(2)}/10` : "Pendiente"}
+                  {kpis.avgRetention !== null ? `${kpis.avgRetention}%` : "—"}
+                  <span className="text-xs font-medium text-slate-500 ml-1">retención</span>
+                </div>
+              </div>
+            </div>
+
+            {/* 4. Tiempo Estimado Total */}
+            <div className="bg-slate-50/90 rounded-2xl p-3.5 border border-slate-200/70 flex items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-white border border-slate-200/80 flex items-center justify-center shadow-sm text-amber-500">
+                <Timer size={18} strokeWidth={2.2} />
+              </div>
+              <div className="min-w-0">
+                <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                  Cante Total Estimado
+                </div>
+                <div className="text-lg font-black text-slate-900">
+                  ~{kpis.totalMinutes}m
+                  <span className="text-xs font-medium text-slate-500 ml-1">({kpis.total} temas)</span>
                 </div>
               </div>
             </div>
@@ -496,13 +535,13 @@ export function PreparadorView() {
                 <Award size={36} className="text-slate-300 mx-auto mb-3" />
                 <h3 className="text-base font-bold text-slate-800">No hay cantes registrados con el preparador todavía</h3>
                 <p className="text-xs text-slate-500 max-w-md mx-auto mt-1 mb-4">
-                  Cuando cantes un tema el Lunes o el Jueves, pulsa en &quot;Anotar Nota del Preparador&quot; en la tarjeta del tema para registrar el feedback y notas.
+                  Cuando cantes un tema el Lunes o el Jueves, pulsa en &quot;Registrar Cante / Nota Preparador&quot; en la tarjeta del tema para registrar el feedback y notas.
                 </p>
                 <button
-                  onClick={() => setActiveDay("jueves")}
+                  onClick={() => setActiveDay(getDefaultPreparadorDay())}
                   className="px-4 py-2 bg-slate-900 text-white rounded-xl text-xs font-bold hover:bg-slate-800 transition-all"
                 >
-                  Ir a preparar la sesión del Jueves
+                  Ir a preparar la sesión activa ({getDefaultPreparadorDay()})
                 </button>
               </div>
             ) : (
@@ -511,8 +550,6 @@ export function PreparadorView() {
                   const topic = topicMap.get(session.topicId) 
                     || initialTopics.find((t) => String(t.number) === String(session.topicId) || sessionMatchesTopic(session, t));
                   const dur = getCantoDuration(session);
-                  const mins = dur.mins;
-                  const secs = dur.secs;
                   const grade = session.cantoGrade ?? session.grade ?? null;
 
                   return (
@@ -528,8 +565,9 @@ export function PreparadorView() {
                           {grade !== null && (
                             <span className={cn(
                               "text-xs font-black px-2.5 py-0.5 rounded-full border",
-                              grade >= 7 ? "bg-emerald-50 text-emerald-700 border-emerald-200" :
-                              grade >= 5 ? "bg-amber-50 text-amber-700 border-amber-200" :
+                              grade >= 8.5 ? "bg-emerald-50 text-emerald-700 border-emerald-200" :
+                              grade >= 7.0 ? "bg-indigo-50 text-indigo-700 border-indigo-200" :
+                              grade >= 5.0 ? "bg-amber-50 text-amber-700 border-amber-200" :
                               "bg-rose-50 text-rose-700 border-rose-200"
                             )}>
                               Nota: {grade.toFixed(1)} / 10
@@ -548,7 +586,7 @@ export function PreparadorView() {
                           </span>
                           <span>·</span>
                           <span className="text-[11px] text-slate-400">
-                            Meta: 13m 00s ({dur.totalSecs > 13 * 60 ? `+${dur.totalSecs - 780}s` : `-${780 - dur.totalSecs}s`})
+                            Meta óptima: 12m 30s ({dur.totalSecs > OPTIMAL_CANTO_SECS ? `+${dur.totalSecs - OPTIMAL_CANTO_SECS}s` : `-${OPTIMAL_CANTO_SECS - dur.totalSecs}s`})
                           </span>
                         </div>
 
@@ -574,14 +612,50 @@ export function PreparadorView() {
               <div>
                 <h2 className="text-lg font-black text-slate-900 font-serif flex items-center gap-2">
                   <span>Temas Asignados para el {activeDay === "lunes" ? "Lunes" : "Jueves"}</span>
-                  <span className="text-xs px-2 py-0.5 bg-slate-200/80 text-slate-700 rounded-lg font-sans font-bold">
+                  <span className="text-xs px-2.5 py-0.5 bg-slate-200/80 text-slate-700 rounded-lg font-sans font-bold">
                     {assignedTopics.length} seleccionados
                   </span>
                 </h2>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  Revisa el semáforo de tiempo (objetivo 13 minutos) y la última nota antes de ir al cante.
+                  Visualiza la nota de preparación del 1 al 10, el cronómetro calibrado a 12:30, la curva del olvido y tus vueltas.
                 </p>
               </div>
+
+              {/* Sorting Filter Selector */}
+              {assignedTopics.length > 0 && (
+                <div className="flex items-center gap-2 self-start sm:self-auto">
+                  <ArrowUpDown size={13} className="text-slate-400" />
+                  <div className="flex bg-slate-200/70 p-1 rounded-xl text-xs font-semibold">
+                    <button
+                      onClick={() => setSortOption("menor_nota")}
+                      className={cn(
+                        "px-2.5 py-1 rounded-lg transition-all",
+                        sortOption === "menor_nota" ? "bg-white text-slate-900 font-bold shadow-xs" : "text-slate-600 hover:text-slate-900"
+                      )}
+                    >
+                      Prioritarios (Menor Nota)
+                    </button>
+                    <button
+                      onClick={() => setSortOption("mayor_nota")}
+                      className={cn(
+                        "px-2.5 py-1 rounded-lg transition-all",
+                        sortOption === "mayor_nota" ? "bg-white text-slate-900 font-bold shadow-xs" : "text-slate-600 hover:text-slate-900"
+                      )}
+                    >
+                      Mejor Preparados
+                    </button>
+                    <button
+                      onClick={() => setSortOption("orden_numero")}
+                      className={cn(
+                        "px-2.5 py-1 rounded-lg transition-all",
+                        sortOption === "orden_numero" ? "bg-white text-slate-900 font-bold shadow-xs" : "text-slate-600 hover:text-slate-900"
+                      )}
+                    >
+                      Por Número
+                    </button>
+                  </div>
+                </div>
+              )}
 
               {assignedTopics.length === 0 && (
                 <button
@@ -601,7 +675,7 @@ export function PreparadorView() {
                   No hay temas asignados para el {activeDay === "lunes" ? "Lunes" : "Jueves"}
                 </h3>
                 <p className="text-xs text-slate-500 max-w-md mx-auto mt-1 mb-5">
-                  Añade los temas que vas a cantar en tu próxima sesión para ver al instante cómo los llevas de tiempo, nota y solidez.
+                  Añade los temas que vas a cantar en tu próxima sesión para ver al instante su nota objetiva (1-10), calibración de tiempo y retención.
                 </p>
                 <div className="flex items-center justify-center gap-3">
                   <button
@@ -621,35 +695,22 @@ export function PreparadorView() {
               </div>
             ) : (
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                {topicsAnalysis.map((item) => {
-                  const { topic, subject, status, statusText, statusAdvice, diffMinsFormatted, hasCanto, lastCantoMins, lastCantoSecs, lastGrade, daysSinceTouch, vueltas } = item;
+                {sortedTopicsAnalysis.map((item) => {
+                  const { topic, subject, evaluation, hasCanto, lastCantoMins, lastCantoSecs, lastGrade, daysSinceTouch, vueltas, reviewsCount } = item;
 
-                  // Status badge colors
-                  const statusConfig = {
-                    green: {
-                      bg: "bg-emerald-500",
-                      badge: "bg-emerald-50 text-emerald-800 border-emerald-200",
-                      border: "border-emerald-200/80 hover:border-emerald-300",
-                      icon: CheckCircle2,
-                      label: "ÓPTIMO PARA CANTE (13 min)"
-                    },
-                    yellow: {
-                      bg: "bg-amber-500",
-                      badge: "bg-amber-50 text-amber-900 border-amber-200",
-                      border: "border-amber-200/80 hover:border-amber-300",
-                      icon: AlertTriangle,
-                      label: "EN OBSERVACIÓN / AJUSTAR"
-                    },
-                    red: {
-                      bg: "bg-rose-500",
-                      badge: "bg-rose-50 text-rose-900 border-rose-200",
-                      border: "border-rose-200/80 hover:border-rose-300",
-                      icon: XCircle,
-                      label: "EN RIESGO PARA EL CANTE"
-                    }
-                  }[status];
+                  // Gauge calculations for the 10:00 to 15:00 scale
+                  // Range: 600s (10m) to 900s (15m) -> 300s window
+                  const minGaugeSecs = 10 * 60; // 600s
+                  const maxGaugeSecs = 15 * 60; // 900s
+                  const clampCantoSecs = Math.max(minGaugeSecs, Math.min(maxGaugeSecs, evaluation.totalCantoSecs));
+                  const cantoGaugePct = ((clampCantoSecs - minGaugeSecs) / (maxGaugeSecs - minGaugeSecs)) * 100;
 
-                  const StatusIcon = statusConfig.icon;
+                  // Target 12:30 pct on gauge: (750 - 600) / 300 = 50%
+                  const optimalGaugePct = 50;
+                  // Min window 11:50 pct: (710 - 600) / 300 = 36.6%
+                  const windowMinGaugePct = ((WINDOW_MIN_SECS - minGaugeSecs) / (maxGaugeSecs - minGaugeSecs)) * 100;
+                  // Max window 13:40 pct: (820 - 600) / 300 = 73.3%
+                  const windowMaxGaugePct = ((WINDOW_MAX_SECS - minGaugeSecs) / (maxGaugeSecs - minGaugeSecs)) * 100;
 
                   return (
                     <motion.div
@@ -660,11 +721,17 @@ export function PreparadorView() {
                       exit={{ opacity: 0, scale: 0.95 }}
                       className={cn(
                         "bg-white rounded-3xl p-6 border shadow-sm transition-all relative overflow-hidden flex flex-col justify-between",
-                        statusConfig.border
+                        evaluation.gradeBorderColor
                       )}
                     >
-                      {/* Top Color Accent Ribbon */}
-                      <div className={cn("absolute top-0 left-0 right-0 h-1.5", statusConfig.bg)} />
+                      {/* Top Master Score Accent Ribbon */}
+                      <div className={cn(
+                        "absolute top-0 left-0 right-0 h-1.5",
+                        evaluation.gradeCategory === "sobresaliente" ? "bg-emerald-500" :
+                        evaluation.gradeCategory === "notable" ? "bg-indigo-600" :
+                        evaluation.gradeCategory === "bien" ? "bg-amber-500" :
+                        evaluation.gradeCategory === "suficiente" ? "bg-orange-500" : "bg-rose-500"
+                      )} />
 
                       <div>
                         {/* Header metadata row */}
@@ -673,19 +740,23 @@ export function PreparadorView() {
                             <span className="text-[10px] font-black uppercase tracking-wider px-2.5 py-1 bg-slate-100 rounded-lg text-slate-700 border border-slate-200/60">
                               {subject?.name.split(" ")[0] || "Bloque"} · Tema {topic.number}
                             </span>
-                            <span className="text-[10px] font-bold text-slate-400">
-                              {vueltas > 0 ? `Vuelta ${vueltas}` : "Sin vuelta"}
+                            <span className="text-[10px] font-bold text-slate-500 bg-slate-50 px-2 py-0.5 rounded-md border border-slate-200/50">
+                              {vueltas > 0 ? `Vuelta ${vueltas}` : "Vuelta 0"} · {reviewsCount} {reviewsCount === 1 ? "sesión" : "sesiones"}
                             </span>
                           </div>
 
                           <div className="flex items-center gap-2">
-                            <span className={cn(
-                              "inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider border",
-                              statusConfig.badge
+                            {/* MASTER SCORE BADGE (1.0 - 10.0) */}
+                            <div className={cn(
+                              "flex items-center gap-1.5 px-3 py-1 rounded-full border shadow-2xs",
+                              evaluation.gradeBadgeClass
                             )}>
-                              <StatusIcon size={12} />
-                              <span>{statusConfig.label}</span>
-                            </span>
+                              <Award size={13} className="shrink-0" />
+                              <span className="text-xs font-black">
+                                {evaluation.overallScore.toFixed(1)}
+                              </span>
+                              <span className="text-[10px] font-bold opacity-75">/ 10</span>
+                            </div>
 
                             <button
                               onClick={() => handleRemoveTopic(topic.id)}
@@ -697,84 +768,167 @@ export function PreparadorView() {
                           </div>
                         </div>
 
-                        {/* Topic Title */}
-                        <h3 
-                          className="text-base font-black font-serif text-slate-900 leading-snug mb-4"
-                          title={topic.fullTitle || topic.title}
-                        >
-                          {topic.title}
-                        </h3>
+                        {/* Topic Title & Sub-score Level */}
+                        <div className="mb-4">
+                          <div className="flex items-baseline justify-between gap-2">
+                            <h3 
+                              className="text-base font-black font-serif text-slate-900 leading-snug"
+                              title={topic.fullTitle || topic.title}
+                            >
+                              {topic.title}
+                            </h3>
+                          </div>
+                          <span className={cn("text-[11px] font-bold", evaluation.gradeTextColor)}>
+                            {evaluation.gradeLabel}
+                          </span>
+                        </div>
 
-                        {/* DIAGNOSTIC BENCHMARK GRID */}
-                        <div className="grid grid-cols-3 gap-2 p-3 bg-slate-50/80 rounded-2xl border border-slate-200/60 mb-4">
-                          {/* 1. Cante Time vs 13m target */}
-                          <div className="flex flex-col items-center justify-center text-center p-1.5">
-                            <span className="text-[9px] font-bold uppercase tracking-wider text-slate-400 mb-0.5">
-                              Último Cante
+                        {/* CRONÓMETRO GAUGE VISUAL (Window 11:50 - 13:40 | Target 12:30) */}
+                        <div className="bg-slate-50/90 rounded-2xl p-3.5 border border-slate-200/70 mb-3.5">
+                          <div className="flex items-center justify-between mb-2">
+                            <div className="flex items-center gap-1.5">
+                              <Timer size={13} className="text-slate-600" />
+                              <span className="text-[10px] font-black uppercase tracking-wider text-slate-700">
+                                Cronómetro Cante
+                              </span>
+                              <span className="text-[10px] font-medium text-slate-400">
+                                (Meta 12:30)
+                              </span>
+                            </div>
+                            <div className="flex items-center gap-1.5">
+                              <span className={cn(
+                                "text-xs font-black",
+                                !hasCanto ? "text-slate-400" :
+                                evaluation.timeZone === "perfect" ? "text-emerald-700 font-extrabold" :
+                                evaluation.timeZone === "in_window" ? "text-indigo-700" :
+                                evaluation.timeZone === "slightly_short" || evaluation.timeZone === "slightly_long" ? "text-amber-700" : "text-rose-600"
+                              )}>
+                                {hasCanto ? `${lastCantoMins}m ${lastCantoSecs.toString().padStart(2, "0")}s` : "Sin cante grabado"}
+                              </span>
+                              {hasCanto && (
+                                <span className={cn(
+                                  "text-[10px] font-black px-1.5 py-0.2 rounded-md",
+                                  evaluation.timeZone === "perfect" ? "bg-emerald-100 text-emerald-800" :
+                                  evaluation.timeZone === "in_window" ? "bg-indigo-100 text-indigo-800" :
+                                  "bg-amber-100 text-amber-800"
+                                )}>
+                                  {evaluation.timeDevianceFormatted}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* Visual Time Track */}
+                          <div className="relative w-full h-3 bg-slate-200/80 rounded-full overflow-hidden my-2.5">
+                            {/* Window zone [11:50, 13:40] */}
+                            <div 
+                              className="absolute top-0 bottom-0 bg-emerald-100/90 border-x border-emerald-400/40"
+                              style={{ 
+                                left: `${windowMinGaugePct}%`, 
+                                width: `${windowMaxGaugePct - windowMinGaugePct}%` 
+                              }}
+                              title="Ventana oficial reglamentaria: 11:50 - 13:40"
+                            />
+                            {/* Perfect line at 12:30 */}
+                            <div 
+                              className="absolute top-0 bottom-0 w-1 bg-indigo-600 z-10"
+                              style={{ left: `${optimalGaugePct}%` }}
+                              title="Tiempo óptimo exacto: 12:30"
+                            />
+                            {/* User's Cante Needle */}
+                            {hasCanto && (
+                              <div 
+                                className="absolute top-0 bottom-0 w-2.5 bg-slate-900 rounded-full shadow-md z-20 -ml-1.25 ring-2 ring-white"
+                                style={{ left: `${cantoGaugePct}%` }}
+                                title={`Tu tiempo registrado: ${lastCantoMins}m ${lastCantoSecs}s`}
+                              />
+                            )}
+                          </div>
+
+                          {/* Gauge scale markers */}
+                          <div className="flex justify-between text-[9px] font-bold text-slate-400 mt-1">
+                            <span>10:00 (Corto)</span>
+                            <span className="text-emerald-600 font-extrabold">11:50 Min</span>
+                            <span className="text-indigo-700 font-black">★ 12:30 Óptimo</span>
+                            <span className="text-emerald-600 font-extrabold">13:40 Max</span>
+                            <span>15:00 (Corte)</span>
+                          </div>
+                        </div>
+
+                        {/* DIAGNOSTIC BENCHMARK GRID (4 PILLARS) */}
+                        <div className="grid grid-cols-3 gap-2 p-3 bg-slate-50/80 rounded-2xl border border-slate-200/60 mb-3.5">
+                          {/* 1. Curva de Ebbinghaus */}
+                          <div className="flex flex-col items-center justify-center text-center p-1">
+                            <span className="text-[9px] font-bold uppercase tracking-wider text-slate-400 mb-0.5 flex items-center gap-0.5">
+                              <Brain size={10} className="text-cyan-600" />
+                              <span>Ebbinghaus</span>
                             </span>
                             <span className={cn(
                               "text-xs font-black",
-                              !hasCanto ? "text-slate-400" :
-                              status === "green" ? "text-emerald-700" :
-                              status === "yellow" ? "text-amber-700" : "text-rose-600"
+                              evaluation.retentionPct >= 85 ? "text-emerald-700" :
+                              evaluation.retentionPct >= 70 ? "text-indigo-700" :
+                              evaluation.retentionPct >= 50 ? "text-amber-700" : "text-rose-600"
                             )}>
-                              {hasCanto ? `${lastCantoMins}m ${lastCantoSecs.toString().padStart(2, "0")}s` : "Sin cante"}
+                              {evaluation.retentionPct}%
                             </span>
                             <span className="text-[9px] font-bold text-slate-400 mt-0.5">
-                              {hasCanto ? diffMinsFormatted : "Meta: 13m 00s"}
+                              {daysSinceTouch === null ? "Sin datos" : daysSinceTouch === 0 ? "Repasado hoy" : daysSinceTouch === 1 ? "Ayer" : `Hace ${daysSinceTouch}d`}
                             </span>
                           </div>
 
-                          {/* 2. Last Grade */}
-                          <div className="flex flex-col items-center justify-center text-center p-1.5 border-x border-slate-200/60">
-                            <span className="text-[9px] font-bold uppercase tracking-wider text-slate-400 mb-0.5">
-                              Última Nota
+                          {/* 2. Last Preparador Grade */}
+                          <div className="flex flex-col items-center justify-center text-center p-1 border-x border-slate-200/60">
+                            <span className="text-[9px] font-bold uppercase tracking-wider text-slate-400 mb-0.5 flex items-center gap-0.5">
+                              <Star size={10} className="text-amber-500" />
+                              <span>Nota Prep.</span>
                             </span>
                             <span className={cn(
                               "text-xs font-black",
                               lastGrade === null ? "text-slate-400" :
-                              lastGrade >= 7 ? "text-emerald-600" :
-                              lastGrade >= 5 ? "text-amber-600" : "text-rose-600"
+                              lastGrade >= 8.5 ? "text-emerald-600" :
+                              lastGrade >= 7.0 ? "text-indigo-600" :
+                              lastGrade >= 5.0 ? "text-amber-600" : "text-rose-600"
                             )}>
-                              {lastGrade !== null ? `${lastGrade.toFixed(1)}/10` : "Sin nota"}
+                              {lastGrade !== null ? `${lastGrade.toFixed(1)}/10` : "Pendiente"}
                             </span>
                             <span className="text-[9px] font-bold text-slate-400 mt-0.5">
                               {lastGrade !== null ? (lastGrade >= 8 ? "Sobresaliente" : lastGrade >= 7 ? "Notable" : lastGrade >= 5 ? "Aprobado" : "Suspenso") : "Sin examen"}
                             </span>
                           </div>
 
-                          {/* 3. Frescura / Último Repaso */}
-                          <div className="flex flex-col items-center justify-center text-center p-1.5">
-                            <span className="text-[9px] font-bold uppercase tracking-wider text-slate-400 mb-0.5">
-                              Frescura
+                          {/* 3. Puntuación Cronómetro */}
+                          <div className="flex flex-col items-center justify-center text-center p-1">
+                            <span className="text-[9px] font-bold uppercase tracking-wider text-slate-400 mb-0.5 flex items-center gap-0.5">
+                              <Clock size={10} className="text-indigo-600" />
+                              <span>Ritmo Cante</span>
                             </span>
                             <span className={cn(
                               "text-xs font-black",
-                              daysSinceTouch === null ? "text-slate-400" :
-                              daysSinceTouch <= 3 ? "text-emerald-600" :
-                              daysSinceTouch <= 7 ? "text-blue-600" : "text-amber-600"
+                              !hasCanto ? "text-slate-400" :
+                              evaluation.timeScore >= 9.0 ? "text-emerald-700" :
+                              evaluation.timeScore >= 7.5 ? "text-indigo-700" :
+                              evaluation.timeScore >= 5.0 ? "text-amber-700" : "text-rose-600"
                             )}>
-                              {daysSinceTouch === null ? "Sin datos" :
-                               daysSinceTouch === 0 ? "Hoy" :
-                               daysSinceTouch === 1 ? "Ayer" : `Hace ${daysSinceTouch}d`}
+                              {hasCanto ? `${evaluation.timeScore.toFixed(1)}/10` : "—"}
                             </span>
                             <span className="text-[9px] font-bold text-slate-400 mt-0.5">
-                              {daysSinceTouch !== null && daysSinceTouch > 7 ? "Conviene repasar" : "Memoria fresca"}
+                              {hasCanto ? evaluation.timeDevianceFormatted : "Cronometrar"}
                             </span>
                           </div>
                         </div>
 
-                        {/* Actionable Advice Pill */}
+                        {/* ACTIONABLE EXECUTIVE ADVICE PILL (How to reach 10/10) */}
                         <div className={cn(
-                          "p-3 rounded-xl border text-xs mb-4 flex items-start gap-2",
-                          status === "green" ? "bg-emerald-50/70 border-emerald-200/60 text-emerald-900" :
-                          status === "yellow" ? "bg-amber-50/70 border-amber-200/60 text-amber-900" :
-                          "bg-rose-50/70 border-rose-200/60 text-rose-900"
+                          "p-3 rounded-xl border text-xs mb-3 flex items-start gap-2",
+                          evaluation.overallScore >= 8.5 ? "bg-emerald-50/70 border-emerald-200/60 text-emerald-950" :
+                          evaluation.overallScore >= 7.0 ? "bg-indigo-50/70 border-indigo-200/60 text-indigo-950" :
+                          evaluation.overallScore >= 5.0 ? "bg-amber-50/70 border-amber-200/60 text-amber-950" :
+                          "bg-rose-50/70 border-rose-200/60 text-rose-950"
                         )}>
-                          <StatusIcon size={14} className="shrink-0 mt-0.5" />
+                          <Sparkles size={14} className="shrink-0 mt-0.5 text-indigo-600" />
                           <div className="leading-relaxed">
-                            <strong className="font-black mr-1">{statusText}:</strong>
-                            <span>{statusAdvice}</span>
+                            <strong className="font-black mr-1">Plan para el 10:</strong>
+                            <span>{evaluation.actionPlan}</span>
                           </div>
                         </div>
                       </div>
@@ -786,8 +940,8 @@ export function PreparadorView() {
                           onClick={() => {
                             setFeedbackTopic(topic);
                             setPrepGrade(lastGrade || 7.5);
-                            setPrepMinutes(lastCantoMins || 13);
-                            setPrepSeconds(lastCantoSecs || 0);
+                            setPrepMinutes(lastCantoMins || 12);
+                            setPrepSeconds(lastCantoSecs || 30);
                           }}
                           className="w-full px-3.5 py-2.5 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold transition-all shadow-sm flex items-center justify-center gap-2 active:scale-95"
                         >
@@ -941,8 +1095,6 @@ export function PreparadorView() {
         )}
       </AnimatePresence>
 
-
-
       {/* RECORD PREPARADOR FEEDBACK MODAL */}
       <AnimatePresence>
         {feedbackTopic && (
@@ -1025,8 +1177,9 @@ export function PreparadorView() {
                       />
                     </div>
                   </div>
-                  <div className="text-[10px] text-slate-400 font-medium mt-2">
-                    Meta de examen oral: 13 minutos clavados.
+                  <div className="text-[10px] text-slate-400 font-medium mt-2 flex items-center justify-between">
+                    <span>Meta óptima: 12m 30s.</span>
+                    <span className="text-indigo-600 font-bold">Ventana: 11:50 - 13:40</span>
                   </div>
                 </div>
 
@@ -1039,7 +1192,7 @@ export function PreparadorView() {
                     rows={3}
                     value={prepNotes}
                     onChange={(e) => setPrepNotes(e.target.value)}
-                    placeholder="Ej: Faltó hilar el art. 53.2 de la CE, buena dicción y postura, recortar epígrafe 3 para entrar en 13 minutos..."
+                    placeholder="Ej: Faltó hilar el art. 53.2 de la CE, buena dicción y postura, recortar epígrafe 3 para entrar en 12:30 minutos..."
                     className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-slate-900/10 text-slate-800"
                   />
                 </div>
