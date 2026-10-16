@@ -1,0 +1,168 @@
+[
+  {
+    "id": "af_1791879050490_3bjyt",
+    "receivedAt": "2026-10-13T08:10:50.490Z",
+    "date": "2026-10-12",
+    "source": "aerofocus_pro",
+    "flightId": "1728731920000",
+    "totalFlightEffectiveMinutes": 90,
+    "totalFlightEffectiveHours": 1.5,
+    "status": "pending",
+    "topics": [
+      {
+        "resolvedTopicId": "civil-12",
+        "resolvedSubjectId": "civil",
+        "resolvedTopicNumber": 12,
+        "resolvedTopicTitle": "Tema 12 - Las personas jurídicas: concepto, naturaleza y clases",
+        "modality": "repaso",
+        "effectiveHours": 1.5,
+        "effectiveMinutes": 90,
+        "original": {
+          "topicId": "CIV_T12",
+          "topicNumber": 12,
+          "topicTitle": "Tema 12 - Fuentes del Derecho",
+          "category": "Derecho Civil",
+          "modality": "repaso",
+          "effectiveHours": 1.5,
+          "effectiveMinutes": 90,
+          "grossMinutes": 90
+        }
+      }
+    ],
+    "summary": {
+      "estudioHours": 0,
+      "repasoHours": 1.5,
+      "refrescoHours": 0,
+      "totalHours": 1.5
+    }
+  },
+  {
+    "id": "af_1791879062793_0gj8m",
+    "receivedAt": "2026-10-13T08:11:02.793Z",
+    "date": "2026-10-12",
+    "source": "aerofocus_pro",
+    "flightId": "1728731920001",
+    "totalFlightEffectiveMinutes": 60,
+    "totalFlightEffectiveHours": 1,
+    "status": "pending",
+    "topics": [
+      {
+        "resolvedTopicId": "penal-12",
+        "resolvedSubjectId": "penal",
+        "resolvedTopicNumber": 12,
+        "resolvedTopicTitle": "Tema 12 - Circunstancias agravantes",
+        "modality": "refresco",
+        "effectiveHours": 1,
+        "effectiveMinutes": 60,
+        "original": {
+          "topicNumber": 12,
+          "category": "Derecho Penal",
+          "modality": "refresco",
+          "effectiveHours": 1,
+          "effectiveMinutes": 60
+        }
+      }
+    ],
+    "summary": {
+      "estudioHours": 0,
+      "repasoHours": 0,
+      "refrescoHours": 1,
+      "totalHours": 1
+    }
+  },
+  {
+    "id": "af_test_1791879069960",
+    "receivedAt": "2026-10-13T08:11:09.960Z",
+    "date": "2026-10-13",
+    "source": "aerofocus_pro",
+    "flightId": "1791879069960",
+    "totalFlightEffectiveMinutes": 90,
+    "totalFlightEffectiveHours": 1.5,
+    "status": "pending",
+    "topics": [
+      {
+        "resolvedTopicId": "civil-12",
+        "resolvedSubjectId": "civil",
+        "resolvedTopicNumber": 12,
+        "resolvedTopicTitle": "Tema 12 - Las personas jurídicas: concepto, naturaleza y clases",
+        "modality": "repaso",
+        "effectiveHours": 1.5,
+        "effectiveMinutes": 90,
+        "original": {
+          "topicId": "CIV_T12",
+          "topicNumber": 12,
+          "topicTitle": "Tema 12 - Fuentes del Derecho",
+          "category": "Derecho Civil",
+          "modality": "repaso",
+          "effectiveHours": 1.5,
+          "effectiveMinutes": 90,
+          "grossMinutes": 90
+        }
+      }
+    ],
+    "summary": {
+      "estudioHours": 0,
+      "repasoHours": 1.5,
+      "refrescoHours": 0,
+      "totalHours": 1.5
+    }
+  },
+  {
+    "id": "af_1791918955644_ts03c",
+    "receivedAt": "2026-10-13T19:15:55.644Z",
+    "date": "2026-10-13",
+    "source": "aerofocus_pro",
+    "flightId": "FLIGHT_TEST_AERO_99",
+    "totalFlightEffectiveMinutes": 150,
+    "totalFlightEffectiveHours": 2.5,
+    "status": "pending",
+    "topics": [
+      {
+        "resolvedTopicId": "civil-12",
+        "resolvedSubjectId": "civil",
+        "resolvedTopicNumber": 12,
+        "resolvedTopicTitle": "Tema 12 - Las personas jurídicas: concepto, naturaleza y clases",
+        "modality": "repaso",
+        "effectiveHours": 1.5,
+        "effectiveMinutes": 90,
+        "difficulty": 6,
+        "cantoType": "solo",
+        "notes": "Repaso profundo de personas jurídicas",
+        "original": {
+          "topicId": "CIV_T12",
+          "modality": "repaso",
+          "effectiveMinutes": 90,
+          "category": "Derecho Civil",
+          "difficulty": 6,
+          "notes": "Repaso profundo de personas jurídicas"
+        }
+      },
+      {
+        "resolvedTopicId": "penal-5",
+        "resolvedSubjectId": "penal",
+        "resolvedTopicNumber": 5,
+        "resolvedTopicTitle": "Tema 5 - El delito imprudente",
+        "modality": "refresco",
+        "effectiveHours": 1,
+        "effectiveMinutes": 60,
+        "difficulty": 4,
+        "cantoType": "solo",
+        "notes": "Refresco diario día 2",
+        "original": {
+          "topicId": "PEN_T5",
+          "modality": "refresco",
+          "effectiveMinutes": 60,
+          "category": "Penal",
+          "difficulty": 4,
+          "notes": "Refresco diario día 2"
+        }
+      }
+    ],
+    "summary": {
+      "estudioHours": 0,
+      "repasoHours": 1.5,
+      "refrescoHours": 1,
+      "totalHours": 2.5
+    }
+  }
+]

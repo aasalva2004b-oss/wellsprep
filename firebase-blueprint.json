@@ -1,0 +1,132 @@
+{
+  "entities": {
+    "TopicProgress": {
+      "title": "Topic Progress",
+      "description": "User's progress metadata for a specific topic",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "topicId": { "type": "string" },
+        "pages": { "type": "number" },
+        "difficulty": { "type": "number" },
+        "studyTimeHours": { "type": "number" },
+        "firstStudyDate": { "type": "string" },
+        "mejorTiempoCantoMinutos": { "type": "number" },
+        "mejorTiempoCantoSegundos": { "type": "number" },
+        "notas": { "type": "string" },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "vueltas": { "type": "number" },
+        "lastReviewDate": { "type": "string" },
+        "nextReviewDate": { "type": "string" },
+        "customTitle": { "type": "string" },
+        "isCustom": { "type": "boolean" },
+        "subjectId": { "type": "string" },
+        "isDeleted": { "type": "boolean" },
+        "estudioHours": { "type": "number" },
+        "repasoHours": { "type": "number" },
+        "refrescoHours": { "type": "number" },
+        "pagesRead": { "type": "number" },
+        "numeroPalabras": { "type": "number" },
+        "epigrafes": { "type": "number" },
+        "difficultySum": { "type": "number" },
+        "difficultyCount": { "type": "number" },
+        "srsEasinessFactor": { "type": "number" },
+        "srsInterval": { "type": "number" },
+        "srsRepetitions": { "type": "number" }
+      },
+      "required": ["userId", "topicId", "updatedAt"]
+    },
+    "StudySession": {
+      "title": "Study Session",
+      "description": "A single study or review session for a topic",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "topicId": { "type": "string" },
+        "date": { "type": "string" },
+        "durationMinutes": { "type": "number" },
+        "difficulty": { "type": "number" },
+        "type": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "source": { "type": "string" },
+        "flightId": { "type": "string" },
+        "effectiveHours": { "type": "number" },
+        "cantoGrade": { "type": "number" },
+        "cantoSeconds": { "type": "number" },
+        "cantoType": { "type": "string" },
+        "mistakes": { "type": "string" },
+        "notes": { "type": "string" },
+        "completesVuelta": { "type": "boolean" },
+        "durationReal": { "type": "number" },
+        "dificultadReal": { "type": "number" },
+        "sourceFlightId": { "type": "string" },
+        "modality": { "type": "string" },
+        "topicTitle": { "type": "string" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "topicId", "date"]
+    },
+    "WeeklyPlan": {
+      "title": "Weekly Plan",
+      "description": "A generated weekly plan for topics",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "startDate": { "type": "string" },
+        "endDate": { "type": "string" },
+        "plannedTopics": {
+          "type": "array"
+        },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "startDate", "endDate"]
+    },
+    "UserSettings": {
+      "title": "User Settings",
+      "description": "User preferences and schedule",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "scheduleStr": { "type": "string" },
+        "defaultSubject": { "type": "string" },
+        "activeSubjects": { "type": "array" },
+        "targetDate": { "type": "string" },
+        "importedCsv": { "type": "string" },
+        "webhookToken": { "type": "string" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId"]
+    },
+    "PreparadorSchedule": {
+      "title": "Preparador Schedule",
+      "description": "Weekly preparation topics for Monday and Thursday oral exam sessions",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "lunes": { "type": "array" },
+        "jueves": { "type": "array" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "lunes", "jueves"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}/progress/{progressId}": {
+      "schema": { "$ref": "TopicProgress" },
+      "description": "User progress for individual topics."
+    },
+    "/users/{userId}/sessions/{sessionId}": {
+      "schema": { "$ref": "StudySession" },
+      "description": "Logs of all study sessions."
+    },
+    "/users/{userId}/plans/{planId}": {
+      "schema": { "$ref": "WeeklyPlan" },
+      "description": "Weekly generated study plans."
+    },
+    "/users/{userId}/settings/{settingId}": {
+      "schema": { "$ref": "UserSettings" },
+      "description": "User global settings"
+    }
+  }
+}

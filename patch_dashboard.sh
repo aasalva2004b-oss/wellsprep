@@ -1,0 +1,1 @@
+sed -i 's|import { useMemo } from "react";|import { useMemo, useState, useEffect } from "react";\nimport { collection, query, where, onSnapshot } from "firebase/firestore";\nimport { db } from "../lib/firebase";|g' src/components/DashboardView.tsx

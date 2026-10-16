@@ -1,0 +1,115 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    
+    function isOwner(userId) {
+      return isSignedIn() && (
+        request.auth.uid == userId ||
+        (request.auth.token.email != null && request.auth.token.email == userId)
+      );
+    }
+
+    function isDocOwner() {
+      return isSignedIn() && (
+        resource == null ||
+        !('userId' in resource.data) ||
+        resource.data.userId == request.auth.uid ||
+        resource.data.userId == null ||
+        (resource.data.uid != null && resource.data.uid == request.auth.uid) ||
+        (resource.data.user_id != null && resource.data.user_id == request.auth.uid) ||
+        (request.auth.token.email != null && (
+          resource.data.userId == request.auth.token.email ||
+          resource.data.userEmail == request.auth.token.email ||
+          resource.data.email == request.auth.token.email
+        ))
+      );
+    }
+
+    match /test/{docId} {
+      allow get: if true;
+    }
+
+    // Main user partition for Wellsprep
+    match /users/{userId} {
+      allow read, write: if isOwner(userId);
+
+      match /{subcollection=**} {
+        allow read, write: if isOwner(userId);
+      }
+    }
+
+    // Legacy collections support for older versions / cross-database recovery
+    match /progress/{progressId} {
+      allow read, write: if isSignedIn() && (
+        isDocOwner() ||
+        request.resource.data.userId == request.auth.uid ||
+        (request.auth.token.email != null && request.resource.data.userId == request.auth.token.email)
+      );
+    }
+    
+    match /sessions/{sessionId} {
+      allow read, write: if isSignedIn() && (
+        isDocOwner() ||
+        request.resource.data.userId == request.auth.uid ||
+        (request.auth.token.email != null && request.resource.data.userId == request.auth.token.email)
+      );
+    }
+    
+    match /study_sessions/{sessionId} {
+      allow read, write: if isSignedIn() && (
+        isDocOwner() ||
+        request.resource.data.userId == request.auth.uid ||
+        (request.auth.token.email != null && request.resource.data.userId == request.auth.token.email)
+      );
+    }
+
+    match /cante_sessions/{sessionId} {
+      allow read, write: if isSignedIn() && (
+        isDocOwner() ||
+        request.resource.data.userId == request.auth.uid ||
+        (request.auth.token.email != null && request.resource.data.userId == request.auth.token.email)
+      );
+    }
+
+    match /cantos/{sessionId} {
+      allow read, write: if isSignedIn() && (
+        isDocOwner() ||
+        request.resource.data.userId == request.auth.uid ||
+        (request.auth.token.email != null && request.resource.data.userId == request.auth.token.email)
+      );
+    }
+
+    match /cantes/{sessionId} {
+      allow read, write: if isSignedIn() && (
+        isDocOwner() ||
+        request.resource.data.userId == request.auth.uid ||
+        (request.auth.token.email != null && request.resource.data.userId == request.auth.token.email)
+      );
+    }
+
+    match /user_sessions/{sessionId} {
+      allow read, write: if isSignedIn() && (
+        isDocOwner() ||
+        request.resource.data.userId == request.auth.uid ||
+        (request.auth.token.email != null && request.resource.data.userId == request.auth.token.email)
+      );
+    }
+
+    match /user_settings/{docId} {
+      allow read, write: if isSignedIn() && (
+        isDocOwner() ||
+        docId == request.auth.uid ||
+        (request.auth.token.email != null && docId == request.auth.token.email)
+      );
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

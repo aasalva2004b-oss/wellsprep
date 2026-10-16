@@ -1,0 +1,275 @@
+import { useState, useMemo } from "react";
+import { Topic } from "../types";
+
+import { LineChart as RechartsLineChart, Line, AreaChart, Area, BarChart, Bar, Cell, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, ComposedChart, ReferenceLine, Radar, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, Scatter, ScatterChart, ZAxis } from "recharts";
+import { getLocalDateString } from "../lib/utils";
+
+import { BrainCircuit, Target, TrendingUp, AlertTriangle, CheckCircle2, Flame, Calendar, Clock, BookOpen, AlertOctagon, Zap, Layers, ChevronRight, Activity } from "lucide-react";
+import { cn } from "../lib/utils";
+import { calculateNextSRSState } from "../lib/srs";
+import { useFirebase } from "../lib/FirebaseProvider";
+import { initialTopics } from "../data/initialData";
+
+export function DashboardView() {
+    const { userProgress } = useFirebase();
+    const topics = initialTopics;
+    
+    // --- ADVANCED ANALYTICS ENGINE ---
+    const allSessions = useMemo(() => {
+        let sessions: { date: string, duration: number, type: string, topicId: string, grade?: number, difficulty?: number }[] = [];
+        Object.entries(userProgress).forEach(([topicId, prog]) => {
+           if ((prog as any).history) {
+               sessions.push(...(prog as any).history.map((h: any) => ({ ...h, topicId })));
+           }
+        });
+        return sessions.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+    }, [userProgress]);
+
+    // 1. Consistency Heatmap (Last 12 weeks)
+    const heatmapData = useMemo(() => {
+        const today = new Date();
+        const days = [];
+        for (let i = 83; i >= 0; i--) {
+            const d = new Date(today);
+            d.setDate(d.getDate() - i);
+            const dateStr = d.toISOString().split('T')[0];
+            const daySessions = allSessions.filter(s => s.date === dateStr);
+            const totalDuration = daySessions.reduce((acc, s) => acc + (s.duration || 0), 0);
+            days.push({ date: dateStr, duration: totalDuration, count: daySessions.length });
+        }
+        return days;
+    }, [allSessions]);
+
+    const currentStreak = useMemo(() => {
+        let streak = 0;
+        const today = new Date();
+        today.setHours(0,0,0,0);
+        
+        for (let i = 0; i < 300; i++) { // check up to 300 days back
+            const d = new Date(today);
+            d.setDate(d.getDate() - i);
+            const dateStr = d.toISOString().split('T')[0];
+            if (allSessions.some(s => s.date === dateStr)) {
+                streak++;
+            } else if (i > 0) { // allow skipping today if haven't studied yet, but if missed yesterday, break
+                break;
+            }
+        }
+        return streak;
+    }, [allSessions]);
+
+    // 2. Smart Queue (Agenda)
+    const smartQueue = useMemo(() => {
+        const queue: { topic: Topic, reason: string, urgency: number, nextDate: string }[] = [];
+        const today = new Date().getTime();
+
+        topics.forEach(t => {
+            const prog = userProgress[t.id];
+            if (!prog || !prog.firstStudyDate) return;
+
+            const srsState = {
+                easinessFactor: prog.srsEasinessFactor || 2.5,
+                interval: prog.srsInterval || 0,
+                repetitions: prog.srsRepetitions || 0
+            };
+            const nextDateStr = calculateNextSRSState(prog.difficulty || 5, srsState, prog.lastReviewDate).nextReviewDate;
+            const nextDate = new Date(nextDateStr).getTime();
+            
+            const diffDays = (nextDate - today) / (1000 * 3600 * 24);
+            
+            if (diffDays <= 1) {
+                queue.push({
+                    topic: t,
+                    reason: diffDays < -3 ? "Olvido Crítico (Atrasado)" : "Repaso Programado",
+                    urgency: diffDays < -3 ? 3 : diffDays <= 0 ? 2 : 1,
+                    nextDate: nextDateStr
+                });
+            }
+        });
+
+        return queue.sort((a, b) => b.urgency - a.urgency);
+    }, [topics, userProgress]);
+
+
+    // 5. Forecast 14 Days
+    const forecastData = useMemo(() => {
+        const today = new Date();
+        today.setHours(0,0,0,0);
+        
+        const days = Array.from({ length: 14 }).map((_, i) => {
+            const d = new Date(today);
+            d.setDate(d.getDate() + i);
+            return {
+                date: d,
+                dateStr: getLocalDateString(d),
+                label: i === 0 ? "Hoy" : i === 1 ? "Mañ" : d.toLocaleDateString("es-ES", { weekday: 'short' }),
+                count: 0
+            };
+        });
+        
+        Object.values(userProgress).forEach((prog: any) => {
+            if(prog?.lastReviewDate) {
+               const srsState = {
+                  easinessFactor: prog.srsEasinessFactor || 2.5,
+                  interval: prog.srsInterval || 0,
+                  repetitions: prog.srsRepetitions || 0
+               };
+               const nextDate = calculateNextSRSState(prog.difficulty || 5, srsState, prog.lastReviewDate).nextReviewDate;
+               
+               const dayObj = days.find(d => d.dateStr === nextDate);
+               if(dayObj) {
+                   dayObj.count++;
+               } else if (new Date(nextDate).getTime() < today.getTime()) {
+                   // Overdue topics count for today
+                   days[0].count++;
+               }
+            }
+        });
+        
+        return days;
+    }, [userProgress]);
+
+
+    // 3. Burn-up (Cumulative topics studied)
+    const cumulativeProgress = useMemo(() => {
+        const dates = allSessions.filter(s => s.type === "estudio_inicial").map(s => s.date).sort();
+        if (dates.length === 0) return [];
+        
+        const start = new Date(dates[0]);
+        const end = new Date();
+        const data = [];
+        let accumulated = 0;
+
+        for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 7)) {
+            const dStr = d.toISOString().split('T')[0];
+            accumulated = dates.filter(date => date <= dStr).length;
+            data.push({
+                date: dStr.slice(5), // MM-DD
+                estudiados: accumulated,
+                objetivo: Math.min(topics.length, accumulated + 2) // Fake dynamic target for visual baseline
+            });
+        }
+        return data;
+    }, [allSessions, topics]);
+
+    // 4. Domain Radar
+    const radarData = useMemo(() => {
+        const blocks: Record<string, { total: number, studied: number, score: number }> = {};
+        topics.forEach(t => {
+            if (!blocks[t.subjectId]) blocks[t.subjectId] = { total: 0, studied: 0, score: 0 };
+            blocks[t.subjectId].total++;
+            const p = userProgress[t.id];
+            if (p && p.firstStudyDate) {
+                blocks[t.subjectId].studied++;
+                let s = 5;
+                if (p.difficulty) s += (5 - p.difficulty/2); // inverted difficulty
+                if (p.srsRepetitions) s += p.srsRepetitions * 0.5;
+                blocks[t.subjectId].score += Math.min(10, s);
+            }
+        });
+
+        return Object.entries(blocks).map(([name, data]) => ({
+            materia: name.length > 15 ? name.substring(0, 15) + "..." : name,
+            dominio: data.studied > 0 ? (data.score / data.studied).toFixed(1) : 0,
+            cobertura: ((data.studied / data.total) * 10).toFixed(1)
+        }));
+    }, [topics, userProgress]);
+
+    // Global Vitals
+    const totalTopicsStudied = topics.filter(t => userProgress[t.id]?.firstStudyDate).length;
+    const globalCompletion = (totalTopicsStudied / topics.length) * 100;
+    const totalTimeHours = allSessions.reduce((acc, s) => acc + (s.duration || 0), 0) / 60;
+    
+    // Recent Cantos Performance (Last 10)
+    const recentCantos = allSessions.filter(s => (s.type === 'canto' || s.type === 'simulacro') && s.grade).slice(-10);
+    const avgRecentCanto = recentCantos.length > 0 ? (recentCantos.reduce((a, b) => a + (b.grade || 0), 0) / recentCantos.length) : 0;
+
+    return (
+        <div className="w-full h-full p-4 sm:p-6 lg:p-8 bg-[#F5F5F7] overflow-y-auto no-scrollbar">
+            <div className="max-w-[100rem] mx-auto space-y-6 lg:space-y-8">
+                
+                {/* HERO HEADER & GLOBAL VITALS */}
+                <div className="flex flex-col lg:flex-row justify-between items-start lg:items-end gap-6 mb-2">
+                    <div>
+                        <h1 className="text-3xl lg:text-4xl font-black text-slate-900 tracking-tight font-serif">
+                            Centro de Comando
+                        </h1>
+                        <p className="text-slate-500 font-medium mt-1 flex items-center gap-2">
+                            <Activity size={16} className="text-indigo-500" />
+                            Telemetría en tiempo real de tu oposición
+                        </p>
+                    </div>
+                </div>
+
+                {/* KPI BENTO GRID */}
+                <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 lg:gap-6">
+                    {/* Consistencia */}
+                    <div className="bg-white/70 backdrop-blur-2xl rounded-[2rem] p-6 lg:p-7 shadow-[0_8px_30px_rgb(0,0,0,0.04)] ring-1 ring-slate-900/5 flex flex-col relative overflow-hidden group hover:shadow-[0_8px_30px_rgb(0,0,0,0.08)] hover:-translate-y-1 transition-all duration-300">
+                        <div className="absolute -right-10 -top-10 w-32 h-32 bg-emerald-500/10 rounded-full group-hover:scale-150 transition-transform duration-700 blur-3xl pointer-events-none"></div>
+                        <div className="flex items-center gap-3 mb-6 relative z-10">
+                            <div className="bg-emerald-50 text-emerald-500 p-2.5 rounded-[1rem] ring-1 ring-emerald-500/10"><Flame size={20} strokeWidth={2.5}/></div>
+                            <span className="text-[11px] font-black text-slate-400 uppercase tracking-[0.15em]">Consistencia</span>
+                        </div>
+                        <div className="mt-auto relative z-10">
+                            <div className="flex items-baseline gap-1.5">
+                                <h3 className="text-4xl lg:text-5xl font-black text-slate-900 tracking-tighter">{currentStreak}</h3>
+                                <span className="text-lg text-slate-400 font-bold tracking-tight">días</span>
+                            </div>
+                            <p className="text-[13px] font-bold text-emerald-500 mt-2 flex items-center gap-1.5"><TrendingUp size={14} strokeWidth={2.5}/> Racha activa</p>
+                        </div>
+                    </div>
+
+                    {/* Cobertura */}
+                    <div className="bg-white/70 backdrop-blur-2xl rounded-[2rem] p-6 lg:p-7 shadow-[0_8px_30px_rgb(0,0,0,0.04)] ring-1 ring-slate-900/5 flex flex-col relative overflow-hidden group hover:shadow-[0_8px_30px_rgb(0,0,0,0.08)] hover:-translate-y-1 transition-all duration-300">
+                        <div className="absolute -right-10 -top-10 w-32 h-32 bg-indigo-500/10 rounded-full group-hover:scale-150 transition-transform duration-700 blur-3xl pointer-events-none"></div>
+                        <div className="flex items-center gap-3 mb-6 relative z-10">
+                            <div className="bg-indigo-50 text-indigo-500 p-2.5 rounded-[1rem] ring-1 ring-indigo-500/10"><Layers size={20} strokeWidth={2.5}/></div>
+                            <span className="text-[11px] font-black text-slate-400 uppercase tracking-[0.15em]">Cobertura</span>
+                        </div>
+                        <div className="mt-auto relative z-10">
+                            <div className="flex items-baseline gap-1.5">
+                                <h3 className="text-4xl lg:text-5xl font-black text-slate-900 tracking-tighter">{totalTopicsStudied}</h3>
+                                <span className="text-lg text-slate-400 font-bold tracking-tight">/ {topics.length}</span>
+                            </div>
+                            <div className="w-full h-1.5 bg-slate-100 rounded-full mt-3 overflow-hidden shadow-inner">
+                                <div className="h-full bg-indigo-500 rounded-full shadow-[0_0_10px_rgba(99,102,241,0.5)] transition-all duration-1000" style={{ width: `${globalCompletion}%`}}></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Horas de Vuelo */}
+                    <div className="bg-white/70 backdrop-blur-2xl rounded-[2rem] p-6 lg:p-7 shadow-[0_8px_30px_rgb(0,0,0,0.04)] ring-1 ring-slate-900/5 flex flex-col relative overflow-hidden group hover:shadow-[0_8px_30px_rgb(0,0,0,0.08)] hover:-translate-y-1 transition-all duration-300">
+                        <div className="absolute -right-10 -top-10 w-32 h-32 bg-blue-500/10 rounded-full group-hover:scale-150 transition-transform duration-700 blur-3xl pointer-events-none"></div>
+                        <div className="flex items-center gap-3 mb-6 relative z-10">
+                            <div className="bg-blue-50 text-blue-500 p-2.5 rounded-[1rem] ring-1 ring-blue-500/10"><Clock size={20} strokeWidth={2.5}/></div>
+                            <span className="text-[11px] font-black text-slate-400 uppercase tracking-[0.15em]">Horas de Vuelo</span>
+                        </div>
+                        <div className="mt-auto relative z-10">
+                            <div className="flex items-baseline gap-1">
+                                <h3 className="text-4xl lg:text-5xl font-black text-slate-900 tracking-tighter">{Math.floor(totalTimeHours)}</h3>
+                                <span className="text-lg text-slate-400 font-bold tracking-tight">h</span>
+                                <h3 className="text-4xl lg:text-5xl font-black text-slate-900 tracking-tighter ml-1">{Math.round((totalTimeHours % 1) * 60)}</h3>
+                                <span className="text-lg text-slate-400 font-bold tracking-tight">m</span>
+                            </div>
+                            <p className="text-[13px] font-bold text-slate-400 mt-2 flex items-center gap-1.5">Tiempo de estudio efectivo</p>
+                        </div>
+                    </div>
+
+                    {/* Media Cantos */}
+                    <div className="bg-white/70 backdrop-blur-2xl rounded-[2rem] p-6 lg:p-7 shadow-[0_8px_30px_rgb(0,0,0,0.04)] ring-1 ring-slate-900/5 flex flex-col relative overflow-hidden group hover:shadow-[0_8px_30px_rgb(0,0,0,0.08)] hover:-translate-y-1 transition-all duration-300">
+                        <div className="absolute -right-10 -top-10 w-32 h-32 bg-amber-500/10 rounded-full group-hover:scale-150 transition-transform duration-700 blur-3xl pointer-events-none"></div>
+                        <div className="flex items-center gap-3 mb-6 relative z-10">
+                            <div className="bg-amber-50 text-amber-500 p-2.5 rounded-[1rem] ring-1 ring-amber-500/10"><Mic size={20} strokeWidth={2.5}/></div>
+                            <span className="text-[11px] font-black text-slate-400 uppercase tracking-[0.15em]">Media Cantos</span>
+                        </div>
+                        <div className="mt-auto relative z-10">
+                            <div className="flex items-baseline gap-1.5">
+                                <h3 className="text-4xl lg:text-5xl font-black text-slate-900 tracking-tighter">{avgRecentCanto > 0 ? avgRecentCanto.toFixed(1) : '-'}</h3>
+                                <span className="text-lg text-slate-400 font-bold tracking-tight">/ 10</span>
+                            </div>
+                            <p className="text-[13px] font-bold text-slate-400 mt-2 flex items-center gap-1.5">Últimos 10 simulacros</p>
+                        </div>
+                    </div>
+                </div>
+                
+                

@@ -1,0 +1,8 @@
+{
+  "name": "Remix OpoTracker Judicatura",
+  "description": "App intuitiva para organizar el estudio de la oposición de judicatura basado en el Método de Wells. Rastrea metadata como fechas de repaso, tiempo de canto, dificultad y tiempo de estudio para más de 300 temas.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
