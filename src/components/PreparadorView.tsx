@@ -119,6 +119,7 @@ export function PreparadorView() {
   const [prepMinutes, setPrepMinutes] = useState<number>(12);
   const [prepSeconds, setPrepSeconds] = useState<number>(30);
   const [prepNotes, setPrepNotes] = useState("");
+  const [isSavingFeedback, setIsSavingFeedback] = useState(false);
 
   // Topic lookup map
   const topicMap = useMemo(() => {
@@ -293,10 +294,11 @@ export function PreparadorView() {
     toast.success("Temas cargados para el Jueves: 3, 16 y 17 de Constitucional");
   };
 
-  // Save preparador feedback / cante session
+  // Save preparador feedback / cante session with double-submit guard
   const handleSavePreparadorFeedback = async () => {
-    if (!feedbackTopic) return;
+    if (!feedbackTopic || isSavingFeedback) return;
     try {
+      setIsSavingFeedback(true);
       await addStudySession(
         feedbackTopic.id,
         prepMinutes,
@@ -314,9 +316,11 @@ export function PreparadorView() {
       toast.success(`Evaluación del preparador guardada (Nota ${prepGrade.toFixed(1)})`);
       setFeedbackTopic(null);
       setPrepNotes("");
-    } catch (e) {
+    } catch (e: any) {
       console.error(e);
-      toast.error("Error al registrar el feedback del preparador");
+      toast.error("Error al registrar el feedback del preparador: " + (e?.message || e));
+    } finally {
+      setIsSavingFeedback(false);
     }
   };
 
@@ -332,9 +336,19 @@ export function PreparadorView() {
     );
   }, [pickerSubjectId, pickerSearch]);
 
-  // All historical sessions with preparador / cantos
+  // All historical sessions with preparador / cantos (with deduplication safeguard)
   const preparadorSessions = useMemo(() => {
-    return recentSessions.filter(isCantoSession);
+    const raw = recentSessions.filter(isCantoSession);
+    const unique: any[] = [];
+    const seen = new Set<string>();
+    for (const s of raw) {
+      const key = `${s.topicId}-${s.date}-${s.durationMinutes || s.duration || 0}-${s.cantoSeconds || 0}-${s.cantoGrade ?? s.grade ?? ''}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        unique.push(s);
+      }
+    }
+    return unique;
   }, [recentSessions]);
 
   return (
@@ -1197,13 +1211,17 @@ export function PreparadorView() {
                   />
                 </div>
 
-                {/* Botón guardar */}
+                {/* Botón guardar con protección anti-doble envío */}
                 <button
                   onClick={handleSavePreparadorFeedback}
-                  className="w-full py-3 bg-slate-900 hover:bg-slate-800 text-white rounded-2xl text-xs font-black shadow-md transition-all flex items-center justify-center gap-2 active:scale-95"
+                  disabled={isSavingFeedback}
+                  className={cn(
+                    "w-full py-3 bg-slate-900 hover:bg-slate-800 text-white rounded-2xl text-xs font-black shadow-md transition-all flex items-center justify-center gap-2 active:scale-95",
+                    isSavingFeedback && "opacity-60 cursor-not-allowed pointer-events-none"
+                  )}
                 >
-                  <Save size={14} />
-                  <span>Guardar Evaluación del Preparador</span>
+                  <Save size={14} className={cn(isSavingFeedback && "animate-spin")} />
+                  <span>{isSavingFeedback ? "Guardando Evaluación..." : "Guardar Evaluación del Preparador"}</span>
                 </button>
               </div>
             </motion.div>

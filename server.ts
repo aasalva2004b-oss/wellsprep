@@ -116,13 +116,58 @@ Return a JSON array of these objects. ONLY valid JSON.`;
     });
   }
 
-  // Webhook endpoint for AeroFocus Pro
-  app.post("/api/webhook/aerofocus", async (req, res) => {
-    try {
-      const payload = req.body || {};
-      const authHeader = req.headers.authorization || req.headers['x-api-key'] || req.query.token;
+  // Webhook endpoint for AeroFocus Pro (supports /api/webhook/aerofocus, /route, .js, .ts)
+  app.all([
+    "/api/webhook/aerofocus",
+    "/api/webhook/aerofocus/",
+    "/api/webhook/aerofocus/route",
+    "/api/webhook/aerofocus/route.ts",
+    "/api/webhook/aerofocus.js",
+    "/api/webhook/aerofocus.ts"
+  ], async (req, res) => {
+    // 1. Cabeceras CORS obligatorias para peticiones web y Vercel
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Event, X-API-Key, X-Source, X-Test-Ping');
 
-      console.log(`[AeroFocus Webhook] Received request from ${req.ip}. Event: ${payload.event || 'unspecified'}`);
+    if (req.method === 'OPTIONS') {
+      return res.status(204).end();
+    }
+
+    // Comprobación de salud rápida (GET)
+    if (req.method === 'GET') {
+      return res.status(200).json({ status: 'ok', service: 'wellsprep_aerofocus_webhook', ready: true });
+    }
+
+    if (req.method !== 'POST') {
+      return res.status(405).json({ error: 'Method Not Allowed' });
+    }
+
+    try {
+      // 2. Verificación de Token
+      const authHeader = req.headers.authorization;
+      const token = req.headers['x-api-key'] || (authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null) || (req.query.token as string);
+      const expectedToken = 'wp_qLXi6WFkFY_live';
+
+      if (token && token !== expectedToken && !token.startsWith('wp_')) {
+        return res.status(401).json({ error: 'Token no autorizado' });
+      }
+
+      const payload = req.body || {};
+
+      console.log(`[AeroFocus Webhook] Request from ${req.ip}. Event: ${payload.event || 'unspecified'}. Date: ${payload.date || 'today'}`);
+
+      // 3. Respuesta al test de conexión / Handshake de AeroFocus
+      if (payload.isTest || payload.event === 'test_connection' || req.headers['x-test-ping']) {
+        return res.status(200).json({
+          success: true,
+          message: 'Enlace operativo AeroFocus Pro <-> WellsPrep'
+        });
+      }
+
+      // 4. Recepción del Cierre Diario (22:00 h) o Sesiones de Vuelo
+      console.log(`[AeroFocus] Fecha: ${payload.date} | Horas netas: ${payload.dailyTotalEffectiveHours} h`);
+      console.log(`[AeroFocus] Temas recibidos:`, payload.topics?.length || (Array.isArray(payload) ? payload.length : 0));
 
       // Extract raw topics from any potential payload structure
       let rawTopics: any[] = [];
@@ -148,14 +193,14 @@ Return a JSON array of these objects. ONLY valid JSON.`;
         rawTopics = [payload];
       }
 
-      // Handle ping / connection check from AeroFocus UI
+      // Handle ping / connection check
       if (rawTopics.length === 0 || payload.event === 'ping') {
         return res.status(200).json({
           status: "ok",
-          connected: true,
           synced: true,
-          message: "Wellsprep Webhook conectado exitosamente. Listo para recibir sesiones.",
-          timestamp: new Date().toISOString()
+          date: payload.date || new Date().toISOString().split("T")[0],
+          processedTopics: 0,
+          message: "Conexión probada con éxito entre AeroFocus Pro y Wellsprep"
         });
       }
 
@@ -163,26 +208,37 @@ Return a JSON array of these objects. ONLY valid JSON.`;
       const { resolveAeroFocusTopic } = await import("./src/lib/topicResolver");
 
       const date = payload.date || payload.flightDate || payload.sessionDate || (payload.timestamp ? new Date(payload.timestamp).toISOString().split("T")[0] : new Date().toISOString().split("T")[0]);
-      const flightId = String(payload.flightId || payload.id || payload.flightNumber || Date.now());
+      const flightId = String(payload.flightId || payload.id || payload.flightNumber || 'cierre_22h');
 
       const resolvedTopics: any[] = [];
       for (const t of rawTopics) {
         const enriched = {
           ...t,
-          category: t.category || payload.category || payload.subject || payload.subjectName,
+          category: t.category || payload.category || payload.subject || payload.subjectName || 'Constitucional',
           modality: t.modality || payload.modality || 'repaso',
         };
         const resolved = resolveAeroFocusTopic(enriched);
         if (resolved) {
           resolvedTopics.push(resolved);
         } else {
-          console.warn(`[AeroFocus Webhook] Could not unequivocally resolve topic:`, t);
+          resolvedTopics.push({
+            resolvedTopicId: String(t.topicId || t.topicNumber || t.id || 'topic-unknown'),
+            resolvedTopicTitle: t.topicTitle || t.title || `Tema ${t.topicNumber || ''}`,
+            effectiveMinutes: Number(t.effectiveMinutes) || Math.round((Number(t.effectiveHours) || 0) * 60) || 30,
+            effectiveHours: Number(t.effectiveHours) || (Number(t.effectiveMinutes) || 30) / 60,
+            modality: t.modality || 'repaso',
+            cantoGrade: t.cantoGrade ?? t.grade,
+            cantoSeconds: t.cantoSeconds,
+            cantoType: t.cantoType,
+            mistakes: t.mistakes,
+            notes: t.notes || 'Sincronizado vía AeroFocus Webhook'
+          });
         }
       }
 
       const totalEffectiveMinutes = Number(payload.totalFlightEffectiveMinutes) || 
         resolvedTopics.reduce((acc, t) => acc + (t.effectiveMinutes || 0), 0);
-      const totalEffectiveHours = Number(payload.totalFlightEffectiveHours) || 
+      const totalEffectiveHours = Number(payload.dailyTotalEffectiveHours) || Number(payload.totalFlightEffectiveHours) || 
         Math.round((totalEffectiveMinutes / 60) * 100) / 100;
 
       const record = {
@@ -191,14 +247,16 @@ Return a JSON array of these objects. ONLY valid JSON.`;
         date,
         source: payload.source || "aerofocus",
         flightId,
+        dailyTotalEffectiveHours: Number(payload.dailyTotalEffectiveHours) || totalEffectiveHours,
         totalFlightEffectiveMinutes: totalEffectiveMinutes,
         totalFlightEffectiveHours: totalEffectiveHours,
-        status: "pending",
+        status: "quarantined",
         topics: resolvedTopics,
         summary: payload.summary || {
           estudioHours: resolvedTopics.filter(t => t.modality === 'primer_estudio').reduce((a, b) => a + b.effectiveHours, 0),
           repasoHours: resolvedTopics.filter(t => t.modality === 'repaso').reduce((a, b) => a + b.effectiveHours, 0),
           refrescoHours: resolvedTopics.filter(t => t.modality === 'refresco').reduce((a, b) => a + b.effectiveHours, 0),
+          cantoHours: resolvedTopics.filter(t => t.modality === 'canto').reduce((a, b) => a + b.effectiveHours, 0),
           totalHours: totalEffectiveHours
         }
       };
@@ -210,29 +268,30 @@ Return a JSON array of these objects. ONLY valid JSON.`;
       // Notify any connected clients in real-time
       broadcastWebhookEvent(record);
 
-      // Return exact required response format
       return res.status(200).json({
-        status: "ok",
+        status: 'ok',
         synced: true,
+        quarantined: true,
+        date: payload.date || date,
+        processedTopics: resolvedTopics.length,
+        effectiveHours: totalEffectiveHours,
         receivedTopics: rawTopics.length,
-        resolvedTopics: resolvedTopics.length,
         flightId,
-        recordId: record.id
+        recordId: record.id,
+        message: 'Evento recibido y retenido en CUARENTENA de seguridad. No se altera el expediente oficial.'
       });
     } catch (err: any) {
       console.error("[AeroFocus Webhook] Error processing request:", err);
-      // Return 200 with synced:false or 500 depending on nature, but user specified:
-      // "Devuelve siempre un JSON de respuesta con código 200: { 'status': 'ok', 'synced': true, 'receivedTopics': count }"
       return res.status(200).json({
         status: "ok",
         synced: false,
         error: err.message,
-        receivedTopics: Array.isArray(req.body?.topics) ? req.body.topics.length : 0
+        processedTopics: 0
       });
     }
   });
 
-  // Query events / pending syncs
+  // Query events / quarantined syncs
   app.get("/api/webhook/events", (req, res) => {
     const events = loadWebhookEvents();
     const statusFilter = req.query.status as string;
@@ -243,15 +302,26 @@ Return a JSON array of these objects. ONLY valid JSON.`;
       filtered = filtered.filter((e: any) => e.status === statusFilter);
     }
 
-    const pendingCount = events.filter((e: any) => e.status === "pending").length;
+    const quarantinedCount = events.filter((e: any) => e.status === "quarantined" || e.status === "pending").length;
     res.json({
       events: filtered.slice(-limit).reverse(),
       total: events.length,
-      pendingCount
+      quarantinedCount,
+      pendingCount: quarantinedCount
     });
   });
 
-  // Acknowledge processed events from frontend
+  // Discard single event from quarantine
+  app.post("/api/webhook/discard", (req, res) => {
+    const { eventId } = req.body || {};
+    if (!eventId) return res.status(400).json({ error: "Falta eventId" });
+    const events = loadWebhookEvents();
+    const filtered = events.filter((e: any) => e.id !== eventId);
+    saveWebhookEvents(filtered);
+    res.json({ status: "ok", remaining: filtered.length });
+  });
+
+  // Acknowledge or approve processed events from frontend
   app.post("/api/webhook/ack", (req, res) => {
     const { eventIds, eventId } = req.body || {};
     const idsToAck = new Set<string>();
@@ -285,10 +355,10 @@ Return a JSON array of these objects. ONLY valid JSON.`;
     try {
       const { resolveAeroFocusTopic } = await import("./src/lib/topicResolver");
       const sampleTopic = req.body?.topic || {
-        topicId: "CIV_T12",
-        topicNumber: 12,
-        topicTitle: "Tema 12 - Fuentes del Derecho",
-        category: "Derecho Civil",
+        topicId: "jud-const-01",
+        topicNumber: 1,
+        topicTitle: "Derecho Constitucional - Tema 1: La Constitución Española de 1978",
+        category: "Derecho Constitucional",
         modality: "repaso",
         effectiveHours: 1.5,
         effectiveMinutes: 90,
@@ -304,7 +374,7 @@ Return a JSON array of these objects. ONLY valid JSON.`;
         flightId: String(Date.now()),
         totalFlightEffectiveMinutes: sampleTopic.effectiveMinutes || 90,
         totalFlightEffectiveHours: sampleTopic.effectiveHours || 1.5,
-        status: "pending",
+        status: "quarantined",
         topics: resolved ? [resolved] : [],
         summary: {
           estudioHours: 0,

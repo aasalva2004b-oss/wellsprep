@@ -15,6 +15,9 @@ import {
   ArrowRight,
   Database,
   ShieldCheck,
+  ShieldAlert,
+  Shield,
+  Trash,
   Send,
   ExternalLink,
   HelpCircle,
@@ -43,12 +46,20 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
     isSyncingWebhooks,
     webhookToken,
     purgeAllAeroFocusData,
+    purgePhantomTema5Cante,
+    deduplicateUserSessions,
     recoverHistoricalUserData,
+    quarantinedEvents = [],
+    isLoadingQuarantine,
+    fetchQuarantinedEvents,
+    approveQuarantineEvent,
+    discardQuarantineEvent,
+    clearAllQuarantine,
     aerofocusBetaEnabled,
     setAerofocusBetaEnabled,
   } = useFirebase();
 
-  const [activeTab, setActiveTab] = useState<"sessions" | "raw_logs">("sessions");
+  const [activeTab, setActiveTab] = useState<"quarantine" | "sessions" | "raw_logs">("quarantine");
   const [searchQuery, setSearchQuery] = useState("");
   const [subjectFilter, setSubjectFilter] = useState<string>("all");
   const [sourceFilter, setSourceFilter] = useState<"all" | "aerofocus" | "manual">("all");
@@ -202,17 +213,17 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          topicId: "CIV_T12",
-          topicNumber: 12,
-          topicTitle: "Tema 12 - Fuentes del Derecho",
-          category: "Derecho Civil",
+          topicId: "jud-const-01",
+          topicNumber: 1,
+          topicTitle: "Derecho Constitucional - Tema 1: La Constitución Española de 1978",
+          category: "Derecho Constitucional",
           effectiveHours: 1.5,
           modality: "repaso",
         }),
       });
       if (res.ok) {
-        toast.success("Webhook simulado enviado. Sincronizando datos...");
-        await syncPendingWebhookEvents();
+        toast.success("Webhook de prueba enviado a la Bandeja de Cuarentena (expediente intacto).");
+        await fetchQuarantinedEvents();
         if (activeTab === "raw_logs") fetchLogs();
       } else {
         toast.error("Error al enviar test de webhook.");
@@ -240,14 +251,9 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                   <h1 className="text-xl font-black text-slate-900 font-serif tracking-tight">
                     Centro de Control y Auditoría de Sincronización
                   </h1>
-                  <span className={cn(
-                    "inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider border",
-                    aerofocusBetaEnabled
-                      ? "bg-amber-50 text-amber-700 border-amber-200"
-                      : "bg-slate-100 text-slate-700 border-slate-300"
-                  )}>
-                    <span className={cn("w-1.5 h-1.5 rounded-full", aerofocusBetaEnabled ? "bg-amber-500 animate-pulse" : "bg-slate-400")} />
-                    {aerofocusBetaEnabled ? "AeroFocus Beta ON" : "AeroFocus en Cuarentena"}
+                  <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider border bg-emerald-50 text-emerald-700 border-emerald-200">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                    AeroFocus Webhook Conectado (wp_qLXi6WFkFY_live)
                   </span>
                 </div>
                 <p className="text-xs text-slate-500 font-medium">
@@ -259,6 +265,24 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
 
           {/* Quick Header Actions */}
           <div className="flex items-center gap-2">
+            <button
+              onClick={() => purgePhantomTema5Cante()}
+              className="px-3 py-1.5 rounded-xl text-xs font-bold bg-rose-50 hover:bg-rose-100 text-rose-800 border border-rose-200/80 shadow-xs transition-all flex items-center gap-1.5"
+              title="Elimina cualquier cante ficticio o no realizado en Tema 5"
+            >
+              <ShieldAlert size={13} className="text-rose-600" />
+              <span>Limpiar Cante Tema 5</span>
+            </button>
+
+            <button
+              onClick={() => deduplicateUserSessions(false)}
+              className="px-3 py-1.5 rounded-xl text-xs font-bold bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300/80 shadow-xs transition-all flex items-center gap-1.5"
+              title="Elimina cantes y sesiones duplicadas (especialmente en Temas 7 y 17) y recalcula los temas"
+            >
+              <RefreshCw size={13} className="text-amber-700" />
+              <span>Deduplicar Cantes</span>
+            </button>
+
             <button
               onClick={() => recoverHistoricalUserData(false)}
               className="px-3 py-1.5 rounded-xl text-xs font-bold bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200/80 shadow-xs transition-all flex items-center gap-1.5"
@@ -344,7 +368,23 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
         </div>
 
         {/* TABS SELECTOR */}
-        <div className="flex border-b border-slate-200 px-6 bg-slate-50/40 shrink-0">
+        <div className="flex border-b border-slate-200 px-6 bg-slate-50/40 shrink-0 gap-2">
+          <button
+            onClick={() => setActiveTab("quarantine")}
+            className={cn(
+              "py-3 px-4 text-xs font-black tracking-tight border-b-2 transition-all flex items-center gap-2",
+              activeTab === "quarantine"
+                ? "border-amber-600 text-amber-900 bg-amber-50/40"
+                : "border-transparent text-slate-500 hover:text-slate-800"
+            )}
+          >
+            <ShieldAlert size={15} className="text-amber-600" />
+            <span>Bandeja de Cuarentena ({quarantinedEvents.length})</span>
+            {quarantinedEvents.length > 0 && (
+              <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
+            )}
+          </button>
+
           <button
             onClick={() => setActiveTab("sessions")}
             className={cn(
@@ -368,9 +408,155 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
             )}
           >
             <Database size={15} />
-            <span>Logs Brutos de Webhooks ({rawEvents.length})</span>
+            <span>Logs Brutos ({rawEvents.length})</span>
           </button>
         </div>
+
+        {/* TAB: QUARANTINE STAGING BUFFER */}
+        {activeTab === "quarantine" && (
+          <div className="flex-1 flex flex-col min-h-0 overflow-hidden bg-slate-50/50">
+            {/* Quarantine Info Banner */}
+            <div className="p-4 border-b border-amber-200/60 bg-amber-50/50 flex flex-wrap items-center justify-between gap-3 shrink-0">
+              <div className="flex items-start gap-3">
+                <div className="p-2 rounded-xl bg-amber-100 text-amber-800 shrink-0">
+                  <Shield size={18} />
+                </div>
+                <div>
+                  <h4 className="text-xs font-black uppercase tracking-wider text-amber-900">
+                    Modo Cuarentena Activo — Blindaje de Expediente
+                  </h4>
+                  <p className="text-xs text-amber-800/80 mt-0.5 max-w-2xl leading-relaxed">
+                    Los eventos enviados por AeroFocus Pro (vía cierre diario de las 22:00h o sincronización de vuelos) se retienen aquí de forma aislada. 
+                    <strong> No modifican tus notas oficiales, cantos, ni vueltas</strong> hasta que tú los revises y pulses <em>"Aprobar"</em>.
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  onClick={() => fetchQuarantinedEvents()}
+                  disabled={isLoadingQuarantine}
+                  className="px-3 py-1.5 rounded-xl text-xs font-bold bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 shadow-xs transition-all flex items-center gap-1.5"
+                >
+                  <RefreshCw size={12} className={cn(isLoadingQuarantine && "animate-spin")} />
+                  <span>Actualizar</span>
+                </button>
+
+                {quarantinedEvents.length > 0 && (
+                  <button
+                    onClick={() => clearAllQuarantine()}
+                    className="px-3 py-1.5 rounded-xl text-xs font-bold bg-rose-50 hover:bg-rose-100 text-rose-800 border border-rose-200/80 shadow-xs transition-all flex items-center gap-1.5"
+                  >
+                    <Trash2 size={12} className="text-rose-600" />
+                    <span>Vaciar Cuarentena</span>
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Quarantine List */}
+            <div className="flex-1 p-6 overflow-y-auto min-h-0">
+              {quarantinedEvents.length === 0 ? (
+                <div className="h-full flex flex-col items-center justify-center text-center p-8">
+                  <div className="w-14 h-14 rounded-3xl bg-emerald-50 text-emerald-600 border border-emerald-200/80 flex items-center justify-center shadow-xs mb-3">
+                    <ShieldCheck size={28} />
+                  </div>
+                  <h3 className="text-base font-black text-slate-800 font-serif">
+                    Bandeja de Cuarentena Limpia y Protegida
+                  </h3>
+                  <p className="text-xs text-slate-500 max-w-md mt-1 leading-relaxed">
+                    No hay ningún evento pendiente de revisión. Tu expediente oficial está 100% libre de datos sospechosos o simulaciones no deseadas.
+                  </p>
+                  <div className="mt-4 flex items-center gap-2 text-[11px] text-slate-400 font-mono">
+                    <span>Token activo: wp_qLXi6WFkFY_live</span>
+                    <span>·</span>
+                    <span>Cierre: 22:00h</span>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-4 max-w-4xl mx-auto">
+                  {quarantinedEvents.map((evt) => (
+                    <div
+                      key={evt.id}
+                      className="bg-white rounded-2xl border border-slate-200/90 shadow-sm p-4 hover:shadow-md transition-all flex flex-col gap-3"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-3">
+                        <div className="flex items-center gap-2.5">
+                          <span className="px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-amber-50 text-amber-800 border border-amber-200">
+                            En Cuarentena
+                          </span>
+                          <span className="font-mono text-xs font-bold text-slate-800">
+                            ID: {evt.id}
+                          </span>
+                          <span className="text-slate-300">·</span>
+                          <span className="text-xs text-slate-500 flex items-center gap-1">
+                            <Clock size={12} />
+                            {evt.date || "Hoy"}
+                          </span>
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => discardQuarantineEvent(evt.id)}
+                            className="px-3 py-1 rounded-xl text-xs font-bold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200/70 transition-all flex items-center gap-1"
+                          >
+                            <Trash2 size={12} />
+                            <span>Descartar</span>
+                          </button>
+                          <button
+                            onClick={() => approveQuarantineEvent(evt.id)}
+                            className="px-3.5 py-1 rounded-xl text-xs font-black text-white bg-emerald-600 hover:bg-emerald-700 shadow-xs transition-all flex items-center gap-1.5"
+                          >
+                            <CheckCircle2 size={13} />
+                            <span>Aprobar e Incorporar</span>
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Topics inside this quarantined event */}
+                      <div className="space-y-2">
+                        <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">
+                          Temas incluidos en este evento ({evt.topics?.length || 0}):
+                        </div>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                          {(evt.topics || []).map((t, idx) => (
+                            <div
+                              key={idx}
+                              className="p-2.5 rounded-xl bg-slate-50 border border-slate-100 flex items-center justify-between gap-2"
+                            >
+                              <div className="min-w-0">
+                                <div className="text-xs font-bold text-slate-800 truncate">
+                                  {t.resolvedTopicTitle || t.resolvedTopicId || "Tema"}
+                                </div>
+                                <div className="text-[10px] text-slate-500 flex items-center gap-1.5 mt-0.5">
+                                  <span className="uppercase font-semibold text-indigo-600">
+                                    {t.modality || "repaso"}
+                                  </span>
+                                  <span>·</span>
+                                  <span>{t.effectiveMinutes || Math.round((t.effectiveHours || 0) * 60)} min</span>
+                                  {t.cantoGrade !== undefined && (
+                                    <>
+                                      <span>·</span>
+                                      <span className="text-amber-700 font-bold">Nota: {t.cantoGrade}/10</span>
+                                    </>
+                                  )}
+                                </div>
+                              </div>
+
+                              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-200 text-slate-700 shrink-0">
+                                {t.resolvedTopicId}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* TAB 1: AUDIT & SESSIONS */}
         {activeTab === "sessions" && (

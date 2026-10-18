@@ -118,6 +118,13 @@ export function parseAeroFocusTopicIdPrefix(rawId?: string): { subjectId: string
     if (sId) return { subjectId: sId, number: parseInt(directMatch[2], 10) };
   }
 
+  // Caso prefijo judicatura oficial AeroFocus: "jud-const-01", "jud_const_1", "jud-constitucional-01"
+  const judMatch = str.toLowerCase().match(/^jud[-_]([a-z\-]+)[-_](\d+)$/);
+  if (judMatch) {
+    const sId = normalizeCategoryToSubjectId(judMatch[1]);
+    if (sId) return { subjectId: sId, number: parseInt(judMatch[2], 10) };
+  }
+
   const upper = str.toUpperCase().replace(/\s+/g, '_');
 
   // Procesal Civil

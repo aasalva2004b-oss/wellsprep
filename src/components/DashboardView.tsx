@@ -475,9 +475,7 @@ export function DashboardView({ onSelectTopic }: { onSelectTopic?: (topicId: str
                     existing.date === c.date &&
                     existing.durationMinutes === c.durationMinutes &&
                     existing.durationSeconds === c.durationSeconds &&
-                    existing.grade === c.grade &&
-                    c.createdMs > 0 && existing.createdMs > 0 &&
-                    Math.abs(c.createdMs - existing.createdMs) < 3000
+                    existing.grade === c.grade
                 );
 
                 if (!isDoubleSubmit) {

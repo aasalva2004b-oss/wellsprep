@@ -274,7 +274,17 @@ export function TopicEditorDialog({
     });
 
     processed.sort(compareSessionsDesc);
-    setSessions(processed);
+    // Deduplicate exact duplicate sessions
+    const dedupedSessions: any[] = [];
+    const seenSessionKeys = new Set<string>();
+    for (const s of processed) {
+      const key = `${s.date}-${s.type}-${s.durationMinutes}-${s.cantoSeconds || 0}-${s.cantoGrade ?? ''}`;
+      if (!seenSessionKeys.has(key)) {
+        seenSessionKeys.add(key);
+        dedupedSessions.push(s);
+      }
+    }
+    setSessions(dedupedSessions);
   }, [topic.id, topic.number, recentSessions]);
 
   
