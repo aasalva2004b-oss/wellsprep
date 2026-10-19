@@ -2,6 +2,24 @@
 <html lang="es">
   <head>
     <meta charset="UTF-8" />
+    <script>
+      // Ignore WebSocket HMR connection errors in AI Studio iframe environment
+      window.addEventListener('unhandledrejection', function(event) {
+        var reason = event.reason;
+        var msg = (reason && (reason.message || reason.stack)) || String(reason || '');
+        if (msg.indexOf('WebSocket') !== -1 || msg.indexOf('vite:ws') !== -1) {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+        }
+      });
+      window.addEventListener('error', function(event) {
+        var msg = (event.message || '') + (event.error && event.error.message ? ' ' + event.error.message : '');
+        if (msg.indexOf('WebSocket') !== -1 || msg.indexOf('@vite/client') !== -1) {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+        }
+      });
+    </script>
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Remix OpoTracker Judicatura</title>
     <meta name="description" content="App intuitiva para organizar el estudio de la oposición de judicatura basado en el Método de Wells. Rastrea metadata como fechas de repaso, tiempo de canto, dificultad y tiempo de estudio para más de 300 temas." />
