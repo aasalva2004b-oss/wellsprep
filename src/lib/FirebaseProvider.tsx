@@ -30,8 +30,9 @@ import { calculateNextSRSState } from "./srs";
 import Papa from "papaparse";
 import { Topic } from "../types";
 import { TopicProgressData } from "./prediction";
-import { WebhookSyncRecord } from "./webhookTypes";
+import { WebhookSyncRecord, WebhookResolvedTopic } from "./webhookTypes";
 import { isCantoSession, getCantoDuration, sessionMatchesTopic } from "./cantoUtils";
+import { resolveAeroFocusTopic } from "./topicResolver";
 
 export function cleanForFirestore<T extends Record<string, any>>(obj: T): T {
   if (!obj || typeof obj !== "object") return obj;
@@ -102,6 +103,18 @@ interface FirebaseContextType {
     difficulty: number,
     topicId: string
   ) => Promise<void>;
+  mergeStudySessions: (
+    targetSessionId: string,
+    sourceSessionIds: string[],
+    mergedData: {
+      durationMinutes: number;
+      difficulty?: number;
+      completesVuelta: boolean;
+      type?: string;
+      notes?: string;
+      mistakes?: string;
+    }
+  ) => Promise<void>;
   reconcileAllTopicsAndSessions: () => Promise<{
     updatedTopicsCount: number;
     totalSessionsCount: number;
@@ -121,6 +134,10 @@ interface FirebaseContextType {
   approveQuarantineEvent: (eventId: string) => Promise<boolean>;
   discardQuarantineEvent: (eventId: string) => Promise<boolean>;
   clearAllQuarantine: () => Promise<boolean>;
+  addQuarantineEventManually: (rawPayload: any) => Promise<boolean>;
+  updateQuarantineEvent: (eventId: string, updatedRecord: Partial<WebhookSyncRecord>) => Promise<void>;
+  updateQuarantineTopic: (eventId: string, topicIndex: number, updatedFields: Partial<WebhookResolvedTopic>) => Promise<void>;
+  mergeQuarantineTopics: (eventId: string, indexA: number, indexB: number) => Promise<void>;
 }
 
 const FirebaseContext = createContext<FirebaseContextType | undefined>(
@@ -643,14 +660,18 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
           estudioHours += extraHours;
         } else if (sessionType === "repaso") {
           repasoHours += extraHours;
-          vueltasCount += 1;
         } else if (sessionType === "refresco") {
           refrescoHours += extraHours;
-        } else if (sessionType === "canto" || isCantoSession(s)) {
-          vueltasCount += 1;
         }
 
-        if (s.completesVuelta) vueltasCount += 1;
+        // Lógica rigurosa de conteo de vueltas:
+        // Si completesVuelta es booleano: respeta estrictamente true (suma vuelta) o false (sesión parcial de un mismo repaso, no suma).
+        // Si completesVuelta es undefined (sesión previa sin flag): solo suma 1 vuelta si es repaso o canto.
+        if (s.completesVuelta === true) {
+          vueltasCount += 1;
+        } else if (s.completesVuelta === undefined && (sessionType === "repaso" || sessionType === "canto" || isCantoSession(s))) {
+          vueltasCount += 1;
+        }
 
         if (s.date) {
           if (!earliestDate || s.date < earliestDate) earliestDate = s.date;
@@ -827,6 +848,60 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
     }
   };
 
+  const mergeStudySessions = async (
+    targetSessionId: string,
+    sourceSessionIds: string[],
+    mergedData: {
+      durationMinutes: number;
+      difficulty?: number;
+      completesVuelta: boolean;
+      type?: string;
+      notes?: string;
+      mistakes?: string;
+    }
+  ) => {
+    if (!user) return;
+    try {
+      const targetRef = doc(db, `users/${user.uid}/sessions`, targetSessionId);
+      const cleanData: any = cleanForFirestore({
+        durationMinutes: mergedData.durationMinutes,
+        durationReal: mergedData.durationMinutes,
+        effectiveHours: Math.round((mergedData.durationMinutes / 60) * 100) / 100,
+        difficulty: mergedData.difficulty !== undefined ? mergedData.difficulty : undefined,
+        dificultadReal: mergedData.difficulty !== undefined ? mergedData.difficulty : undefined,
+        completesVuelta: mergedData.completesVuelta,
+        type: mergedData.type || "repaso",
+        notes: mergedData.notes || "",
+        mistakes: mergedData.mistakes || "",
+        updatedAt: serverTimestamp(),
+      });
+      await updateDoc(targetRef, cleanData);
+
+      // Delete the secondary sessions that were unified
+      for (const srcId of sourceSessionIds) {
+        if (srcId !== targetSessionId) {
+          const srcRef = doc(db, `users/${user.uid}/sessions`, srcId);
+          await deleteDoc(srcRef);
+        }
+      }
+
+      // Read topicId to recalculate topic stats accurately
+      const targetSnap = await getDoc(targetRef);
+      if (targetSnap.exists()) {
+        const topicId = targetSnap.data().topicId;
+        if (topicId) {
+          await recalculateTopicFromSessions(topicId);
+        }
+      }
+
+      toast.success("Sesiones unificadas con éxito y expediente recalculado.");
+    } catch (e: any) {
+      console.error("Error merging sessions:", e);
+      toast.error("Error al fusionar sesiones: " + e.message);
+      throw e;
+    }
+  };
+
   const reconcileAllTopicsAndSessions = async (): Promise<{ updatedTopicsCount: number; totalSessionsCount: number }> => {
     if (!user) return { updatedTopicsCount: 0, totalSessionsCount: 0 };
     try {
@@ -882,14 +957,15 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
             estudioHours += extraHours;
           } else if (sessionType === "repaso") {
             repasoHours += extraHours;
-            vueltasCount += 1;
           } else if (sessionType === "refresco") {
             refrescoHours += extraHours;
-          } else if (sessionType === "canto" || isCantoSession(s)) {
-            vueltasCount += 1;
           }
 
-          if (s.completesVuelta) vueltasCount += 1;
+          if (s.completesVuelta === true) {
+            vueltasCount += 1;
+          } else if (s.completesVuelta === undefined && (sessionType === "repaso" || sessionType === "canto" || isCantoSession(s))) {
+            vueltasCount += 1;
+          }
 
           if (s.date) {
             if (!earliestDate || s.date < earliestDate) earliestDate = s.date;
@@ -1774,26 +1850,157 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
   const [quarantinedEvents, setQuarantinedEvents] = useState<WebhookSyncRecord[]>([]);
   const [isLoadingQuarantine, setIsLoadingQuarantine] = useState(false);
 
-  // Carga reactiva de eventos retenidos en cuarentena
+  // Carga reactiva de eventos retenidos en cuarentena (Híbrida: Servidor + Firestore multi-dispositivo)
   const fetchQuarantinedEvents = useCallback(async () => {
     try {
       setIsLoadingQuarantine(true);
-      const res = await fetch("/api/webhook/events");
-      if (res.ok) {
-        const data = await res.json();
-        const raw: WebhookSyncRecord[] = data.events || [];
-        const inQuarantine = raw.filter((e: any) => e.status === "quarantined" || e.status === "pending");
-        setQuarantinedEvents(inQuarantine);
-        return inQuarantine;
+      const combined = new Map<string, WebhookSyncRecord>();
+
+      // 1. Intentar servidor HTTP local / Vercel
+      try {
+        const res = await fetch("/api/webhook/events");
+        if (res.ok) {
+          const text = await res.text();
+          try {
+            const data = JSON.parse(text);
+            const serverEvents: WebhookSyncRecord[] = data.events || [];
+            serverEvents.forEach((e) => combined.set(e.id, e));
+          } catch {}
+        }
+      } catch (err) {
+        // Red / servidor desconectado
       }
-      return [];
+
+      // 2. Cargar desde Firestore (garantiza persistencia entre dispositivos y recargas)
+      if (user) {
+        try {
+          const qSnap = await getDocs(collection(db, `users/${user.uid}/quarantine`));
+          qSnap.forEach((docSnap) => {
+            const record = { id: docSnap.id, ...docSnap.data() } as WebhookSyncRecord;
+            combined.set(record.id, record);
+          });
+        } catch (fErr) {
+          // Firestore
+        }
+      }
+
+      const inQuarantine = Array.from(combined.values()).filter(
+        (e: any) => e.status === "quarantined" || e.status === "pending"
+      );
+      setQuarantinedEvents(inQuarantine);
+      return inQuarantine;
     } catch (e) {
       console.error("Error fetching quarantined events:", e);
       return [];
     } finally {
       setIsLoadingQuarantine(false);
     }
-  }, []);
+  }, [user]);
+
+  // Importación e inserción manual de transmisiones de AeroFocus a la Bandeja de Cuarentena
+  const addQuarantineEventManually = useCallback(async (rawPayload: any): Promise<boolean> => {
+    if (!user) {
+      toast.error("Debes iniciar sesión para importar sesiones.");
+      return false;
+    }
+    try {
+      let rawTopics: any[] = [];
+      if (Array.isArray(rawPayload)) {
+        rawTopics = rawPayload;
+      } else if (Array.isArray(rawPayload.topics)) {
+        rawTopics = rawPayload.topics;
+      } else if (Array.isArray(rawPayload.sessions)) {
+        rawTopics = rawPayload.sessions;
+      } else if (Array.isArray(rawPayload.items)) {
+        rawTopics = rawPayload.items;
+      } else if (rawPayload.topicId || rawPayload.topicTitle || rawPayload.topicNumber) {
+        rawTopics = [rawPayload];
+      }
+
+      if (rawTopics.length === 0) {
+        toast.error("No se detectaron temas o sesiones válidas en los datos proporcionados.");
+        return false;
+      }
+
+      const resolvedTopics: WebhookResolvedTopic[] = [];
+      for (const t of rawTopics) {
+        const enriched = {
+          ...t,
+          category: t.category || rawPayload.category || rawPayload.subject || "Constitucional",
+          modality: t.modality || rawPayload.modality || "repaso",
+        };
+        const resolved = resolveAeroFocusTopic(enriched);
+        if (resolved) {
+          resolvedTopics.push(resolved);
+        } else {
+          resolvedTopics.push({
+            resolvedTopicId: String(t.topicId || t.topicNumber || t.id || "topic-unknown"),
+            resolvedSubjectId: "general",
+            resolvedTopicNumber: Number(t.topicNumber || 0),
+            resolvedTopicTitle: t.topicTitle || t.title || `Tema ${t.topicNumber || ""}`,
+            effectiveMinutes: Number(t.effectiveMinutes) || Math.round((Number(t.effectiveHours) || 0) * 60) || 30,
+            effectiveHours: Number(t.effectiveHours) || (Number(t.effectiveMinutes) || 30) / 60,
+            modality: (t.modality as any) || "repaso",
+            cantoGrade: t.cantoGrade ?? t.grade,
+            cantoSeconds: t.cantoSeconds,
+            cantoType: t.cantoType,
+            mistakes: t.mistakes,
+            notes: t.notes || "Importado desde AeroFocus",
+            original: t,
+          });
+        }
+      }
+
+      const totalEffectiveMinutes =
+        Number(rawPayload.totalFlightEffectiveMinutes) ||
+        resolvedTopics.reduce((acc, t) => acc + (t.effectiveMinutes || 0), 0);
+      const totalEffectiveHours =
+        Number(rawPayload.dailyTotalEffectiveHours) ||
+        Number(rawPayload.totalFlightEffectiveHours) ||
+        Math.round((totalEffectiveMinutes / 60) * 100) / 100;
+
+      const record: WebhookSyncRecord = {
+        id: `af_manual_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+        receivedAt: new Date().toISOString(),
+        date: rawPayload.date || rawPayload.flightDate || getLocalDateString(),
+        source: rawPayload.source || "aerofocus_manual",
+        flightId: String(rawPayload.flightId || rawPayload.id || `vuelo_${Date.now()}`),
+        totalFlightEffectiveMinutes: totalEffectiveMinutes,
+        totalFlightEffectiveHours: totalEffectiveHours,
+        status: "pending",
+        topics: resolvedTopics,
+        summary: rawPayload.summary || {
+          estudioHours: resolvedTopics.filter(t => t.modality === "primer_estudio").reduce((a, b) => a + b.effectiveHours, 0),
+          repasoHours: resolvedTopics.filter(t => t.modality === "repaso").reduce((a, b) => a + b.effectiveHours, 0),
+          refrescoHours: resolvedTopics.filter(t => t.modality === "refresco").reduce((a, b) => a + b.effectiveHours, 0),
+          cantoHours: resolvedTopics.filter(t => t.modality === "canto").reduce((a, b) => a + b.effectiveHours, 0),
+          totalHours: totalEffectiveHours,
+        },
+      };
+
+      // Guardar en Firestore para sincronización permanente entre pestañas y dispositivos
+      const qDocRef = doc(db, `users/${user.uid}/quarantine`, record.id);
+      await setDoc(qDocRef, cleanForFirestore(record));
+
+      // Guardar también en el servidor local si está conectado
+      fetch("/api/webhook/aerofocus", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${webhookToken || "wp_qLXi6WFkFY_live"}`
+        },
+        body: JSON.stringify({ ...rawPayload, topics: resolvedTopics })
+      }).catch(() => {});
+
+      setQuarantinedEvents(prev => [record, ...prev.filter(e => e.id !== record.id)]);
+      toast.success("¡Transmisión de AeroFocus incorporada a la Bandeja de Cuarentena!");
+      return true;
+    } catch (e: any) {
+      console.error("Error adding manual quarantine event:", e);
+      toast.error("Error al procesar la sesión de AeroFocus: " + e.message);
+      return false;
+    }
+  }, [user, webhookToken]);
 
   // Aprobación manual y explícita por parte del estudiante (salida de cuarentena)
   const approveQuarantineEvent = useCallback(async (eventId: string): Promise<boolean> => {
@@ -1805,15 +2012,41 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
 
       const affectedTopicIds = new Set<string>();
 
+      // Mapear frecuencia de cada tema en esta transmisión para identificar sesiones parciales
+      const topicOccurrences = new Map<string, number>();
+      for (const t of (event.topics || [])) {
+        let tid = t.resolvedTopicId;
+        if (tid) {
+          if (tid === "5" || tid === (5 as any)) tid = "constitucional-5";
+          topicOccurrences.set(tid, (topicOccurrences.get(tid) || 0) + 1);
+        }
+      }
+
+      const topicSeenCount = new Map<string, number>();
+
       for (const topic of (event.topics || [])) {
         let topicId = topic.resolvedTopicId;
         if (!topicId) continue;
         if (topicId === "5" || topicId === (5 as any)) topicId = "constitucional-5";
 
+        const countSoFar = (topicSeenCount.get(topicId) || 0) + 1;
+        topicSeenCount.set(topicId, countSoFar);
+        const totalCount = topicOccurrences.get(topicId) || 1;
+        const isLastForTopic = countSoFar === totalCount;
+
         const durationMins = topic.effectiveMinutes || Math.round((topic.effectiveHours || 0) * 60) || 60;
         const modalityType = topic.modality === 'primer_estudio'
           ? 'estudio_inicial'
           : (topic.modality === 'refresco' ? 'refresco' : (topic.modality === 'canto' ? 'canto' : 'repaso'));
+
+        // Si hay múltiples repasos del mismo tema en la misma sincronización (repasos partidos),
+        // solo el último completa vuelta por defecto a menos que se indique explícitamente.
+        let completesVuelta = false;
+        if ((topic as any).completesVuelta !== undefined) {
+          completesVuelta = Boolean((topic as any).completesVuelta);
+        } else if (modalityType === 'repaso' || modalityType === 'canto') {
+          completesVuelta = isLastForTopic;
+        }
 
         const sessionRef = doc(collection(db, `users/${user.uid}/sessions`));
         const sessionDoc = cleanForFirestore({
@@ -1823,8 +2056,8 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
           date: event.date || getLocalDateString(),
           durationMinutes: durationMins,
           durationReal: durationMins,
-          difficulty: topic.difficulty || 5,
-          dificultadReal: topic.difficulty || 5,
+          difficulty: topic.difficulty !== undefined ? topic.difficulty : undefined,
+          dificultadReal: topic.difficulty !== undefined ? topic.difficulty : undefined,
           type: modalityType,
           modality: topic.modality,
           notes: topic.notes || `Aprobado desde Cuarentena AeroFocus (Vuelo #${event.flightId || 'N/A'})`,
@@ -1835,7 +2068,7 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
           cantoSeconds: topic.cantoSeconds,
           cantoType: topic.cantoType,
           mistakes: topic.mistakes,
-          completesVuelta: modalityType === 'repaso' || modalityType === 'canto',
+          completesVuelta,
           createdAt: serverTimestamp(),
         });
         await setDoc(sessionRef, sessionDoc);
@@ -1850,7 +2083,10 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ eventId }),
-      });
+      }).catch(() => {});
+
+      // Eliminar también de Firestore
+      deleteDoc(doc(db, `users/${user.uid}/quarantine`, eventId)).catch(() => {});
 
       setQuarantinedEvents(prev => prev.filter(e => e.id !== eventId));
       toast.dismiss(toastId);
@@ -1870,7 +2106,12 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ eventId }),
-      });
+      }).catch(() => {});
+
+      if (user) {
+        deleteDoc(doc(db, `users/${user.uid}/quarantine`, eventId)).catch(() => {});
+      }
+
       setQuarantinedEvents(prev => prev.filter(e => e.id !== eventId));
       toast.info("Evento descartado de la cuarentena.");
       return true;
@@ -1878,12 +2119,16 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
       toast.error("Error al descartar evento: " + err.message);
       return false;
     }
-  }, []);
+  }, [user]);
 
   // Vaciar toda la bandeja de cuarentena
   const clearAllQuarantine = useCallback(async (): Promise<boolean> => {
     try {
-      await fetch("/api/webhook/clear", { method: "POST" });
+      await fetch("/api/webhook/clear", { method: "POST" }).catch(() => {});
+      if (user) {
+        const qSnap = await getDocs(collection(db, `users/${user.uid}/quarantine`));
+        qSnap.forEach(d => deleteDoc(d.ref).catch(() => {}));
+      }
       setQuarantinedEvents([]);
       toast.success("Bandeja de cuarentena de AeroFocus vaciada.");
       return true;
@@ -1891,7 +2136,7 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
       toast.error("Error al vaciar cuarentena: " + err.message);
       return false;
     }
-  }, []);
+  }, [user]);
 
   // Mantener syncPendingWebhookEvents para compatibilidad sin auto-forzado
   const syncPendingWebhookEvents = useCallback(async (force: boolean = false) => {
@@ -1919,6 +2164,7 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
         updateStudySession,
         deleteStudySession,
         quickUpdateSessionDifficulty,
+        mergeStudySessions,
         reconcileAllTopicsAndSessions,
         resetProgress,
         importProgress,
@@ -1936,6 +2182,7 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
         approveQuarantineEvent,
         discardQuarantineEvent,
         clearAllQuarantine,
+        addQuarantineEventManually,
       }}
     >
       {children}

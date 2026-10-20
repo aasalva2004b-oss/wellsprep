@@ -41,6 +41,8 @@ export interface WebhookResolvedTopic {
   effectiveHours: number;
   effectiveMinutes: number;
   difficulty?: number;
+  dificultadReal?: number;
+  completesVuelta?: boolean;
   cantoGrade?: number;
   cantoSeconds?: number;
   cantoType?: 'solo' | 'preparador';
@@ -52,7 +54,7 @@ export interface WebhookResolvedTopic {
     endPage?: number;
     currentPage?: number;
   };
-  original: AeroFocusTopicItem;
+  original?: AeroFocusTopicItem | any;
 }
 
 export interface WebhookSyncRecord {
@@ -63,13 +65,15 @@ export interface WebhookSyncRecord {
   flightId: string;
   totalFlightEffectiveMinutes: number;
   totalFlightEffectiveHours: number;
-  status: 'pending' | 'processed' | 'error';
+  status: 'pending' | 'quarantined' | 'processed' | 'error';
   errorMessage?: string;
   topics: WebhookResolvedTopic[];
+  rawPayload?: any;
   summary?: {
     estudioHours?: number;
     repasoHours?: number;
     refrescoHours?: number;
+    cantoHours?: number;
     totalHours?: number;
   };
 }

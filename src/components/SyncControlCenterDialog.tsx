@@ -681,6 +681,15 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                                   Manual
                                 </span>
                               )}
+                              {session.completesVuelta === true ? (
+                                <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-md border border-emerald-200/50">
+                                  Vuelta completa
+                                </span>
+                              ) : session.completesVuelta === false ? (
+                                <span className="text-[10px] font-bold text-slate-500 bg-slate-100 px-2 py-0.5 rounded-md border border-slate-200">
+                                  Sesión parcial
+                                </span>
+                              ) : null}
                               {session.notes && (
                                 <span className="text-slate-400 italic truncate max-w-xs">
                                   "{session.notes}"

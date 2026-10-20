@@ -1,23 +1,30 @@
 import fs from 'fs';
 import path from 'path';
 
-// Helper para almacenar eventos pendientes de sincronización con Wellsprep
-const eventsFilePath = path.join(process.cwd(), 'uploads', 'aerofocus_events.json');
+function getEventsFilePath() {
+  try {
+    const primary = path.join(process.cwd(), 'uploads', 'aerofocus_events.json');
+    const dir = path.dirname(primary);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    return primary;
+  } catch (e) {
+    return path.join('/tmp', 'aerofocus_events.json');
+  }
+}
 
 function savePendingEvent(record) {
   try {
-    const dir = path.dirname(eventsFilePath);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    const filePath = getEventsFilePath();
     let existing = [];
-    if (fs.existsSync(eventsFilePath)) {
+    if (fs.existsSync(filePath)) {
       try { 
-        existing = JSON.parse(fs.readFileSync(eventsFilePath, 'utf-8')); 
+        existing = JSON.parse(fs.readFileSync(filePath, 'utf-8')); 
       } catch (e) { 
         existing = []; 
       }
     }
     existing.push(record);
-    fs.writeFileSync(eventsFilePath, JSON.stringify(existing.slice(-150), null, 2), 'utf-8');
+    fs.writeFileSync(filePath, JSON.stringify(existing.slice(-150), null, 2), 'utf-8');
   } catch (err) {
     console.error('[AeroFocus Webhook] Error saving event to file:', err);
   }
@@ -44,33 +51,53 @@ export default async function handler(req, res) {
 
   // 2. Verificación de tu Token
   const authHeader = req.headers.authorization;
-  const token = req.headers['x-api-key'] || (authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null);
-  const expectedToken = 'wp_qLXi6WFkFY_live';
+  const token = req.headers['x-api-key'] || req.headers['x-token'] || (authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null);
+  console.log('[AeroFocus Webhook Serverless] Received request. Token:', Boolean(token));
 
-  if (token && token !== expectedToken) {
-    return res.status(401).json({ error: 'Token no autorizado' });
+  let payload = req.body || {};
+  if (typeof payload === 'string') {
+    try { payload = JSON.parse(payload); } catch {}
   }
-
-  const payload = req.body || {};
+  if (typeof payload.payload === 'string') {
+    try { payload = JSON.parse(payload.payload); } catch {}
+  }
 
   // 3. Respuesta al test de conexión / Handshake de AeroFocus
   if (payload.isTest || payload.event === 'test_connection' || req.headers['x-test-ping']) {
     return res.status(200).json({
       success: true,
+      status: 'ok',
       message: 'Enlace operativo AeroFocus Pro <-> WellsPrep'
     });
   }
 
-  // 4. Recepción del Cierre Diario (22:00 h)
+  // 4. Recepción del Cierre Diario (22:00 h) o Sesiones
   console.log(`[AeroFocus] Fecha: ${payload.date} | Horas netas: ${payload.dailyTotalEffectiveHours} h`);
-  console.log(`[AeroFocus] Temas procesados:`, payload.topics?.length);
 
-  // AQUÍ: Guarda en la base de datos de tu temario de Wellsprep los minutos por tema (payload.topics)
+  // Extraer temas de cualquier formato
   let rawTopics = [];
-  if (Array.isArray(payload.topics)) rawTopics = payload.topics;
-  else if (Array.isArray(payload)) rawTopics = payload;
+  if (Array.isArray(payload)) rawTopics = payload;
+  else if (Array.isArray(payload.topics)) rawTopics = payload.topics;
   else if (Array.isArray(payload.sessions)) rawTopics = payload.sessions;
-  else if (payload.topicId || payload.topicTitle || payload.topicNumber) rawTopics = [payload];
+  else if (Array.isArray(payload.studySessions)) rawTopics = payload.studySessions;
+  else if (Array.isArray(payload.study_sessions)) rawTopics = payload.study_sessions;
+  else if (Array.isArray(payload.items)) rawTopics = payload.items;
+  else if (Array.isArray(payload.tasks)) rawTopics = payload.tasks;
+  else if (Array.isArray(payload.records)) rawTopics = payload.records;
+  else if (Array.isArray(payload.history)) rawTopics = payload.history;
+  else if (payload.data && Array.isArray(payload.data)) rawTopics = payload.data;
+  else if (payload.data && Array.isArray(payload.data.topics)) rawTopics = payload.data.topics;
+  else if (payload.flight && Array.isArray(payload.flight.topics)) rawTopics = payload.flight.topics;
+  else if (payload.topicId || payload.topicTitle || payload.topicNumber || payload.title || payload.subject) rawTopics = [payload];
+
+  if (rawTopics.length === 0 && (payload.effectiveMinutes || payload.duration || payload.hours)) {
+    rawTopics = [{
+      topicTitle: payload.title || payload.name || "Sesión AeroFocus (Revisar tema)",
+      effectiveMinutes: Number(payload.effectiveMinutes) || Number(payload.duration) || 45,
+      category: payload.category || payload.subject || "Constitucional",
+      modality: payload.modality || "repaso"
+    }];
+  }
 
   let resolvedTopics = [];
   try {

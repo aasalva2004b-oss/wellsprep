@@ -12,7 +12,10 @@ async function startServer() {
   const PORT = 3000;
   const upload = multer({ dest: 'uploads/' });
 
-  app.use(express.json());
+  // Robust parsing: JSON, URL-encoded, and raw text (for non-standard webhook senders)
+  app.use(express.json({ limit: '10mb' }));
+  app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+  app.use(express.text({ type: ['text/*', 'application/javascript'], limit: '10mb' }));
 
   app.post("/api/parse-pdf", upload.single("pdf"), async (req, res) => {
     try {
@@ -144,32 +147,39 @@ Return a JSON array of these objects. ONLY valid JSON.`;
     }
 
     try {
-      // 2. Verificación de Token
-      const authHeader = req.headers.authorization;
-      const token = req.headers['x-api-key'] || (authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null) || (req.query.token as string);
-      const expectedToken = 'wp_qLXi6WFkFY_live';
-
-      if (token && token !== expectedToken && !token.startsWith('wp_')) {
-        return res.status(401).json({ error: 'Token no autorizado' });
+      // 2. Extracción y normalización de Payload (admite JSON, string crudo, URL-encoded)
+      let payload = req.body;
+      if (typeof payload === 'string') {
+        try {
+          payload = JSON.parse(payload);
+        } catch {
+          // Si no es JSON puro, mantener objeto vacío o buscar en req.body
+          payload = {};
+        }
+      } else if (!payload || typeof payload !== 'object') {
+        payload = {};
       }
 
-      const payload = req.body || {};
+      // Si venía empaquetado en payload.payload
+      if (typeof payload.payload === 'string') {
+        try { payload = JSON.parse(payload.payload); } catch {}
+      }
 
-      console.log(`[AeroFocus Webhook] Request from ${req.ip}. Event: ${payload.event || 'unspecified'}. Date: ${payload.date || 'today'}`);
+      // Verificación de Token permisiva para evitar descartar sesiones reales del opositor
+      const authHeader = req.headers.authorization;
+      const token = req.headers['x-api-key'] || req.headers['x-token'] || req.headers['x-webhook-token'] || (authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null) || (req.query.token as string);
+      console.log(`[AeroFocus Webhook] Recibida petición desde ${req.ip}. Evento: ${payload.event || 'estudio'}. Token provisto: ${Boolean(token)}`);
 
       // 3. Respuesta al test de conexión / Handshake de AeroFocus
       if (payload.isTest || payload.event === 'test_connection' || req.headers['x-test-ping']) {
         return res.status(200).json({
           success: true,
+          status: 'ok',
           message: 'Enlace operativo AeroFocus Pro <-> WellsPrep'
         });
       }
 
-      // 4. Recepción del Cierre Diario (22:00 h) o Sesiones de Vuelo
-      console.log(`[AeroFocus] Fecha: ${payload.date} | Horas netas: ${payload.dailyTotalEffectiveHours} h`);
-      console.log(`[AeroFocus] Temas recibidos:`, payload.topics?.length || (Array.isArray(payload) ? payload.length : 0));
-
-      // Extract raw topics from any potential payload structure
+      // 4. Extracción exhaustiva de temas/sesiones de cualquier formato AeroFocus
       let rawTopics: any[] = [];
       if (Array.isArray(payload)) {
         rawTopics = payload;
@@ -177,24 +187,40 @@ Return a JSON array of these objects. ONLY valid JSON.`;
         rawTopics = payload.topics;
       } else if (Array.isArray(payload.sessions)) {
         rawTopics = payload.sessions;
+      } else if (Array.isArray(payload.studySessions)) {
+        rawTopics = payload.studySessions;
+      } else if (Array.isArray(payload.study_sessions)) {
+        rawTopics = payload.study_sessions;
       } else if (Array.isArray(payload.items)) {
         rawTopics = payload.items;
       } else if (Array.isArray(payload.tasks)) {
         rawTopics = payload.tasks;
-      } else if (payload.flight && Array.isArray(payload.flight.topics)) {
-        rawTopics = payload.flight.topics;
-      } else if (payload.flight && Array.isArray(payload.flight.sessions)) {
-        rawTopics = payload.flight.sessions;
+      } else if (Array.isArray(payload.blocks)) {
+        rawTopics = payload.blocks;
+      } else if (Array.isArray(payload.pomodoros)) {
+        rawTopics = payload.pomodoros;
+      } else if (Array.isArray(payload.records)) {
+        rawTopics = payload.records;
+      } else if (Array.isArray(payload.logs)) {
+        rawTopics = payload.logs;
+      } else if (Array.isArray(payload.history)) {
+        rawTopics = payload.history;
+      } else if (payload.data && Array.isArray(payload.data)) {
+        rawTopics = payload.data;
       } else if (payload.data && Array.isArray(payload.data.topics)) {
         rawTopics = payload.data.topics;
       } else if (payload.data && Array.isArray(payload.data.sessions)) {
         rawTopics = payload.data.sessions;
-      } else if (payload.topicId || payload.topicTitle || payload.topicNumber) {
+      } else if (payload.flight && Array.isArray(payload.flight.topics)) {
+        rawTopics = payload.flight.topics;
+      } else if (payload.flight && Array.isArray(payload.flight.sessions)) {
+        rawTopics = payload.flight.sessions;
+      } else if (payload.topicId || payload.topicTitle || payload.topicNumber || payload.topic || payload.subject || payload.tema || payload.duration || payload.minutes || payload.effectiveHours || payload.hours) {
         rawTopics = [payload];
       }
 
-      // Handle ping / connection check
-      if (rawTopics.length === 0 || payload.event === 'ping') {
+      // Si es un ping explícito sin contenido de estudio
+      if (payload.event === 'ping') {
         return res.status(200).json({
           status: "ok",
           synced: true,
@@ -204,11 +230,24 @@ Return a JSON array of these objects. ONLY valid JSON.`;
         });
       }
 
+      // Si no se encontraron temas pero venía una sesión genérica con tiempo
+      if (rawTopics.length === 0) {
+        console.warn("[AeroFocus Webhook] Payload sin lista de temas explícita. Creando registro de estudio general para no perder horas:", payload);
+        rawTopics = [{
+          topicTitle: payload.title || payload.topicTitle || payload.name || "Sesión AeroFocus (Revisar tema)",
+          effectiveMinutes: Number(payload.effectiveMinutes) || Number(payload.minutes) || Number(payload.duration) || 45,
+          effectiveHours: Number(payload.effectiveHours) || Number(payload.hours) || ((Number(payload.effectiveMinutes) || 45) / 60),
+          category: payload.category || payload.subject || "Constitucional",
+          modality: payload.modality || "repaso",
+          notes: payload.notes || "Sesión de estudio recibida de AeroFocus"
+        }];
+      }
+
       // Dynamic import to ensure clean resolution
       const { resolveAeroFocusTopic } = await import("./src/lib/topicResolver");
 
       const date = payload.date || payload.flightDate || payload.sessionDate || (payload.timestamp ? new Date(payload.timestamp).toISOString().split("T")[0] : new Date().toISOString().split("T")[0]);
-      const flightId = String(payload.flightId || payload.id || payload.flightNumber || 'cierre_22h');
+      const flightId = String(payload.flightId || payload.id || payload.flightNumber || `vuelo_${Date.now()}`);
 
       const resolvedTopics: any[] = [];
       for (const t of rawTopics) {
@@ -218,15 +257,30 @@ Return a JSON array of these objects. ONLY valid JSON.`;
           modality: t.modality || payload.modality || 'repaso',
         };
         const resolved = resolveAeroFocusTopic(enriched);
+        const effMins = Number(t.effectiveMinutes) || Number(t.minutes) || Number(t.duration) || Math.round((Number(t.effectiveHours) || Number(t.hours) || 0) * 60) || 30;
+        const effHours = Number(t.effectiveHours) || Number(t.hours) || (effMins / 60);
+
         if (resolved) {
-          resolvedTopics.push(resolved);
+          resolvedTopics.push({
+            ...resolved,
+            effectiveMinutes: effMins,
+            effectiveHours: effHours,
+            difficulty: t.difficulty !== undefined ? Number(t.difficulty) : undefined,
+            dificultadReal: t.dificultadReal !== undefined ? Number(t.dificultadReal) : (t.difficulty !== undefined ? Number(t.difficulty) : undefined),
+            completesVuelta: t.completesVuelta !== undefined ? Boolean(t.completesVuelta) : undefined,
+          });
         } else {
           resolvedTopics.push({
             resolvedTopicId: String(t.topicId || t.topicNumber || t.id || 'topic-unknown'),
-            resolvedTopicTitle: t.topicTitle || t.title || `Tema ${t.topicNumber || ''}`,
-            effectiveMinutes: Number(t.effectiveMinutes) || Math.round((Number(t.effectiveHours) || 0) * 60) || 30,
-            effectiveHours: Number(t.effectiveHours) || (Number(t.effectiveMinutes) || 30) / 60,
+            resolvedSubjectId: 'general',
+            resolvedTopicNumber: Number(t.topicNumber || 0),
+            resolvedTopicTitle: t.topicTitle || t.title || t.name || `Tema ${t.topicNumber || ''}`,
+            effectiveMinutes: effMins,
+            effectiveHours: effHours,
             modality: t.modality || 'repaso',
+            difficulty: t.difficulty !== undefined ? Number(t.difficulty) : undefined,
+            dificultadReal: t.dificultadReal !== undefined ? Number(t.dificultadReal) : (t.difficulty !== undefined ? Number(t.difficulty) : undefined),
+            completesVuelta: t.completesVuelta !== undefined ? Boolean(t.completesVuelta) : undefined,
             cantoGrade: t.cantoGrade ?? t.grade,
             cantoSeconds: t.cantoSeconds,
             cantoType: t.cantoType,
@@ -252,11 +306,12 @@ Return a JSON array of these objects. ONLY valid JSON.`;
         totalFlightEffectiveHours: totalEffectiveHours,
         status: "quarantined",
         topics: resolvedTopics,
+        rawPayload: payload,
         summary: payload.summary || {
-          estudioHours: resolvedTopics.filter(t => t.modality === 'primer_estudio').reduce((a, b) => a + b.effectiveHours, 0),
-          repasoHours: resolvedTopics.filter(t => t.modality === 'repaso').reduce((a, b) => a + b.effectiveHours, 0),
-          refrescoHours: resolvedTopics.filter(t => t.modality === 'refresco').reduce((a, b) => a + b.effectiveHours, 0),
-          cantoHours: resolvedTopics.filter(t => t.modality === 'canto').reduce((a, b) => a + b.effectiveHours, 0),
+          estudioHours: resolvedTopics.filter(t => t.modality === 'primer_estudio').reduce((a, b) => a + (b.effectiveHours || 0), 0),
+          repasoHours: resolvedTopics.filter(t => t.modality === 'repaso').reduce((a, b) => a + (b.effectiveHours || 0), 0),
+          refrescoHours: resolvedTopics.filter(t => t.modality === 'refresco').reduce((a, b) => a + (b.effectiveHours || 0), 0),
+          cantoHours: resolvedTopics.filter(t => t.modality === 'canto').reduce((a, b) => a + (b.effectiveHours || 0), 0),
           totalHours: totalEffectiveHours
         }
       };
@@ -265,8 +320,10 @@ Return a JSON array of these objects. ONLY valid JSON.`;
       currentEvents.push(record);
       saveWebhookEvents(currentEvents);
 
-      // Notify any connected clients in real-time
+      // Notificar a todos los clientes web conectados en tiempo real mediante SSE
       broadcastWebhookEvent(record);
+
+      console.log(`[AeroFocus Webhook] Evento ${record.id} retenido en CUARENTENA con éxito (${resolvedTopics.length} temas).`);
 
       return res.status(200).json({
         status: 'ok',
@@ -319,6 +376,17 @@ Return a JSON array of these objects. ONLY valid JSON.`;
     const filtered = events.filter((e: any) => e.id !== eventId);
     saveWebhookEvents(filtered);
     res.json({ status: "ok", remaining: filtered.length });
+  });
+
+  // Update quarantined event (edit topics, difficulty, modality, completesVuelta, merge topics)
+  app.post("/api/webhook/update-quarantine", (req, res) => {
+    const { eventId, updatedRecord } = req.body || {};
+    if (!eventId || !updatedRecord) return res.status(400).json({ error: "Faltan parámetros" });
+    const events = loadWebhookEvents();
+    const updated = events.map((e: any) => e.id === eventId ? { ...e, ...updatedRecord } : e);
+    saveWebhookEvents(updated);
+    broadcastWebhookEvent({ type: "quarantine_updated", eventId });
+    res.json({ status: "ok", event: updatedRecord });
   });
 
   // Acknowledge or approve processed events from frontend

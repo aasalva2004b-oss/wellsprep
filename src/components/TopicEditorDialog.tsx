@@ -24,6 +24,7 @@ import { TopicEbbinghausCard } from "./topic-editor/TopicEbbinghausCard";
 import { TopicDifficultyCard } from "./topic-editor/TopicDifficultyCard";
 import { TopicCantoRadarCard } from "./topic-editor/TopicCantoRadarCard";
 import { TopicHistoryCard } from "./topic-editor/TopicHistoryCard";
+import { EditSessionDialog } from "./EditSessionDialog";
 
 export function TopicEditorDialog({
   topic,
@@ -32,10 +33,20 @@ export function TopicEditorDialog({
   topic: Topic;
   onClose: () => void;
 }) {
-  const { userProgress, updateTopicProgress, addStudySession, deleteStudySession, user, recentSessions = [] } =
-    useFirebase();
+  const {
+    userProgress,
+    updateTopicProgress,
+    addStudySession,
+    deleteStudySession,
+    quickUpdateSessionDifficulty,
+    mergeStudySessions,
+    user,
+    recentSessions = []
+  } = useFirebase();
   const topicId = topic.id;
   const progress = userProgress[topicId];
+
+  const [sessionToEdit, setSessionToEdit] = useState<any | null>(null);
 
   if (!user) return null;
 
@@ -549,11 +560,26 @@ export function TopicEditorDialog({
                 sessionToDelete={sessionToDelete}
                 setSessionToDelete={setSessionToDelete}
                 onDeleteSession={handleDeleteSession}
+                onEditSession={(s) => setSessionToEdit(s)}
+                onQuickRateDifficulty={quickUpdateSessionDifficulty}
+                onMergeSessions={mergeStudySessions}
               />
             </div>
           </div>
         </div>
       </motion.div>
+
+      {/* MODAL DE PERSONALIZACIÓN DE SESIÓN */}
+      {sessionToEdit && (
+        <EditSessionDialog
+          session={sessionToEdit}
+          onClose={() => setSessionToEdit(null)}
+          onSessionUpdated={() => {
+            setSessionToEdit(null);
+            toast.success("Sesión actualizada correctamente.");
+          }}
+        />
+      )}
     </div>
   );
 }
