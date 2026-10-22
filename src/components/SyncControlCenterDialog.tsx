@@ -232,130 +232,30 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
     }
   };
 
-  // Handle Quick Webhook Test with realistic multi-session payload (split review)
+  // Handle Webhook Connection Test (Ping handshake without inserting fake sessions)
   const handleTestWebhook = async () => {
     try {
       setIsTestingWebhook(true);
-      const todayStr = new Date().toISOString().split("T")[0];
-      const testRecordPayload = {
-        schemaVersion: "2.0.0",
-        event: "daily_sync",
-        transactionId: `daily_${todayStr}`,
-        timestamp: new Date().toISOString(),
-        date: todayStr,
-        fecha: todayStr,
-        targetDailyHour: 22,
-        source: "aerofocus_pro",
-        pilotCallsign: "Comandante",
-        callsignName: "Piloto Judicatura",
-        dailyTotalFlightMinutes: 240,
-        dailyTotalEffectiveMinutes: 225,
-        dailyTotalEffectiveHours: 3.75,
-        totalEffectiveHours: 3.75,
-        horasEfectivas: 3.75,
-        minutosEfectivos: 225,
-        tiempoFormateado: "3h 45m",
-        totalDistractionMinutes: 15,
-        sessionsCount: 3,
-        focusScore: 94,
-        subject: "Derecho Constitucional",
-        materia: "Derecho Constitucional",
-        subjects: [
-          {
-            subjectId: "derecho_constitucional",
-            subjectName: "Derecho Constitucional",
-            subject: "Derecho Constitucional",
-            materia: "Derecho Constitucional",
-            asignatura: "Derecho Constitucional",
-            effectiveMinutes: 225,
-            minutosEfectivos: 225,
-            effectiveHours: 3.75,
-            horasEfectivas: 3.75,
-            timeFormatted: "3h 45m",
-            topicsCount: 1,
-            temasCount: 1
-          }
-        ],
-        topics: [
-          {
-            topicId: "jud-const-01",
-            subjectId: "derecho_constitucional",
-            subjectName: "Derecho Constitucional",
-            subject: "Derecho Constitucional",
-            materia: "Derecho Constitucional",
-            asignatura: "Derecho Constitucional",
-            category: "Derecho Constitucional",
-            topicNumber: 1,
-            temaNumero: 1,
-            topicTitle: "Tema 1: La Constitución Española de 1978. Principios y valores",
-            topic: "Tema 1: La Constitución Española de 1978. Principios y valores",
-            tema: "Tema 1: La Constitución Española de 1978. Principios y valores",
-            modality: "estudio",
-            modalidad: "estudio",
-            type: "study",
-            effectiveHours: 3.75,
-            horasEfectivas: 3.75,
-            effectiveMinutes: 225,
-            minutosEfectivos: 225,
-            grossMinutes: 240,
-            minutosBrutos: 240,
-            timeFormatted: "3h 45m",
-            distractionSeconds: 900,
-            segundosDistraccion: 900,
-            pages: {
-              pageStart: 1,
-              pageEnd: 28,
-              pagesCount: 28,
-              rawText: "Págs. 1-28"
-            },
-            startPage: 1,
-            endPage: 28,
-            pagesCount: 28,
-            pagesText: "Págs. 1-28",
-            paginas: "Págs. 1-28",
-            isTopicCompleted: true,
-            completed: true,
-            completado: true,
-            status: "completed",
-            summaryLine: "Derecho Constitucional · Tema 1: La Constitución Española de 1978 (estudio) · Págs. 1-28 · 3h 45m [COMPLETADO]"
-          }
-        ],
-        summary: {
-          estudioHours: 3.75,
-          repasoHours: 0,
-          refrescoHours: 0,
-          totalHours: 3.75,
-          horasEstudio: 3.75,
-          horasRepaso: 0,
-          horasRefresco: 0,
-          totalMinutos: 240,
-          minutosEfectivos: 225
+      const res = await fetch("/api/webhook/aerofocus", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${webhookToken || "wp_qLXi6WFkFY_live"}`
         },
-        resumen: {
-          horasEfectivas: 3.75,
-          minutosEfectivos: 225,
-          tiempoFormateado: "3h 45m",
-          horasEstudio: 3.75,
-          horasRepaso: 0,
-          horasRefresco: 0
-        },
-        reportMarkdown: "# 📋 CIERRE DIARIO DE ESTUDIO · " + todayStr + "\n\n**Piloto:** Comandante (Piloto Judicatura)\n**Tiempo Efectivo Neto:** 3h 45m (225 min)\n**Índice de Foco:** 94%\n- **Tema 1:** La Constitución Española de 1978 (Págs. 1-28) [COMPLETADO]",
-        textSummary: "CIERRE DIARIO DE ESTUDIO · " + todayStr + " · 3h 45m en Derecho Constitucional Tema 1 (Págs. 1-28, COMPLETADO)",
-        message: "Cierre diario consolidado del " + todayStr + ": 3h 45m en Derecho Constitucional.",
-        telemetry: {
-          appVersion: "2.6.0",
-          sourceApp: "AeroFocus Pro",
-          environment: "web_standalone"
-        }
-      };
+        body: JSON.stringify({
+          isTest: true,
+          event: "test_connection"
+        })
+      });
 
-      const success = await addQuarantineEventManually(testRecordPayload);
-      if (success) {
-        toast.success("⚡ Sesión de prueba incorporada a la Bandeja de Cuarentena. Puedes calificarla o fusionarla.");
-        setActiveTab("quarantine");
+      const data = await res.json();
+      if (res.ok && data.success) {
+        toast.success("✅ Enlace operativo AeroFocus Pro <-> WellsPrep. La pasarela está lista para recibir tus transmisiones de estudio reales sin generar datos ficticios.");
+      } else {
+        toast.error("Fallo de enlace: " + (data.error || "Respuesta no autorizada"));
       }
     } catch (e: any) {
-      toast.error("Fallo al generar simulación: " + e.message);
+      toast.error("Error al comprobar enlace: " + (e?.message || "Error de red"));
     } finally {
       setIsTestingWebhook(false);
     }
@@ -455,10 +355,10 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
               onClick={handleTestWebhook}
               disabled={isTestingWebhook}
               className="px-3 py-1.5 rounded-xl text-xs font-bold bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 shadow-sm transition-all flex items-center gap-1.5 disabled:opacity-50"
-              title="Simular envío de sesión desde AeroFocus Pro"
+              title="Comprobar enlace de conexión con AeroFocus Pro (Ping sin generar datos ficticios)"
             >
-              <Send size={13} className="text-blue-600" />
-              <span>{isTestingWebhook ? "Simulando..." : "Test Webhook"}</span>
+              <ShieldCheck size={13} className="text-emerald-600" />
+              <span>{isTestingWebhook ? "Comprobando..." : "Test Enlace"}</span>
             </button>
 
             <button
@@ -604,9 +504,10 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                   onClick={handleTestWebhook}
                   disabled={isTestingWebhook}
                   className="px-3 py-1.5 rounded-xl text-xs font-bold bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 shadow-xs transition-all flex items-center gap-1.5"
+                  title="Comprobar enlace de conexión con AeroFocus Pro (Ping de test sin datos ficticios)"
                 >
-                  <Sparkles size={12} className="text-amber-600" />
-                  <span>{isTestingWebhook ? "Simulando..." : "Simular Sesión Prueba"}</span>
+                  <ShieldCheck size={12} className="text-emerald-600" />
+                  <span>{isTestingWebhook ? "Comprobando..." : "Comprobar Enlace"}</span>
                 </button>
 
                 <button
@@ -648,8 +549,8 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                       onClick={handleTestWebhook}
                       className="px-4 py-2 rounded-xl text-xs font-black text-white bg-slate-900 hover:bg-slate-800 shadow-sm transition-all flex items-center gap-1.5"
                     >
-                      <Sparkles size={13} className="text-amber-400" />
-                      <span>Probar Flujo con Sesión Simulada</span>
+                      <ShieldCheck size={13} className="text-emerald-400" />
+                      <span>Comprobar Enlace de Conexión</span>
                     </button>
                     <button
                       onClick={() => setIsPasteModalOpen(true)}

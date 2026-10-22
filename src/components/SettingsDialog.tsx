@@ -126,103 +126,27 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const handleSimulateTest = async () => {
     try {
       setIsTestingWebhook(true);
-      const nowStr = getLocalDateString();
-      const testPayload = {
-        isTest: true,
-        event: "test_connection",
-        source: "aerofocus_pro",
-        flightId: `test_ping_${Date.now()}`,
-        date: nowStr,
-        dailyTotalEffectiveHours: 1.5,
-        topics: [
-          {
-            topicId: "jud-const-01",
-            topicNumber: 1,
-            topicTitle: "Derecho Constitucional - Tema 1: La Constitución Española de 1978",
-            category: "Derecho Constitucional",
-            modality: "repaso",
-            effectiveHours: 1.5,
-            effectiveMinutes: 90
-          }
-        ]
-      };
-
-      try {
-        // Probar endpoint real de AeroFocus
-        const res = await fetch("/api/webhook/aerofocus", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${webhookToken || "wp_qLXi6WFkFY_live"}`
-          },
-          body: JSON.stringify(testPayload)
-        });
-
-        if (res.ok) {
-          const text = await res.text();
-          try {
-            JSON.parse(text);
-          } catch {
-            // 200 OK from server
-          }
-        }
-      } catch (networkErr) {
-        console.warn("Direct /api/webhook/aerofocus fetch failed, local simulation active:", networkErr);
-      }
-
-      const sampleTopicItem = {
-        topicId: "jud-const-01",
-        topicNumber: 1,
-        topicTitle: "Derecho Constitucional - Tema 1: La Constitución Española de 1978",
-        category: "Derecho Constitucional",
-        modality: "repaso" as const,
-        effectiveHours: 1.5,
-        effectiveMinutes: 90
-      };
-
-      // Registro simulado para confirmar conexión y feedback visual inmediato
-      const simulatedRecord: WebhookSyncRecord = {
-        id: `af_test_${Date.now()}`,
-        receivedAt: new Date().toISOString(),
-        date: nowStr,
-        source: "aerofocus_pro",
-        flightId: `test_ping_${Date.now()}`,
-        totalFlightEffectiveMinutes: 90,
-        totalFlightEffectiveHours: 1.5,
-        status: "pending",
-        topics: [
-          {
-            resolvedTopicId: "jud-const-01",
-            resolvedSubjectId: "constitucional",
-            resolvedTopicNumber: 1,
-            resolvedTopicTitle: "Derecho Constitucional - Tema 1: La Constitución Española de 1978",
-            effectiveMinutes: 90,
-            effectiveHours: 1.5,
-            modality: "repaso",
-            notes: "Sincronizado vía Prueba AeroFocus Webhook",
-            original: sampleTopicItem
-          }
-        ],
-        summary: {
-          estudioHours: 0,
-          repasoHours: 1.5,
-          refrescoHours: 0,
-          totalHours: 1.5
-        }
-      };
-
-      // Guardar en histórico local
-      setWebhookLogs(prev => {
-        const next = [simulatedRecord, ...prev.filter(p => p.id !== simulatedRecord.id)].slice(0, 20);
-        try { localStorage.setItem("wellsprep_webhook_logs", JSON.stringify(next)); } catch {}
-        return next;
+      const res = await fetch("/api/webhook/aerofocus", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${webhookToken || "wp_qLXi6WFkFY_live"}`
+        },
+        body: JSON.stringify({
+          isTest: true,
+          event: "test_connection"
+        })
       });
 
-      toast.success("¡Conexión verificada con éxito! El webhook de WellsPrep está 100% operativo y listo.");
-      await syncPendingWebhookEvents();
+      const data = await res.json();
+      if (res.ok && data.success) {
+        toast.success("✅ ¡Enlace verificado con éxito! Conexión operativa con AeroFocus Pro (No se insertan sesiones ficticias).");
+      } else {
+        toast.error("Fallo de enlace: " + (data.error || "Respuesta no autorizada"));
+      }
       await fetchWebhookLogs();
     } catch (e: any) {
-      toast.error("Error al conectar con el servidor: " + (e?.message || "Error desconocido"));
+      toast.error("Error al comprobar enlace: " + (e?.message || "Error desconocido"));
     } finally {
       setIsTestingWebhook(false);
     }

@@ -463,9 +463,17 @@ Return a JSON array of these objects. ONLY valid JSON.`;
     res.json({ status: "ok", acknowledged: updatedCount });
   });
 
-  // Simulate test webhook event from AeroFocus Pro
+  // Webhook test endpoint for AeroFocus Pro
   app.post("/api/webhook/test", async (req, res) => {
     try {
+      if (!req.body?.simulateSession) {
+        return res.json({
+          status: "ok",
+          success: true,
+          message: "Enlace operativo AeroFocus Pro <-> WellsPrep",
+          ready: true
+        });
+      }
       const { resolveAeroFocusTopic } = await import("./src/lib/topicResolver");
       const sampleTopic = req.body?.topic || {
         topicId: "jud-const-01",

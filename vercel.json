@@ -10,6 +10,22 @@
       "destination": "/api/webhook/aerofocus"
     },
     {
+      "source": "/api/webhook",
+      "destination": "/api/webhook/aerofocus"
+    },
+    {
+      "source": "/api/webhook/",
+      "destination": "/api/webhook/aerofocus"
+    },
+    {
+      "source": "/api/aerofocus",
+      "destination": "/api/webhook/aerofocus"
+    },
+    {
+      "source": "/api/sync/aerofocus",
+      "destination": "/api/webhook/aerofocus"
+    },
+    {
       "source": "/((?!api/).*)",
       "destination": "/index.html"
     }
@@ -21,7 +37,7 @@
         { "key": "Access-Control-Allow-Credentials", "value": "true" },
         { "key": "Access-Control-Allow-Origin", "value": "*" },
         { "key": "Access-Control-Allow-Methods", "value": "GET,OPTIONS,PATCH,DELETE,POST,PUT" },
-        { "key": "Access-Control-Allow-Headers", "value": "X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version, Authorization, X-Event, X-API-Key, X-Source" }
+        { "key": "Access-Control-Allow-Headers", "value": "X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version, Authorization, X-Event, X-API-Key, X-Source, X-Test-Ping, X-Token, X-Webhook-Token" }
       ]
     }
   ]

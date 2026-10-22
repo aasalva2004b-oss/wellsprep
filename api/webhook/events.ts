@@ -1,33 +1,16 @@
-import fs from 'fs';
-import path from 'path';
+import { corsHeaders, loadWebhookEvents } from '../../src/lib/webhookStorage';
 
-function getEventsFilePath() {
-  try {
-    const primary = path.join(process.cwd(), 'uploads', 'aerofocus_events.json');
-    const dir = path.dirname(primary);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    return primary;
-  } catch (e) {
-    return path.join('/tmp', 'aerofocus_events.json');
-  }
-}
-
-export default async function handler(req, res) {
-  res.setHeader('Access-Control-Allow-Origin', '*');
+export default async function handler(req: any, res: any) {
+  res.setHeader('Access-Control-Allow-Origin', corsHeaders['Access-Control-Allow-Origin']);
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader('Access-Control-Allow-Headers', corsHeaders['Access-Control-Allow-Headers']);
 
   if (req.method === 'OPTIONS') {
     return res.status(204).end();
   }
 
   try {
-    const filePath = getEventsFilePath();
-    let events = [];
-    if (fs.existsSync(filePath)) {
-      events = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-    }
-
+    const events = loadWebhookEvents();
     const statusFilter = req.query?.status;
     const limit = parseInt(req.query?.limit || '50', 10);
 
@@ -44,7 +27,7 @@ export default async function handler(req, res) {
       quarantinedCount,
       pendingCount: quarantinedCount
     });
-  } catch (err) {
+  } catch (err: any) {
     return res.status(200).json({
       events: [],
       total: 0,
