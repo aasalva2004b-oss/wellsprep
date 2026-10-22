@@ -17,6 +17,17 @@ async function startServer() {
   app.use(express.urlencoded({ extended: true, limit: '10mb' }));
   app.use(express.text({ type: ['text/*', 'application/javascript'], limit: '10mb' }));
 
+  // CORS middleware for external webhooks
+  app.use('/api/webhook', (req, res, next) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS, PATCH');
+    res.setHeader('Access-Control-Allow-Headers', '*');
+    if (req.method === 'OPTIONS') {
+      return res.status(204).end();
+    }
+    next();
+  });
+
   app.post("/api/parse-pdf", upload.single("pdf"), async (req, res) => {
     try {
       if (!req.file) {
@@ -119,19 +130,30 @@ Return a JSON array of these objects. ONLY valid JSON.`;
     });
   }
 
-  // Webhook endpoint for AeroFocus Pro (supports /api/webhook/aerofocus, /route, .js, .ts)
+  const EXPECTED_TOKEN = 'wp_qLXi6WFkFY_live';
+  const corsHeaders = {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Event, X-API-Key, X-Source, X-Test-Ping',
+  };
+
+  // Webhook endpoint for AeroFocus Pro (supports all variations and routes)
   app.all([
     "/api/webhook/aerofocus",
     "/api/webhook/aerofocus/",
     "/api/webhook/aerofocus/route",
     "/api/webhook/aerofocus/route.ts",
     "/api/webhook/aerofocus.js",
-    "/api/webhook/aerofocus.ts"
+    "/api/webhook/aerofocus.ts",
+    "/api/webhook",
+    "/api/webhook/",
+    "/api/aerofocus",
+    "/api/sync/aerofocus"
   ], async (req, res) => {
-    // 1. Cabeceras CORS obligatorias para peticiones web y Vercel
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Event, X-API-Key, X-Source, X-Test-Ping');
+    // 1. Cabeceras CORS universales obligatorias
+    res.setHeader('Access-Control-Allow-Origin', corsHeaders['Access-Control-Allow-Origin']);
+    res.setHeader('Access-Control-Allow-Methods', corsHeaders['Access-Control-Allow-Methods']);
+    res.setHeader('Access-Control-Allow-Headers', corsHeaders['Access-Control-Allow-Headers']);
 
     if (req.method === 'OPTIONS') {
       return res.status(204).end();
@@ -147,30 +169,35 @@ Return a JSON array of these objects. ONLY valid JSON.`;
     }
 
     try {
+      // 1. Verificación de Seguridad
+      const authHeader = req.headers.authorization;
+      const apiKey = (req.headers['x-api-key'] || req.headers['x-token'] || req.headers['x-webhook-token']) as string | undefined;
+      const token = apiKey || (authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null);
+
+      if (token && token !== EXPECTED_TOKEN) {
+        console.warn(`[AeroFocus Webhook] Token no autorizado: "${token}". Esperado: "${EXPECTED_TOKEN}"`);
+        return res.status(401).json({ error: 'Token no autorizado' });
+      }
+
       // 2. Extracción y normalización de Payload (admite JSON, string crudo, URL-encoded)
       let payload = req.body;
       if (typeof payload === 'string') {
         try {
           payload = JSON.parse(payload);
         } catch {
-          // Si no es JSON puro, mantener objeto vacío o buscar en req.body
           payload = {};
         }
       } else if (!payload || typeof payload !== 'object') {
         payload = {};
       }
 
-      // Si venía empaquetado en payload.payload
       if (typeof payload.payload === 'string') {
         try { payload = JSON.parse(payload.payload); } catch {}
       }
 
-      // Verificación de Token permisiva para evitar descartar sesiones reales del opositor
-      const authHeader = req.headers.authorization;
-      const token = req.headers['x-api-key'] || req.headers['x-token'] || req.headers['x-webhook-token'] || (authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null) || (req.query.token as string);
-      console.log(`[AeroFocus Webhook] Recibida petición desde ${req.ip}. Evento: ${payload.event || 'estudio'}. Token provisto: ${Boolean(token)}`);
+      console.log(`[AeroFocus Webhook] Recibida petición desde ${req.ip}. Evento: ${payload.event || 'daily_sync'}. Token provisto: ${Boolean(token)}`);
 
-      // 3. Respuesta al test de conexión / Handshake de AeroFocus
+      // 3. Test de conexión / Handshake de AeroFocus (no toca la base de datos)
       if (payload.isTest || payload.event === 'test_connection' || req.headers['x-test-ping']) {
         return res.status(200).json({
           success: true,
@@ -179,7 +206,12 @@ Return a JSON array of these objects. ONLY valid JSON.`;
         });
       }
 
-      // 4. Extracción exhaustiva de temas/sesiones de cualquier formato AeroFocus
+      // 4. Extracción universal con aliases planos
+      const { date, fecha, transactionId } = payload;
+      const sessionDate = date || fecha || (payload.timestamp ? new Date(payload.timestamp).toISOString().split('T')[0] : new Date().toISOString().split('T')[0]);
+      const totalHours = Number(payload.horasEfectivas ?? payload.dailyTotalEffectiveHours ?? payload.totalEffectiveHours ?? 0);
+      const totalMins = Number(payload.minutosEfectivos ?? payload.dailyTotalEffectiveMinutes ?? payload.totalFlightEffectiveMinutes ?? Math.round(totalHours * 60));
+
       let rawTopics: any[] = [];
       if (Array.isArray(payload)) {
         rawTopics = payload;
@@ -197,25 +229,9 @@ Return a JSON array of these objects. ONLY valid JSON.`;
         rawTopics = payload.tasks;
       } else if (Array.isArray(payload.blocks)) {
         rawTopics = payload.blocks;
-      } else if (Array.isArray(payload.pomodoros)) {
-        rawTopics = payload.pomodoros;
-      } else if (Array.isArray(payload.records)) {
-        rawTopics = payload.records;
-      } else if (Array.isArray(payload.logs)) {
-        rawTopics = payload.logs;
-      } else if (Array.isArray(payload.history)) {
-        rawTopics = payload.history;
-      } else if (payload.data && Array.isArray(payload.data)) {
-        rawTopics = payload.data;
       } else if (payload.data && Array.isArray(payload.data.topics)) {
         rawTopics = payload.data.topics;
-      } else if (payload.data && Array.isArray(payload.data.sessions)) {
-        rawTopics = payload.data.sessions;
-      } else if (payload.flight && Array.isArray(payload.flight.topics)) {
-        rawTopics = payload.flight.topics;
-      } else if (payload.flight && Array.isArray(payload.flight.sessions)) {
-        rawTopics = payload.flight.sessions;
-      } else if (payload.topicId || payload.topicTitle || payload.topicNumber || payload.topic || payload.subject || payload.tema || payload.duration || payload.minutes || payload.effectiveHours || payload.hours) {
+      } else if (payload.topicId || payload.topicTitle || payload.topicNumber || payload.tema || payload.topic || payload.subject || payload.materia) {
         rawTopics = [payload];
       }
 
@@ -224,95 +240,125 @@ Return a JSON array of these objects. ONLY valid JSON.`;
         return res.status(200).json({
           status: "ok",
           synced: true,
-          date: payload.date || new Date().toISOString().split("T")[0],
+          date: sessionDate,
+          transactionId: transactionId || `ping_${sessionDate}`,
           processedTopics: 0,
+          effectiveHours: 0,
           message: "Conexión probada con éxito entre AeroFocus Pro y Wellsprep"
         });
       }
 
-      // Si no se encontraron temas pero venía una sesión genérica con tiempo
-      if (rawTopics.length === 0) {
-        console.warn("[AeroFocus Webhook] Payload sin lista de temas explícita. Creando registro de estudio general para no perder horas:", payload);
+      // Si no se encontraron temas pero venía tiempo efectivo
+      if (rawTopics.length === 0 && (totalHours > 0 || totalMins > 0)) {
         rawTopics = [{
-          topicTitle: payload.title || payload.topicTitle || payload.name || "Sesión AeroFocus (Revisar tema)",
-          effectiveMinutes: Number(payload.effectiveMinutes) || Number(payload.minutes) || Number(payload.duration) || 45,
-          effectiveHours: Number(payload.effectiveHours) || Number(payload.hours) || ((Number(payload.effectiveMinutes) || 45) / 60),
-          category: payload.category || payload.subject || "Constitucional",
-          modality: payload.modality || "repaso",
-          notes: payload.notes || "Sesión de estudio recibida de AeroFocus"
+          materia: payload.materia || payload.subject || "Derecho Constitucional",
+          topicTitle: payload.title || payload.topicTitle || payload.name || "Sesión AeroFocus Pro",
+          effectiveMinutes: totalMins || 45,
+          effectiveHours: totalHours || (totalMins / 60),
+          modality: payload.modality || "estudio"
         }];
       }
 
       // Dynamic import to ensure clean resolution
       const { resolveAeroFocusTopic } = await import("./src/lib/topicResolver");
-
-      const date = payload.date || payload.flightDate || payload.sessionDate || (payload.timestamp ? new Date(payload.timestamp).toISOString().split("T")[0] : new Date().toISOString().split("T")[0]);
-      const flightId = String(payload.flightId || payload.id || payload.flightNumber || `vuelo_${Date.now()}`);
-
       const resolvedTopics: any[] = [];
+
       for (const t of rawTopics) {
+        const materia = t.materia || t.subject || t.subjectName || t.category || payload.materia || payload.subject || 'Derecho Constitucional';
+        const numeroTema = t.temaNumero ?? t.topicNumber ?? null;
+        const titulo = t.tema || t.topic || t.topicTitle || (numeroTema ? `Tema ${numeroTema}` : 'Tema');
+        const modalidad = t.modalidad || t.modality || t.type || 'estudio';
+        const horas = Number(t.horasEfectivas ?? t.effectiveHours ?? (t.effectiveMinutes ? Number(t.effectiveMinutes) / 60 : 0)) || 0;
+        const minutos = Number(t.minutosEfectivos ?? t.effectiveMinutes ?? Math.round(horas * 60)) || 0;
+        const startPage = t.startPage ?? t.pages?.pageStart ?? null;
+        const endPage = t.endPage ?? t.pages?.pageEnd ?? null;
+        const pagesCount = t.pagesCount ?? t.pages?.pagesCount ?? (startPage != null && endPage != null ? Math.max(0, endPage - startPage + 1) : 0);
+        const pagesText = t.pagesText ?? t.pages?.rawText ?? t.paginas ?? (startPage != null && endPage != null ? `Págs. ${startPage}-${endPage}` : undefined);
+        const isCompleted = Boolean(t.completado || t.completed || t.isTopicCompleted || t.status === 'completed');
+
         const enriched = {
           ...t,
-          category: t.category || payload.category || payload.subject || payload.subjectName || 'Constitucional',
-          modality: t.modality || payload.modality || 'repaso',
+          category: materia,
+          materia,
+          topicNumber: numeroTema,
+          temaNumero: numeroTema,
+          topicTitle: titulo,
+          tema: titulo,
+          topic: titulo,
+          modality: modalidad,
+          modalidad,
+          effectiveHours: horas,
+          horasEfectivas: horas,
+          effectiveMinutes: minutos,
+          minutosEfectivos: minutos,
+          startPage,
+          endPage,
+          pagesCount,
+          pagesText,
+          isTopicCompleted: isCompleted,
+          completesVuelta: isCompleted || Boolean(t.completesVuelta)
         };
-        const resolved = resolveAeroFocusTopic(enriched);
-        const effMins = Number(t.effectiveMinutes) || Number(t.minutes) || Number(t.duration) || Math.round((Number(t.effectiveHours) || Number(t.hours) || 0) * 60) || 30;
-        const effHours = Number(t.effectiveHours) || Number(t.hours) || (effMins / 60);
 
-        if (resolved) {
-          resolvedTopics.push({
-            ...resolved,
-            effectiveMinutes: effMins,
-            effectiveHours: effHours,
-            difficulty: t.difficulty !== undefined ? Number(t.difficulty) : undefined,
-            dificultadReal: t.dificultadReal !== undefined ? Number(t.dificultadReal) : (t.difficulty !== undefined ? Number(t.difficulty) : undefined),
-            completesVuelta: t.completesVuelta !== undefined ? Boolean(t.completesVuelta) : undefined,
-          });
-        } else {
-          resolvedTopics.push({
-            resolvedTopicId: String(t.topicId || t.topicNumber || t.id || 'topic-unknown'),
-            resolvedSubjectId: 'general',
-            resolvedTopicNumber: Number(t.topicNumber || 0),
-            resolvedTopicTitle: t.topicTitle || t.title || t.name || `Tema ${t.topicNumber || ''}`,
-            effectiveMinutes: effMins,
-            effectiveHours: effHours,
-            modality: t.modality || 'repaso',
-            difficulty: t.difficulty !== undefined ? Number(t.difficulty) : undefined,
-            dificultadReal: t.dificultadReal !== undefined ? Number(t.dificultadReal) : (t.difficulty !== undefined ? Number(t.difficulty) : undefined),
-            completesVuelta: t.completesVuelta !== undefined ? Boolean(t.completesVuelta) : undefined,
-            cantoGrade: t.cantoGrade ?? t.grade,
-            cantoSeconds: t.cantoSeconds,
-            cantoType: t.cantoType,
-            mistakes: t.mistakes,
-            notes: t.notes || 'Sincronizado vía AeroFocus Webhook'
-          });
-        }
+        const resolved = resolveAeroFocusTopic(enriched);
+
+        const topicItem: any = resolved
+          ? {
+              ...resolved,
+              effectiveMinutes: minutos || resolved.effectiveMinutes,
+              effectiveHours: horas || resolved.effectiveHours,
+              startPage,
+              endPage,
+              pagesCount,
+              pagesText,
+              isTopicCompleted: isCompleted,
+              completesVuelta: isCompleted || resolved.completesVuelta
+            }
+          : {
+              resolvedTopicId: String(t.topicId || (numeroTema ? `constitucional-${numeroTema}` : 'topic-unknown')),
+              resolvedSubjectId: 'constitucional',
+              resolvedTopicNumber: Number(numeroTema || 0),
+              resolvedTopicTitle: titulo,
+              effectiveMinutes: minutos || 30,
+              effectiveHours: horas || 0.5,
+              modality: modalidad,
+              startPage,
+              endPage,
+              pagesCount,
+              pagesText,
+              isTopicCompleted: isCompleted,
+              completesVuelta: isCompleted,
+              notes: t.notes || 'Sincronizado vía AeroFocus Webhook'
+            };
+
+        resolvedTopics.push(topicItem);
       }
 
-      const totalEffectiveMinutes = Number(payload.totalFlightEffectiveMinutes) || 
-        resolvedTopics.reduce((acc, t) => acc + (t.effectiveMinutes || 0), 0);
-      const totalEffectiveHours = Number(payload.dailyTotalEffectiveHours) || Number(payload.totalFlightEffectiveHours) || 
-        Math.round((totalEffectiveMinutes / 60) * 100) / 100;
+      const calculatedEffectiveMinutes = totalMins || resolvedTopics.reduce((acc, t) => acc + (t.effectiveMinutes || 0), 0);
+      const calculatedEffectiveHours = totalHours || Math.round((calculatedEffectiveMinutes / 60) * 100) / 100;
+      const flightId = String(payload.flightId || transactionId || `vuelo_${sessionDate}`);
 
       const record = {
         id: `af_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
         receivedAt: new Date().toISOString(),
-        date,
-        source: payload.source || "aerofocus",
+        date: sessionDate,
+        source: payload.source || "aerofocus_pro",
         flightId,
-        dailyTotalEffectiveHours: Number(payload.dailyTotalEffectiveHours) || totalEffectiveHours,
-        totalFlightEffectiveMinutes: totalEffectiveMinutes,
-        totalFlightEffectiveHours: totalEffectiveHours,
+        transactionId: transactionId || flightId,
+        dailyTotalEffectiveHours: calculatedEffectiveHours,
+        totalFlightEffectiveMinutes: calculatedEffectiveMinutes,
+        totalFlightEffectiveHours: calculatedEffectiveHours,
         status: "quarantined",
         topics: resolvedTopics,
         rawPayload: payload,
+        reportMarkdown: payload.reportMarkdown,
+        pilotCallsign: payload.pilotCallsign || payload.callsignName,
+        focusScore: payload.focusScore,
         summary: payload.summary || {
           estudioHours: resolvedTopics.filter(t => t.modality === 'primer_estudio').reduce((a, b) => a + (b.effectiveHours || 0), 0),
           repasoHours: resolvedTopics.filter(t => t.modality === 'repaso').reduce((a, b) => a + (b.effectiveHours || 0), 0),
           refrescoHours: resolvedTopics.filter(t => t.modality === 'refresco').reduce((a, b) => a + (b.effectiveHours || 0), 0),
           cantoHours: resolvedTopics.filter(t => t.modality === 'canto').reduce((a, b) => a + (b.effectiveHours || 0), 0),
-          totalHours: totalEffectiveHours
+          totalHours: calculatedEffectiveHours
         }
       };
 
@@ -323,27 +369,26 @@ Return a JSON array of these objects. ONLY valid JSON.`;
       // Notificar a todos los clientes web conectados en tiempo real mediante SSE
       broadcastWebhookEvent(record);
 
-      console.log(`[AeroFocus Webhook] Evento ${record.id} retenido en CUARENTENA con éxito (${resolvedTopics.length} temas).`);
+      console.log(`[AeroFocus Webhook] Evento ${record.id} (${transactionId || flightId}) procesado con éxito (${resolvedTopics.length} temas, ${calculatedEffectiveHours}h).`);
 
+      // Respuesta exacta estandarizada compatible con Next.js y AeroFocus Pro
       return res.status(200).json({
         status: 'ok',
         synced: true,
-        quarantined: true,
-        date: payload.date || date,
+        date: sessionDate,
+        transactionId: transactionId || flightId,
         processedTopics: resolvedTopics.length,
-        effectiveHours: totalEffectiveHours,
-        receivedTopics: rawTopics.length,
-        flightId,
+        effectiveHours: calculatedEffectiveHours,
+        quarantined: true,
         recordId: record.id,
-        message: 'Evento recibido y retenido en CUARENTENA de seguridad. No se altera el expediente oficial.'
+        message: payload.message || 'Cierre diario sincronizado con éxito en WellsPrep'
       });
     } catch (err: any) {
       console.error("[AeroFocus Webhook] Error processing request:", err);
-      return res.status(200).json({
-        status: "ok",
-        synced: false,
-        error: err.message,
-        processedTopics: 0
+      return res.status(500).json({
+        error: err?.message || 'Error interno',
+        status: 'error',
+        synced: false
       });
     }
   });

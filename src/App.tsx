@@ -1,7 +1,7 @@
 import { useState, useEffect, ReactNode } from "react";
 import { 
   BookOpen, LogOut, PanelLeftClose, PanelLeftOpen, ActivitySquare, Award,
-  Search, Mic, Command
+  Search, Mic, Command, Shield, Sparkles, SlidersHorizontal, RefreshCw
 } from "lucide-react";
 import { cn } from "./lib/utils";
 import { TemarioView } from "./components/TemarioView";
@@ -11,6 +11,7 @@ import { signOut } from "./lib/firebase";
 import { useFirebase } from "./lib/FirebaseProvider";
 import { Toaster } from "sonner";
 import { SettingsDialog } from "./components/SettingsDialog";
+import { SyncControlCenterDialog } from "./components/SyncControlCenterDialog";
 import { CommandPalette } from "./components/CommandPalette";
 import { playSound } from "./lib/sound";
 import { Topic } from "./types";
@@ -21,8 +22,9 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<"dashboard" | "temario" | "preparador">("temario");
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isSyncCenterOpen, setIsSyncCenterOpen] = useState(false);
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
-  const { user } = useFirebase();
+  const { user, quarantinedEvents = [] } = useFirebase();
 
   // Global keyboard shortcut for Command Palette Spotlight (Cmd+K / Ctrl+K)
   useEffect(() => {
@@ -111,6 +113,13 @@ export default function App() {
               active={activeTab === "dashboard"}
               onClick={() => { playSound.click(); setActiveTab("dashboard"); }}
             />
+            <NavItem
+              icon={<Shield size={17} strokeWidth={2.3} className={cn(quarantinedEvents.length > 0 && "text-amber-500 animate-pulse")} />}
+              label="Bandeja AeroFocus"
+              badge={quarantinedEvents.length > 0 ? `${quarantinedEvents.length}` : undefined}
+              active={isSyncCenterOpen}
+              onClick={() => { playSound.click(); setIsSyncCenterOpen(true); }}
+            />
           </nav>
 
           {/* User Profile Card */}
@@ -162,6 +171,37 @@ export default function App() {
               <span>Buscar...</span>
               <kbd className="px-1.5 py-0.5 rounded bg-slate-100 text-[10px] font-mono text-slate-400">⌘K</kbd>
             </button>
+          </div>
+        )}
+
+        {/* Banner de Sincronización AeroFocus en Cuarentena */}
+        {quarantinedEvents.length > 0 && (
+          <div className="shrink-0 px-4 pt-4 pb-1 z-35">
+            <div className="p-3.5 bg-amber-500/10 border border-amber-500/30 backdrop-blur-xl rounded-2xl flex flex-wrap items-center justify-between gap-3 shadow-xs">
+              <div className="flex items-center gap-3">
+                <div className="w-9 h-9 rounded-xl bg-amber-500/20 text-amber-800 flex items-center justify-center shrink-0">
+                  <Sparkles size={17} className="animate-pulse" />
+                </div>
+                <div>
+                  <div className="text-xs font-black text-amber-950 flex items-center gap-2">
+                    <span>⚡ Transmisión de AeroFocus recibida en Cuarentena</span>
+                    <span className="px-2 py-0.5 rounded-full bg-amber-500 text-white text-[10px] font-black">
+                      {quarantinedEvents.length} {quarantinedEvents.length === 1 ? "sesión pendiente" : "sesiones pendientes"}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-amber-900/80 mt-0.5">
+                    Modo Prueba activo. Revisa los repasos recibidos, califica su dificultad (1-10), ajusta si suman vuelta o unifícalos antes de incorporarlos al expediente.
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => { playSound.click(); setIsSyncCenterOpen(true); }}
+                className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-black shadow-xs transition-all flex items-center gap-1.5 cursor-pointer active:scale-95"
+              >
+                <SlidersHorizontal size={13} />
+                <span>Revisar, Calificar y Aprobar</span>
+              </button>
+            </div>
           </div>
         )}
 
@@ -246,6 +286,9 @@ export default function App() {
       />
 
       <AnimatePresence>
+        {isSyncCenterOpen && (
+          <SyncControlCenterDialog onClose={() => setIsSyncCenterOpen(false)} />
+        )}
         {isSettingsOpen && (
           <SettingsDialog onClose={() => setIsSettingsOpen(false)} />
         )}
@@ -261,17 +304,19 @@ function NavItem({
   label,
   active,
   onClick,
+  badge,
 }: {
   icon: ReactNode;
   label: string;
   active: boolean;
   onClick: () => void;
+  badge?: string | number;
 }) {
   return (
     <button
       onClick={onClick}
       className={cn(
-        "flex items-center w-full gap-3 px-4 py-3 rounded-2xl text-sm font-bold transition-all duration-300 relative group overflow-hidden",
+        "flex items-center w-full justify-between px-4 py-3 rounded-2xl text-sm font-bold transition-all duration-300 relative group overflow-hidden cursor-pointer",
         active
           ? "text-indigo-700 bg-indigo-50/50"
           : "text-slate-500 hover:bg-slate-50 hover:text-slate-900",
@@ -285,10 +330,17 @@ function NavItem({
           transition={{ type: "spring", stiffness: 400, damping: 30 }}
         />
       )}
-      <div className={cn("relative z-10 transition-transform duration-300 origin-left", active ? "scale-110" : "group-hover:scale-110")}>
-        {icon}
+      <div className="flex items-center gap-3 relative z-10">
+        <div className={cn("transition-transform duration-300 origin-left", active ? "scale-110" : "group-hover:scale-110")}>
+          {icon}
+        </div>
+        <span className="tracking-wide">{label}</span>
       </div>
-      <span className="relative z-10 tracking-wide">{label}</span>
+      {badge !== undefined && (
+        <span className="relative z-10 px-2 py-0.5 rounded-full text-[10px] font-black bg-amber-500 text-white shadow-xs">
+          {badge}
+        </span>
+      )}
     </button>
   );
 }

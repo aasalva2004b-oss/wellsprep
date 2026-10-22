@@ -1,126 +1,80 @@
-# Master Refactoring Plan: WellsPrep 9.5+ Editorial Grade
+# Plan de Implementación: Motor Matemático de Ebbinghaus para la Sección de Preparador
 
-> **Rol:** Staff Engineer Especialista en Refactorización & Lead UI/UX Designer  
-> **Objetivo:** Transformar la base de código y la experiencia de usuario de un "5/10" a un **"9.5/10" de nivel Apple Design Award**, sin añadir ninguna funcionalidad nueva.  
-> **Restricción Absoluta:** CERO características nuevas, cero botones inventados, cero cambios en la API pública de datos. Refactorización pura de arquitectura, rendimiento, legibilidad y pulido estético.
+## 1. Diagnóstico y Problema Actual
+En la versión actual de `preparationScore.ts`, la nota global se calculaba mediante una media aditiva estática:
+$$\text{Nota} = 0.35 \times \text{Tiempo} + 0.25 \times \text{Ebbinghaus} + 0.20 \times \text{NotaPrep} + 0.20 \times \text{Madurez}$$
 
----
-
-## 🔍 Diagnóstico Crítico: ¿Por qué la aplicación es un "5/10" actualmente?
-
-1. **Monolitos Extremos ("God Components"):**
-   - `TopicEditorDialog.tsx`: **2,234 líneas de código**. Contiene simultáneamente la gestión de pestañas, formularios de cante, llamadas directas a Firestore, canvas de audio/voz, 3 gráficos Recharts, cálculos de curvas de Ebbinghaus, y filtros de historial.
-   - `DashboardView.tsx`: **2,180 líneas de código**. Mezcla 12 KPIs matemáticos, renderizado de mapas de calor tipo GitHub, lógica de colas de repaso, gráficos dobles de dispersión de cante y modales secundarios.
-   - `FirebaseProvider.tsx`: **1,952 líneas de código**. Mezcla autenticación, listeners a 2 bases de datos distintas, cuarentena de webhooks, algoritmos de cálculo de notas, y llamadas directas de borrado/inserción.
-2. **Acoplamiento Fuerte entre Lógica de Negocio y Presentación:**
-   - Si se cambia un cálculo de Ebbinghaus o de velocidad de cante, hay que editar archivos JSX gigantes.
-   - No existen ViewModels ni hooks específicos de dominio (`useTopicEditor`, `useCantoAnalytics`).
-3. **Ineficiencia de Renderizado (Re-renders en Cadena):**
-   - Un cambio en una sesión vuelve a renderizar el mapa de calor entero de 365 días, todos los KPIs y los modales subyacentes.
-   - Falta de memoización selectiva (`React.memo`, selectores granulares).
-4. **Inconsistencia Visual:**
-   - Múltiples estilos de sombras, esquinas redondeadas (`rounded-xl` vs `rounded-2xl` vs `rounded-3xl` sin jerarquía espacial), colores dispersos (`blue-600`, `indigo-600`, `slate-900` compitiendo como acentos primarios) y falta de disciplina tipográfica en números tabulares.
+**El Fallo:** Si un tema se cantó hace 1 mes (30 días) en 13:00 con nota 9.0, la suma sigue dando $\approx 7.5 - 9.0$ porque el 75% de los factores no decaían con el tiempo, falseando la realidad del opositor ("hace un mes que no lo toco, lo tengo olvidado pero la app me dice que tengo un 9").
 
 ---
 
-## ⚙️ FASE 1: Saneamiento Arquitectónico y Deuda Técnica
+## 2. Nuevo Modelo Matemático Multiplicativo Dinámico (Ebbinghaus)
 
-### 1.1 Patrón Arquitectónico: MVVM + Domain Custom Hooks
-Separaremos de forma estricta las tres capas de la aplicación:
-- **Model (Datos y Algoritmos Puros):**
-  - Módulos en `src/lib/` 100% agnósticos de React (cálculo de intervalos de repetición espaciada, curvas de olvido de Ebbinghaus, normalización de cantes, filtros de telemetría).
-- **ViewModel (Custom Hooks de Dominio):**
-  - Encapsulan el estado reactivo, la validación y las acciones de Firestore. La vista solo consume funciones y estados planos.
-  - `useTopicEditor(topic, progress, recentSessions)`: maneja pestañas, cálculo de retención, formulario de cante y guardado.
-  - `useDashboardMetrics(recentSessions, userProgress, allTopics)`: calcula KPIs, rachas, volumen y estado de forma sin ensuciar el JSX.
-  - `useCantoTelemetry(sessions)`: procesa dispersión de notas, tiempos medios y clasificación de cantes.
-  - `usePreparadorSchedule()`: gestiona la rotación Lunes/Jueves y las evaluaciones.
-- **View (Componentes Tontos / Pure UI):**
-  - Componentes limpios enfocados únicamente en diseño, accesibilidad y renderizado.
+Conforme a tus respuestas en las preguntas clarificatorias, implementamos un **modelo multiplicativo continuo basado en la física de la memoria**:
 
-### 1.2 Atomización de Componentes Monolito
+### A. Nota Teórica Pico ($P_{\text{pico}}$)
+Representa la solvencia máxima alcanzada cuando el tema estaba fresco:
+$$P_{\text{pico}} = w_{\text{tiempo}} \cdot S_{\text{tiempo}} + w_{\text{nota}} \cdot G + w_{\text{madurez}} \cdot M$$
+- $S_{\text{tiempo}}$: Calibrado contra los 12:30 min reglamentarios (ventana 11:50 - 13:40).
+- $G$: Última nota oficial del preparador (o inferida por vueltas/dificultad si no hay examen).
+- $M$: Maduración acumulada por vueltas al temario.
 
-#### A. Descomposición de `TopicEditorDialog` (2,234 líneas ➔ 6 submódulos limpios de < 200 líneas)
-Ubicación: `src/components/topic-editor/`
-1. `TopicEditorHeader.tsx`: Identificador canónico, título del tema, selector de pestañas y botones de cabecera.
-2. `TopicGeneralTab.tsx`: Estado de vuelta actual, nivel de dificultad, páginas y fechas de repaso.
-3. `TopicEbbinghausTab.tsx`: Visualización gráfica de la curva de retención y factor de memoria con Recharts optimizado.
-4. `TopicCantoMetricsTab.tsx`: Radar de notas, tiempos de exposición y comparador de registros.
-5. `TopicHistoryTab.tsx`: Lista cronológica de sesiones de estudio y cantes filtradas y deduplicadas.
-6. `TopicLogSessionForm.tsx`: Formulario de inserción rápida de cantes y repasos con validación y candado anti-duplicados.
+### B. Estabilidad de la Huella de Memoria ($S$)
+La memoria dura más días a medida que se acumulan vueltas y repasos de calidad:
+$$S = S_0 \times (1 + \alpha \cdot \text{Vueltas}) \times (1 + \beta \cdot \text{Repasos}) \times D_{\text{dif}}$$
+- $S_0 = 3.5\text{ días}$ (vida media base de un tema nuevo).
+- Cada vuelta incrementa la estabilidad un $60\%$ ($\alpha = 0.60$).
+- Cada repaso acumulado incrementa la estabilidad un $20\%$ ($\beta = 0.20$).
 
-#### B. Descomposición de `DashboardView` (2,180 líneas ➔ 6 submódulos limpios de < 250 líneas)
-Ubicación: `src/components/dashboard/`
-1. `DashboardHeroKPIs.tsx`: Tira ejecutiva de 4 tarjetas con métricas principales (Horas, Vueltas, Retención, Racha).
-2. `DashboardSmartQueue.tsx`: Cola de temas prioritarios del día según el algoritmo de arrastre.
-3. `DashboardHeatmap.tsx`: Mapa de calor de 365 días aislado con memoización para evitar re-renders masivos.
-4. `DashboardCantoScatterChart.tsx`: Gráfico dual de evolución de cantes (Nota vs Tiempo reglamentario).
-5. `DashboardRecentSessionsFeed.tsx`: Historial reciente de sesiones con edición rápida in-line.
-6. `DashboardQuickCantoModal.tsx`: Diálogo modal desacoplado para registrar cantes rápidos desde la cabina.
+### C. Días Transcurridos Efectivos ($t_{\text{eff}}$) con Freno Diferencial
+Regla aprobada: **El cante frena el olvido al 100% y los repasos de estudio al 50%**.
+- $t_{\text{cante}}$: Días transcurridos desde el último cante cronometrado.
+- $t_{\text{repaso}}$: Días transcurridos desde el último repaso/estudio.
+- Si sólo se ha estudiado pero no cantado:
+$$t_{\text{eff}} = t_{\text{cante}} - 0.5 \times (t_{\text{cante}} - t_{\text{repaso}})$$
+*(Ejemplo: cantado hace 30 días, repasado hoy $t_{\text{repaso}} = 0 \implies t_{\text{eff}} = 15\text{ días}$. Si se canta hoy $t_{\text{cante}} = 0 \implies t_{\text{eff}} = 0\text{ días}$ y retención al 100%).*
 
-### 1.3 Blindaje de Estado y Cero Re-renders Innecesarios
-- **Subscripción Selectiva:** Evitar que un cambio en `quarantinedEvents` provoque re-render de las estadísticas del temario.
-- **Memoización con `React.memo` y claves estables:** Cada fila de tema, celda del mapa de calor y punto de gráfico solo se volverá a dibujar si sus propiedades específicas cambian.
+### D. Factor de Retención Dinámica ($R(t)$)
+$$R(t) = \exp\left(-\frac{t_{\text{eff}}}{S}\right) \in (0, 1]$$
 
----
-
-## 🎨 FASE 2: Cohesión UI/UX y Pulido "Premium" (Estilo Apple Pro Editorial)
-
-### 2.1 Estandarización del Sistema de Diseño (Design Tokens)
-- **Superficie y Elevación Única:**
-  - Fondo de lienzo: `#F8FAFC` (Slate 50 neutro cálido) con textura de malla casi imperceptible.
-  - Tarjetas y Contenedores: `bg-white/90 backdrop-blur-xl border border-slate-200/80 shadow-[0_1px_3px_rgba(0,0,0,0.04),0_6px_16px_rgba(0,0,0,0.02)]`.
-  - CERO tarjetas anidadas dentro de tarjetas ("zero-nested-card discipline"). Se sustituyen por separadores sutiles de `1px` (`divide-slate-100`).
-- **Paleta de Color Semántica y Sobria:**
-  - **Color Maestro Primario:** Deep Slate (`#0F172A`) para cabeceras, botones principales e iconografía noble.
-  - **Acento Editorial:** Azul Zafiro / Índigo Sutil (`#3B82F6` / `#4F46E5`) para progreso activo y estados de foco.
-  - **Acento Cantes y Preparador:** Ámbar Nórdico (`#D97706`) usado exclusivamente para cronómetros, estrellas y notas.
-  - **Estado Operativo:** Verde Esmeralda (`#10B981`) y Carmín (`#EF4444`) para estados de aprobación/alerta.
-- **Disciplina Tipográfica y Numerales Tabulares:**
-  - Tipografía de lectura y analítica: Inter / System Sans con jerarquía rigurosa.
-  - **Regla Estricta `tabular-nums font-mono`:** Absolutamente todos los números (horas, minutos, segundos de cante, notas sobre 10, número de tema y fechas) utilizarán numerales tabulares para evitar el temblor o desalineación visual.
-
-### 2.2 Micro-Interacciones y Transiciones
-- **Animaciones Físicas de Resorte:** Uso de `motion/react` con curvas de aceleración `cubic-bezier(0.16, 1, 0.3, 1)` y duración rápida de $180\text{ms}$–$240\text{ms}$.
-- **Feedback Háptico Visual:** Todos los botones activos contarán con escala sutil `active:scale-[0.98]` y transiciones de color de borde ultra-suaves.
-- **Feedback de Notificaciones:** Erradicación total de modales de error invasivos. Uso unificado de `sonner` con diseño sobrio y tipografía nítida.
+### E. Proyección Continua de la Nota Actual ($P_{\text{actual}}$)
+El olvido actúa de forma **multiplicativa** sobre la competencia del tema:
+$$P_{\text{actual}} = P_{\text{base}} + (P_{\text{pico}} - P_{\text{base}}) \times R(t)$$
+- Con $P_{\text{base}} = 2.0$ (suelo de memoria residual).
+- **Efecto Realista**:
+  - Si $P_{\text{pico}} = 9.0$ y han pasado 30 días sin tocar el tema ($R \approx 0.18$), la nota proyectada cae a **$3.3 / 10$ (Crítico / Requiere rescate)**.
+  - Si se cantó ayer ($R \approx 0.95$), la nota se mantiene en **$8.7 / 10$ (Sobresaliente)**.
+  - Si se hizo un repaso de lectura hoy, la nota sube de $3.3$ a **$5.9$ (Aprobado en recuperación)**, reflejando el 50% de retención frente al 100% del cante.
 
 ---
 
-## 🛠️ FASE 3: Hoja de Ruta de Ejecución (Paso a Paso)
+## 3. Rediseño de la UX / Tarjeta del Tema en el Preparador
 
-```
-[Paso 1: Tokens y Constantes de Diseño]
-  └── Crear `src/lib/designSystem.ts` (clases unificadas de tarjetas, tipografía, badges).
-  
-[Paso 2: Extracción de Custom Hooks de Dominio]
-  ├── `src/hooks/useTopicEditor.ts`
-  ├── `src/hooks/useDashboardMetrics.ts`
-  └── `src/hooks/useCantoTelemetry.ts`
-  
-[Paso 3: Atomización de TopicEditorDialog (2,234 líneas)]
-  ├── Crear subcomponentes en `src/components/topic-editor/`
-  └── Reducir el orquestador principal a un contenedor ligero de < 180 líneas.
-  
-[Paso 4: Atomización de DashboardView (2,180 líneas)]
-  ├── Crear subcomponentes en `src/components/dashboard/`
-  └── Reducir el orquestador principal a un grid declarativo y limpio.
-  
-[Paso 5: Pulido UI/UX Estilo Apple Pro Editorial]
-  ├── Aplicar tipografía tabular (`tabular-nums font-mono`) en toda la telemetría.
-  ├── Unificar bordes, sombras y micro-interacciones `active:scale-[0.98]`.
-  └── Limpiar estados vacíos (Empty States elegantes y explicativos).
-  
-[Paso 6: Verificación de Rendimiento y Compilación]
-  ├── Ejecutar `compile_applet` y `lint_applet` sin errores.
-  └── Comprobar cero regresiones en datos reales del opositor.
-```
+Siguiendo la especificación elegida:
+1. **Doble Calificación Visible**:
+   - **Nota Proyectada Actual (Grande, Prominente)**: e.g. `3.3` con color semántico (Rojo crítico si $t > 20\text{d}$, Ámbar si $t > 10\text{d}$, Verde si fresco) y etiqueta de estado de olvido.
+   - **Nota Histórica Máxima (Adyacente/Badge)**: e.g. `Pico: 9.0 · 13m 00s · hace 31d`.
+2. **Desglose de Desgaste**:
+   - Días sin cante vs Días sin repaso explicados con claridad.
+   - Gráfico de barra de retención de Ebbinghaus ($R\%$) con micro-diagnóstico.
+3. **Acciones Rápidas de Rescate**:
+   - Botón directo para cantar y registrar la sesión, refrescando el tema al 100% al instante.
 
 ---
 
-## 🎯 Criterios de Aceptación (Definición de "9.5+/10")
-1. **Cero nuevas funcionalidades añadidas**: la app hace exactamente lo mismo, pero con máxima elegancia y velocidad instantánea.
-2. **Ningún archivo component superior a 350 líneas de código**.
-3. **Cero re-renders innecesarios en el mapa de calor y en las tarjetas del temario**.
-4. **Todos los números de cantes y tiempos alineados con precisión monoespaciada tabular**.
-5. **Compilación y linter 100% limpios sin warnings ni tipos `any` injustificados**.
+## 4. Archivos a Modificar
+1. `src/lib/preparationScore.ts`:
+   - Reescribir `evaluateTopicPreparation` con el modelo multiplicativo continuo.
+   - Añadir campos `projectedScore`, `peakScore`, `effectiveDaysElapsed`, `decayRatio`, `retentionPct`.
+2. `src/components/PreparadorView.tsx`:
+   - Ordenar sesiones cronológicamente descendente de forma estricta.
+   - Actualizar el renderizado de cada tarjeta de tema mostrando la nota proyectada en grande y la nota pico al lado.
+   - Actualizar los KPIs superiores del Preparador para reflejar la nota media real proyectada del día.
+
+---
+
+## 5. Criterios de Aceptación
+- Un tema cantado hace 30 días con nota 9.0 debe mostrar una nota proyectada de $\approx 3.2 - 4.0$ en lugar de 9.0.
+- Si se registra un repaso de estudio hoy, la nota se recupera al $\approx 5.5 - 6.5$ (50% de freno).
+- Si se canta el tema hoy en tiempo reglamentario, la nota salta al $\approx 9.0 - 10.0$ (100% de freno).
+- Compilación y linter 100% limpios sin errores.

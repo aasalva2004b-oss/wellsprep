@@ -1,6 +1,6 @@
 {
-  "summary": "Master Refactoring Plan para elevar WellsPrep de un 5/10 a un 9.5+/10 sin añadir funcionalidades:\n- Fase 1: Saneamiento Arquitectónico, Clean Architecture con custom hooks por dominio y atomización de componentes gigantes (TopicEditorDialog 2,234 líneas y DashboardView 2,180 líneas).\n- Fase 2: Cohesión UI/UX Premium estilo Apple Pro Editorial, estandarización de tokens de diseño, tipografía tabular-nums y micro-interacciones sutiles.\n- Fase 3: Hoja de ruta paso a paso sin riesgo de rotura.",
-  "updatedAt": "2026-10-19T14:05:30.439558131Z",
-  "requestFeedback": true,
-  "userFacing": true
+  "summary":  "Plan de implementación del nuevo motor matemático de Ebbinghaus para la Sección de Preparador:\n- Modelo multiplicativo continuo de retención con curva de olvido exponencial R(t) = exp(-t_eff / S).\n- Ponderación de frescura neuronal: cante frena al 100% el olvido y repaso de estudio al 50%.\n- Doble calificación en la tarjeta de tema: Nota Proyectada Real en grande y Nota Máxima Histórica al lado.\n- Diagnóstico inteligente con alertas de caducidad, estabilidad de memoria (S) y plan de rescate del tema.",
+  "updatedAt":  "2026-10-22T08:11:38.020717622Z",
+  "requestFeedback":  true,
+  "userFacing":  true
 }

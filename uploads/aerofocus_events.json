@@ -1,1 +1,241 @@
-[]
+[
+  {
+    "id": "af_1792570336407_j6l81",
+    "receivedAt": "2026-10-21T08:12:16.407Z",
+    "date": "2026-10-21",
+    "source": "aerofocus",
+    "flightId": "test_curl_1",
+    "dailyTotalEffectiveHours": 1,
+    "totalFlightEffectiveMinutes": 60,
+    "totalFlightEffectiveHours": 1,
+    "status": "quarantined",
+    "topics": [
+      {
+        "resolvedTopicId": "constitucional-1",
+        "resolvedSubjectId": "constitucional",
+        "resolvedTopicNumber": 1,
+        "resolvedTopicTitle": "Tema 1 - La Constitución Española de 1978: estructura y caracteres",
+        "modality": "repaso",
+        "effectiveHours": 1,
+        "effectiveMinutes": 60,
+        "original": {
+          "topicId": "jud-const-01",
+          "topicNumber": 1,
+          "topicTitle": "Constitucional 1: La Constitución Española de 1978",
+          "effectiveHours": 1,
+          "effectiveMinutes": 60,
+          "modality": "repaso",
+          "category": "Constitucional"
+        }
+      }
+    ],
+    "rawPayload": {
+      "date": "2026-10-21",
+      "flightId": "test_curl_1",
+      "topics": [
+        {
+          "topicId": "jud-const-01",
+          "topicNumber": 1,
+          "topicTitle": "Constitucional 1: La Constitución Española de 1978",
+          "effectiveHours": 1,
+          "effectiveMinutes": 60,
+          "modality": "repaso"
+        }
+      ]
+    },
+    "summary": {
+      "estudioHours": 0,
+      "repasoHours": 1,
+      "refrescoHours": 0,
+      "cantoHours": 0,
+      "totalHours": 1
+    }
+  },
+  {
+    "id": "af_1792662929396_23i16",
+    "receivedAt": "2026-10-22T09:55:29.396Z",
+    "date": "2026-10-22",
+    "source": "aerofocus",
+    "flightId": "vuelo_1792662929395",
+    "dailyTotalEffectiveHours": 0.75,
+    "totalFlightEffectiveMinutes": 45,
+    "totalFlightEffectiveHours": 0.75,
+    "status": "quarantined",
+    "topics": [
+      {
+        "resolvedTopicId": "topic-unknown",
+        "resolvedSubjectId": "general",
+        "resolvedTopicNumber": 0,
+        "resolvedTopicTitle": "Sesión AeroFocus (Revisar tema)",
+        "effectiveMinutes": 45,
+        "effectiveHours": 0.75,
+        "modality": "repaso",
+        "notes": "Sesión de estudio recibida de AeroFocus"
+      }
+    ],
+    "rawPayload": {
+      "event": "daily_sync"
+    },
+    "summary": {
+      "estudioHours": 0,
+      "repasoHours": 0.75,
+      "refrescoHours": 0,
+      "cantoHours": 0,
+      "totalHours": 0.75
+    }
+  },
+  {
+    "id": "af_1792662946046_56wiz",
+    "receivedAt": "2026-10-22T09:55:46.046Z",
+    "date": "2026-10-17",
+    "source": "aerofocus_pro",
+    "flightId": "daily_2026-10-17",
+    "transactionId": "daily_2026-10-17",
+    "dailyTotalEffectiveHours": 3.75,
+    "totalFlightEffectiveMinutes": 225,
+    "totalFlightEffectiveHours": 3.75,
+    "status": "quarantined",
+    "topics": [
+      {
+        "resolvedTopicId": "constitucional-1",
+        "resolvedSubjectId": "constitucional",
+        "resolvedTopicNumber": 1,
+        "resolvedTopicTitle": "Tema 1 - La Constitución Española de 1978: estructura y caracteres",
+        "modality": "primer_estudio",
+        "effectiveHours": 3.75,
+        "effectiveMinutes": 225,
+        "original": {
+          "topicId": "jud-const-01",
+          "subjectId": "derecho_constitucional",
+          "subjectName": "Derecho Constitucional",
+          "materia": "Derecho Constitucional",
+          "category": "Derecho Constitucional",
+          "topicNumber": 1,
+          "temaNumero": 1,
+          "topicTitle": "Tema 1: La Constitución Española de 1978. Principios y valores",
+          "modality": "estudio",
+          "modalidad": "estudio",
+          "type": "study",
+          "effectiveHours": 3.75,
+          "horasEfectivas": 3.75,
+          "effectiveMinutes": 225,
+          "minutosEfectivos": 225,
+          "grossMinutes": 240,
+          "minutosBrutos": 240,
+          "timeFormatted": "3h 45m",
+          "pages": {
+            "pageStart": 1,
+            "pageEnd": 28,
+            "pagesCount": 28,
+            "rawText": "Págs. 1-28"
+          },
+          "startPage": 1,
+          "endPage": 28,
+          "pagesCount": 28,
+          "isTopicCompleted": true,
+          "completed": true,
+          "completado": true,
+          "status": "completed",
+          "summaryLine": "Derecho Constitucional · Tema 1: La Constitución Española de 1978 (estudio) · Págs. 1-28 · 3h 45m [COMPLETADO]",
+          "tema": "Tema 1: La Constitución Española de 1978. Principios y valores",
+          "topic": "Tema 1: La Constitución Española de 1978. Principios y valores",
+          "pagesText": "Págs. 1-28",
+          "completesVuelta": true
+        },
+        "completesVuelta": true,
+        "isTopicCompleted": true,
+        "startPage": 1,
+        "endPage": 28,
+        "pagesCount": 28,
+        "pagesText": "Págs. 1-28",
+        "summaryLine": "Derecho Constitucional · Tema 1: La Constitución Española de 1978 (estudio) · Págs. 1-28 · 3h 45m [COMPLETADO]",
+        "pageInfo": {
+          "startPage": 1,
+          "endPage": 28,
+          "pagesRead": 28,
+          "currentPage": 28
+        }
+      }
+    ],
+    "rawPayload": {
+      "schemaVersion": "2.0.0",
+      "event": "daily_sync",
+      "transactionId": "daily_2026-10-17",
+      "timestamp": "2026-10-17T22:00:00.000Z",
+      "date": "2026-10-17",
+      "fecha": "2026-10-17",
+      "targetDailyHour": 22,
+      "source": "aerofocus_pro",
+      "pilotCallsign": "Comandante",
+      "callsignName": "Piloto Judicatura",
+      "dailyTotalFlightMinutes": 240,
+      "dailyTotalEffectiveMinutes": 225,
+      "dailyTotalEffectiveHours": 3.75,
+      "totalEffectiveHours": 3.75,
+      "horasEfectivas": 3.75,
+      "minutosEfectivos": 225,
+      "tiempoFormateado": "3h 45m",
+      "totalDistractionMinutes": 15,
+      "sessionsCount": 3,
+      "focusScore": 94,
+      "subject": "Derecho Constitucional",
+      "materia": "Derecho Constitucional",
+      "subjects": [
+        {
+          "subjectId": "derecho_constitucional",
+          "subjectName": "Derecho Constitucional",
+          "effectiveMinutes": 225,
+          "minutosEfectivos": 225,
+          "effectiveHours": 3.75,
+          "horasEfectivas": 3.75,
+          "timeFormatted": "3h 45m"
+        }
+      ],
+      "topics": [
+        {
+          "topicId": "jud-const-01",
+          "subjectId": "derecho_constitucional",
+          "subjectName": "Derecho Constitucional",
+          "materia": "Derecho Constitucional",
+          "category": "Derecho Constitucional",
+          "topicNumber": 1,
+          "temaNumero": 1,
+          "topicTitle": "Tema 1: La Constitución Española de 1978. Principios y valores",
+          "modality": "estudio",
+          "modalidad": "estudio",
+          "type": "study",
+          "effectiveHours": 3.75,
+          "horasEfectivas": 3.75,
+          "effectiveMinutes": 225,
+          "minutosEfectivos": 225,
+          "grossMinutes": 240,
+          "minutosBrutos": 240,
+          "timeFormatted": "3h 45m",
+          "pages": {
+            "pageStart": 1,
+            "pageEnd": 28,
+            "pagesCount": 28,
+            "rawText": "Págs. 1-28"
+          },
+          "startPage": 1,
+          "endPage": 28,
+          "pagesCount": 28,
+          "isTopicCompleted": true,
+          "completed": true,
+          "completado": true,
+          "status": "completed",
+          "summaryLine": "Derecho Constitucional · Tema 1: La Constitución Española de 1978 (estudio) · Págs. 1-28 · 3h 45m [COMPLETADO]"
+        }
+      ]
+    },
+    "pilotCallsign": "Comandante",
+    "focusScore": 94,
+    "summary": {
+      "estudioHours": 3.75,
+      "repasoHours": 0,
+      "refrescoHours": 0,
+      "cantoHours": 0,
+      "totalHours": 3.75
+    }
+  }
+]

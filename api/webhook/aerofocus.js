@@ -113,18 +113,19 @@ export default async function handler(req, res) {
         if (resolved) {
           resolvedTopics.push(resolved);
         } else {
-          resolvedTopics.push({
+          const fallbackTopic = {
             resolvedTopicId: String(t.topicId || t.topicNumber || t.id || 'topic-unknown'),
             resolvedTopicTitle: t.topicTitle || t.title || `Tema ${t.topicNumber || ''}`,
             effectiveMinutes: Number(t.effectiveMinutes) || Math.round((Number(t.effectiveHours) || 0) * 60) || 30,
             effectiveHours: Number(t.effectiveHours) || (Number(t.effectiveMinutes) || 30) / 60,
             modality: t.modality || 'repaso',
-            cantoGrade: t.cantoGrade ?? t.grade,
-            cantoSeconds: t.cantoSeconds,
-            cantoType: t.cantoType,
-            mistakes: t.mistakes,
             notes: t.notes || 'Sincronizado vía AeroFocus Webhook'
-          });
+          };
+          if (t.cantoGrade !== undefined || t.grade !== undefined) fallbackTopic.cantoGrade = t.cantoGrade ?? t.grade;
+          if (t.cantoSeconds !== undefined) fallbackTopic.cantoSeconds = t.cantoSeconds;
+          if (t.cantoType !== undefined) fallbackTopic.cantoType = t.cantoType;
+          if (t.mistakes !== undefined) fallbackTopic.mistakes = t.mistakes;
+          resolvedTopics.push(fallbackTopic);
         }
       }
     }

@@ -245,8 +245,27 @@ export function sessionMatchesTopic(
     if (!prefixSubj || prefixSubj === targetSubj) {
       if (subjectCompatible) return true;
     }
-    // If it was stored under mercantil-5 but active subject is constitucional
-    if (targetSubj === "constitucional" && (sTopicId.startsWith("mercantil") || sTopicId.startsWith("constitucional"))) {
+    // If it was stored under mercantil-5 or penal (5 or 12) but active subject is constitucional
+    if (targetSubj === "constitucional" && (sTopicId.startsWith("mercantil") || sTopicId.startsWith("constitucional") || (topicNum === 5 && (sTopicId.startsWith("penal") || sTopicId.startsWith("jud-pen"))))) {
+      return true;
+    }
+  }
+
+  // Special match: Penal 5 & Penal 12 belong to Constitucional 5
+  if (targetSubj === "constitucional" && topicNum === 5) {
+    const tCorpus = `${s.topicTitle || ""} ${s.notes || ""} ${s.category || ""}`.toLowerCase();
+    if (
+      sTopicId === "penal-5" ||
+      sTopicId === "penal-12" ||
+      sTopicId === "penal_5" ||
+      sTopicId === "penal_12" ||
+      sTopicId === "jud-pen-05" ||
+      sTopicId === "jud-pen-12" ||
+      tCorpus.includes("penal 5") ||
+      tCorpus.includes("penal 12") ||
+      tCorpus.includes("delito imprudente") ||
+      tCorpus.includes("circunstancias agravantes")
+    ) {
       return true;
     }
   }

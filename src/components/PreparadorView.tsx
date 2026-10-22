@@ -2,7 +2,8 @@ import React, { useState, useMemo, useEffect } from "react";
 import { 
   Calendar, Clock, CheckCircle2, AlertTriangle, 
   XCircle, Plus, Trash2, BookOpen, Star, ChevronRight, X, Search,
-  Award, Sparkles, Save, ArrowUpDown, Brain, Timer, Target, Flame, Info
+  Award, Sparkles, Save, ArrowUpDown, Brain, Timer, Target, Flame, Info,
+  TrendingDown, History, Zap
 } from "lucide-react";
 import { useFirebase } from "../lib/FirebaseProvider";
 import { initialSubjects, initialTopics } from "../data/initialData";
@@ -156,8 +157,25 @@ export function PreparadorView() {
       const lastCantoDate = cantoData.date;
       const cantoCount = cantoData.count;
 
-      // Check last touch date
-      const lastSessionDate = sessions[0]?.date || prog?.lastReviewDate || prog?.firstStudyDate;
+      // Ensure sessions are sorted chronologically descending
+      const sortedSessions = [...sessions].sort(
+        (a, b) => safeParseDate(b.date).getTime() - safeParseDate(a.date).getTime()
+      );
+
+      // Days since last cante (freno 100% de la curva)
+      const daysSinceCanto = lastCantoDate
+        ? Math.max(0, Math.floor((new Date().getTime() - safeParseDate(lastCantoDate).getTime()) / (1000 * 3600 * 24)))
+        : null;
+
+      // Days since last review / study session (freno 50% de la curva)
+      const reviewSession = sortedSessions.find((s) => !isCantoSession(s)) || sortedSessions[0];
+      const lastReviewDate = reviewSession?.date || prog?.lastReviewDate || prog?.firstStudyDate;
+      const daysSinceReview = lastReviewDate
+        ? Math.max(0, Math.floor((new Date().getTime() - safeParseDate(lastReviewDate).getTime()) / (1000 * 3600 * 24)))
+        : null;
+
+      // Global last touch date
+      const lastSessionDate = sortedSessions[0]?.date || prog?.lastReviewDate || prog?.firstStudyDate;
       const daysSinceTouch = lastSessionDate 
         ? Math.max(0, Math.floor((new Date().getTime() - safeParseDate(lastSessionDate).getTime()) / (1000 * 3600 * 24)))
         : null;
@@ -166,12 +184,14 @@ export function PreparadorView() {
       const vueltas = prog?.vueltas || 0;
       const reviewsCount = sessions.length;
 
-      // Complete master scientific evaluation (1.0 to 10.0)
+      // Complete master scientific evaluation with continuous Ebbinghaus decay
       const evaluation: TopicPreparationEvaluation = evaluateTopicPreparation({
         topicNumber: topic.number,
         topicTitle: topic.title,
         totalCantoSecs: hasCanto ? lastCantoTotalSecs : null,
         lastGrade: lastGrade,
+        daysSinceCanto,
+        daysSinceReview,
         daysSinceTouch,
         vueltas,
         reviewsCount,
@@ -190,6 +210,8 @@ export function PreparadorView() {
         lastGrade,
         lastCantoDate,
         cantoCount,
+        daysSinceCanto,
+        daysSinceReview,
         daysSinceTouch,
         vueltas,
         reviewsCount,
@@ -220,6 +242,8 @@ export function PreparadorView() {
       return {
         total: 0,
         avgScore: null,
+        avgPeakScore: null,
+        avgDecay: null,
         listosTribunal: 0,
         enAjuste: 0,
         enRiesgo: 0,
@@ -231,9 +255,13 @@ export function PreparadorView() {
     const scores = topicsAnalysis.map((t) => t.evaluation.overallScore);
     const avgScore = scores.reduce((a, b) => a + b, 0) / total;
 
-    const listosTribunal = topicsAnalysis.filter((t) => t.evaluation.overallScore >= 7.5).length;
-    const enAjuste = topicsAnalysis.filter((t) => t.evaluation.overallScore >= 5.0 && t.evaluation.overallScore < 7.5).length;
-    const enRiesgo = topicsAnalysis.filter((t) => t.evaluation.overallScore < 5.0).length;
+    const peakScores = topicsAnalysis.map((t) => t.evaluation.peakScore);
+    const avgPeakScore = peakScores.reduce((a, b) => a + b, 0) / total;
+    const avgDecay = Math.max(0, avgPeakScore - avgScore);
+
+    const listosTribunal = topicsAnalysis.filter((t) => t.evaluation.overallScore >= 7.2).length;
+    const enAjuste = topicsAnalysis.filter((t) => t.evaluation.overallScore >= 4.5 && t.evaluation.overallScore < 7.2).length;
+    const enRiesgo = topicsAnalysis.filter((t) => t.evaluation.overallScore < 4.5).length;
 
     // Total estimated time in minutes (based on actual cantes or 12:30 default)
     const totalSecs = topicsAnalysis.reduce((acc, t) => {
@@ -247,6 +275,8 @@ export function PreparadorView() {
     return {
       total,
       avgScore,
+      avgPeakScore,
+      avgDecay,
       listosTribunal,
       enAjuste,
       enRiesgo,
@@ -450,18 +480,18 @@ export function PreparadorView() {
         {/* OVERVIEW BENCHMARK CARDS */}
         {activeDay !== "historial" && (
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 sm:gap-3.5 mt-4">
-            {/* 1. Nota Media de Preparación (1-10) */}
+            {/* 1. Nota Media de Preparación Proyectada (1-10) */}
             <div className="bg-slate-50/90 rounded-2xl p-3.5 border border-slate-200/70 flex items-center gap-3">
               <div className="w-10 h-10 rounded-xl bg-white border border-slate-200/80 flex items-center justify-center shadow-sm text-indigo-600">
                 <Award size={18} strokeWidth={2.2} />
               </div>
               <div className="min-w-0">
                 <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                  Nota Media Preparación
+                  Nota Media Proyectada
                 </div>
                 <div className="flex items-baseline gap-1.5">
                   <span className={cn(
-                    "text-xl font-black font-serif",
+                    "text-xl font-black font-serif tabular-nums",
                     kpis.avgScore === null ? "text-slate-400" :
                     kpis.avgScore >= 8.5 ? "text-emerald-700" :
                     kpis.avgScore >= 7.0 ? "text-indigo-700" :
@@ -470,6 +500,11 @@ export function PreparadorView() {
                     {kpis.avgScore !== null ? `${kpis.avgScore.toFixed(1)}` : "—"}
                   </span>
                   <span className="text-xs font-bold text-slate-400">/ 10</span>
+                  {kpis.avgPeakScore !== null && kpis.avgDecay !== null && kpis.avgDecay >= 0.5 && (
+                    <span className="text-[10px] font-black text-rose-600 ml-1">
+                      (Pico {kpis.avgPeakScore.toFixed(1)})
+                    </span>
+                  )}
                 </div>
               </div>
             </div>
@@ -759,22 +794,55 @@ export function PreparadorView() {
                             </span>
                           </div>
 
-                          <div className="flex items-center gap-2">
-                            {/* MASTER SCORE BADGE (1.0 - 10.0) */}
-                            <div className={cn(
-                              "flex items-center gap-1.5 px-3 py-1 rounded-full border shadow-2xs",
-                              evaluation.gradeBadgeClass
-                            )}>
-                              <Award size={13} className="shrink-0" />
-                              <span className="text-xs font-black">
-                                {evaluation.overallScore.toFixed(1)}
-                              </span>
-                              <span className="text-[10px] font-bold opacity-75">/ 10</span>
+                          <div className="flex items-center gap-2.5">
+                            {/* DUAL MASTER SCORE: Nota Proyectada Real en Grande + Nota Histórica Pico al Lado */}
+                            <div className="flex items-center gap-2">
+                              {/* Nota Proyectada Actual (Grande) */}
+                              <div className={cn(
+                                "flex items-baseline gap-1.5 px-3 py-1.5 rounded-2xl border shadow-xs transition-all",
+                                evaluation.gradeBadgeClass
+                              )}>
+                                <div className="flex flex-col items-start leading-none">
+                                  <span className="text-[8px] font-black uppercase tracking-wider opacity-75">
+                                    Nota Actual
+                                  </span>
+                                  <span className="text-[7px] font-bold opacity-60">
+                                    Ebbinghaus
+                                  </span>
+                                </div>
+                                <span className="text-xl font-black font-serif tabular-nums tracking-tight">
+                                  {evaluation.projectedScore.toFixed(1)}
+                                </span>
+                                <span className="text-[10px] font-bold opacity-70">/ 10</span>
+                              </div>
+
+                              {/* Nota Teórica Máxima Histórica al Lado */}
+                              <div 
+                                className="flex flex-col items-end px-2.5 py-1 rounded-xl bg-slate-100/90 border border-slate-200/80 text-right shrink-0"
+                                title={`Nota pico alcanzada en su mejor momento: ${evaluation.peakScore.toFixed(1)}/10`}
+                              >
+                                <div className="flex items-center gap-1 text-[8px] font-black uppercase tracking-wider text-slate-500">
+                                  <Star size={9} className="text-amber-500 fill-amber-500" />
+                                  <span>Pico Máx</span>
+                                </div>
+                                <div className="flex items-baseline gap-0.5">
+                                  <span className="text-xs font-black text-slate-800 font-serif tabular-nums">
+                                    {evaluation.peakScore.toFixed(1)}
+                                  </span>
+                                  <span className="text-[8px] font-bold text-slate-400">/ 10</span>
+                                </div>
+                                {evaluation.isDecayed && (
+                                  <span className="text-[8px] font-black text-rose-600 flex items-center gap-0.5 mt-0.5">
+                                    <TrendingDown size={8} />
+                                    <span>-{evaluation.scoreDecay.toFixed(1)}</span>
+                                  </span>
+                                )}
+                              </div>
                             </div>
 
                             <button
                               onClick={() => handleRemoveTopic(topic.id)}
-                              className="text-slate-400 hover:text-rose-600 p-1 rounded-lg hover:bg-rose-50 transition-colors"
+                              className="text-slate-400 hover:text-rose-600 p-1.5 rounded-xl hover:bg-rose-50 transition-colors"
                               title="Quitar tema de la sesión"
                             >
                               <Trash2 size={14} />
@@ -783,7 +851,7 @@ export function PreparadorView() {
                         </div>
 
                         {/* Topic Title & Sub-score Level */}
-                        <div className="mb-4">
+                        <div className="mb-3">
                           <div className="flex items-baseline justify-between gap-2">
                             <h3 
                               className="text-base font-black font-serif text-slate-900 leading-snug"
@@ -796,6 +864,28 @@ export function PreparadorView() {
                             {evaluation.gradeLabel}
                           </span>
                         </div>
+
+                        {/* Memory Decay Warning Banner if Topic has Lost Score */}
+                        {evaluation.isDecayed && (
+                          <div className="mb-3.5 px-3 py-2 rounded-2xl bg-amber-50/90 border border-amber-200/80 text-amber-950 text-xs flex items-center justify-between gap-2 shadow-2xs">
+                            <div className="flex items-center gap-2 min-w-0">
+                              <div className="w-6 h-6 rounded-lg bg-amber-500/15 flex items-center justify-center shrink-0 text-amber-700">
+                                <Brain size={13} strokeWidth={2.4} />
+                              </div>
+                              <div className="min-w-0 text-[11px] leading-tight">
+                                <span className="font-bold text-amber-900 block truncate">
+                                  {evaluation.decayDiagnosis}
+                                </span>
+                                <span className="text-amber-700 text-[10px]">
+                                  Freno: Cante frena 100% · Repaso frena 50%
+                                </span>
+                              </div>
+                            </div>
+                            <span className="shrink-0 text-[10px] font-black uppercase px-2 py-0.5 rounded-md bg-amber-200/70 text-amber-900 border border-amber-300/50">
+                              -{evaluation.scoreDecay.toFixed(1)} pts
+                            </span>
+                          </div>
+                        )}
 
                         {/* CRONÓMETRO GAUGE VISUAL (Window 11:50 - 13:40 | Target 12:30) */}
                         <div className="bg-slate-50/90 rounded-2xl p-3.5 border border-slate-200/70 mb-3.5">
@@ -869,7 +959,7 @@ export function PreparadorView() {
                           </div>
                         </div>
 
-                        {/* DIAGNOSTIC BENCHMARK GRID (4 PILLARS) */}
+                        {/* DIAGNOSTIC BENCHMARK GRID (3 PILLARS) */}
                         <div className="grid grid-cols-3 gap-2 p-3 bg-slate-50/80 rounded-2xl border border-slate-200/60 mb-3.5">
                           {/* 1. Curva de Ebbinghaus */}
                           <div className="flex flex-col items-center justify-center text-center p-1">
@@ -885,12 +975,12 @@ export function PreparadorView() {
                             )}>
                               {evaluation.retentionPct}%
                             </span>
-                            <span className="text-[9px] font-bold text-slate-400 mt-0.5">
-                              {daysSinceTouch === null ? "Sin datos" : daysSinceTouch === 0 ? "Repasado hoy" : daysSinceTouch === 1 ? "Ayer" : `Hace ${daysSinceTouch}d`}
+                            <span className="text-[8px] font-bold text-slate-400 mt-0.5 leading-tight" title={`Vida media: ${evaluation.memoryStabilityDays} días`}>
+                              {item.daysSinceCanto !== null ? `Cante: hace ${item.daysSinceCanto}d` : item.daysSinceTouch !== null ? `Hace ${item.daysSinceTouch}d` : "Sin datos"}
                             </span>
                           </div>
 
-                          {/* 2. Last Preparador Grade */}
+                          {/* 2. Last Preparador Grade & Peak */}
                           <div className="flex flex-col items-center justify-center text-center p-1 border-x border-slate-200/60">
                             <span className="text-[9px] font-bold uppercase tracking-wider text-slate-400 mb-0.5 flex items-center gap-0.5">
                               <Star size={10} className="text-amber-500" />
@@ -905,7 +995,7 @@ export function PreparadorView() {
                             )}>
                               {lastGrade !== null ? `${lastGrade.toFixed(1)}/10` : "Pendiente"}
                             </span>
-                            <span className="text-[9px] font-bold text-slate-400 mt-0.5">
+                            <span className="text-[8px] font-bold text-slate-400 mt-0.5">
                               {lastGrade !== null ? (lastGrade >= 8 ? "Sobresaliente" : lastGrade >= 7 ? "Notable" : lastGrade >= 5 ? "Aprobado" : "Suspenso") : "Sin examen"}
                             </span>
                           </div>
@@ -925,7 +1015,7 @@ export function PreparadorView() {
                             )}>
                               {hasCanto ? `${evaluation.timeScore.toFixed(1)}/10` : "—"}
                             </span>
-                            <span className="text-[9px] font-bold text-slate-400 mt-0.5">
+                            <span className="text-[8px] font-bold text-slate-400 mt-0.5">
                               {hasCanto ? evaluation.timeDevianceFormatted : "Cronometrar"}
                             </span>
                           </div>

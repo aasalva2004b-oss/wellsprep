@@ -240,6 +240,30 @@ export function resolveAeroFocusTopic(
 ): WebhookResolvedTopic | null {
   const topicsList = customTopics || initialTopics;
 
+  // 0. Regla de resolución para sesiones de Penal (5 y 12) correspondientes a Constitucional 5
+  const rawIdClean = String(item.topicId || '').trim().toLowerCase();
+  const rawTitleClean = String(item.topicTitle || (item as any).title || '').toLowerCase();
+  const rawCatClean = String(item.category || '').toLowerCase();
+  const isPenalConst5 =
+    rawIdClean === 'penal-5' ||
+    rawIdClean === 'penal-12' ||
+    rawIdClean === 'penal_5' ||
+    rawIdClean === 'penal_12' ||
+    rawIdClean === 'jud-pen-05' ||
+    rawIdClean === 'jud-pen-12' ||
+    rawTitleClean.includes('penal 5') ||
+    rawTitleClean.includes('penal 12') ||
+    rawTitleClean.includes('delito imprudente') ||
+    rawTitleClean.includes('circunstancias agravantes') ||
+    (rawCatClean.includes('penal') && (rawIdClean.includes('5') || rawIdClean.includes('12') || Number(item.topicNumber) === 5 || Number(item.topicNumber) === 12));
+
+  if (isPenalConst5) {
+    const const5 = topicsList.find(t => t.id === 'constitucional-5');
+    if (const5) {
+      return buildResolvedTopic(const5, item);
+    }
+  }
+
   // 1. Intento por topicId directo en Wellsprep (ej. "civil-12", "constitucional-1")
   if (item.topicId) {
     const cleanId = item.topicId.trim().toLowerCase();
@@ -259,9 +283,13 @@ export function resolveAeroFocusTopic(
   }
 
   // 2. Intento por número y categoría combinada (la vía más común en AeroFocus)
-  const subjectIdFromCategory = normalizeCategoryToSubjectId(item.category);
-  const topicNum = extractTopicNumber(item.topicNumber) ||
+  const rawCat = item.materia || item.subject || item.subjectName || item.asignatura || item.category;
+  const subjectIdFromCategory = normalizeCategoryToSubjectId(rawCat);
+  const topicNum = extractTopicNumber(item.temaNumero) ||
+                   extractTopicNumber(item.topicNumber) ||
                    extractTopicNumber(item.topicId) ||
+                   extractTopicNumber(item.tema) ||
+                   extractTopicNumber(item.topic) ||
                    extractTopicNumber(item.topicTitle);
 
   if (subjectIdFromCategory && topicNum) {
@@ -272,7 +300,8 @@ export function resolveAeroFocusTopic(
   }
 
   // 3. Intento por categoría en el título o ID si no venía en el campo category
-  const subjectIdFromTitle = normalizeCategoryToSubjectId(item.topicTitle) ||
+  const titleText = item.topicTitle || item.tema || item.topic || '';
+  const subjectIdFromTitle = normalizeCategoryToSubjectId(titleText) ||
                              normalizeCategoryToSubjectId(item.topicId);
 
   if (subjectIdFromTitle && topicNum) {
@@ -283,8 +312,8 @@ export function resolveAeroFocusTopic(
   }
 
   // 4. Intento por similitud de texto del título dentro de la asignatura
-  if (subjectIdFromCategory && item.topicTitle) {
-    const cleanTitle = item.topicTitle.toLowerCase()
+  if (subjectIdFromCategory && titleText) {
+    const cleanTitle = titleText.toLowerCase()
       .replace(/tema\s*\d+\s*[-:.]*/i, '')
       .replace(/^\d+[.:\- ]*/, '')
       .trim();
@@ -303,8 +332,8 @@ export function resolveAeroFocusTopic(
   }
 
   // 5. Intento global de coincidencia por título exhaustivo si el título es suficientemente largo
-  if (item.topicTitle) {
-    const cleanTitle = item.topicTitle.toLowerCase()
+  if (titleText) {
+    const cleanTitle = titleText.toLowerCase()
       .replace(/tema\s*\d+\s*[-:.]*/i, '')
       .replace(/^\d+[.:\- ]*/, '')
       .trim();
@@ -334,13 +363,13 @@ export function resolveAeroFocusTopic(
 
 function buildResolvedTopic(
   topic: typeof initialTopics[0],
-  item: AeroFocusTopicItem
+  item: AeroFocusTopicItem | any
 ): WebhookResolvedTopic {
-  const effectiveHours = Number(item.effectiveHours) || 
-    (Number(item.effectiveMinutes) ? Number(item.effectiveMinutes) / 60 : 0);
-  const effectiveMinutes = Number(item.effectiveMinutes) || Math.round(effectiveHours * 60) || 60;
-
   const rawAny = item as any;
+  const effectiveHours = Number(rawAny.horasEfectivas ?? rawAny.effectiveHours) || 
+    (Number(rawAny.minutosEfectivos ?? rawAny.effectiveMinutes) ? Number(rawAny.minutosEfectivos ?? rawAny.effectiveMinutes) / 60 : 0);
+  const effectiveMinutes = Number(rawAny.minutosEfectivos ?? rawAny.effectiveMinutes) || Math.round(effectiveHours * 60) || 60;
+
   const grade = typeof rawAny.cantoGrade === 'number' ? rawAny.cantoGrade :
                 typeof rawAny.grade === 'number' ? rawAny.grade :
                 typeof rawAny.nota === 'number' ? rawAny.nota : undefined;
@@ -355,21 +384,61 @@ function buildResolvedTopic(
   const notes = rawAny.notes || rawAny.feedback || rawAny.observaciones || undefined;
   const mistakes = rawAny.mistakes || rawAny.fallos || rawAny.errores || undefined;
 
-  return {
+  const startPage = rawAny.startPage ?? rawAny.pages?.pageStart ?? rawAny.pageInfo?.startPage;
+  const endPage = rawAny.endPage ?? rawAny.pages?.pageEnd ?? rawAny.pageInfo?.endPage;
+  const pagesCount = rawAny.pagesCount ?? rawAny.pages?.pagesCount ?? rawAny.pageInfo?.pagesRead ?? 
+    (startPage != null && endPage != null ? Math.max(0, Number(endPage) - Number(startPage) + 1) : undefined);
+  const pagesText = rawAny.pagesText ?? rawAny.pages?.rawText ?? rawAny.paginas ?? 
+    (startPage != null && endPage != null ? `Págs. ${startPage}-${endPage}` : undefined);
+
+  const isCompleted = Boolean(rawAny.completado || rawAny.completed || rawAny.isTopicCompleted || rawAny.status === 'completed');
+
+  const resolved: WebhookResolvedTopic = {
     resolvedTopicId: topic.id,
     resolvedSubjectId: topic.subjectId,
     resolvedTopicNumber: topic.number,
     resolvedTopicTitle: `Tema ${topic.number} - ${topic.title}`,
-    modality: normalizeModality(item.modality),
+    modality: normalizeModality(rawAny.modalidad || rawAny.modality || rawAny.type),
     effectiveHours: Math.round(effectiveHours * 100) / 100,
     effectiveMinutes: effectiveMinutes,
-    difficulty,
-    cantoGrade: grade,
-    cantoSeconds: seconds,
-    cantoType: rawAny.cantoType || (rawAny.simulacro ? 'preparador' : 'solo'),
-    notes,
-    mistakes,
-    pageInfo: item.pageInfo,
     original: item
   };
+
+  if (isCompleted || rawAny.completesVuelta !== undefined) {
+    resolved.completesVuelta = isCompleted || Boolean(rawAny.completesVuelta);
+    resolved.isTopicCompleted = isCompleted;
+  }
+  if (difficulty !== undefined) {
+    resolved.difficulty = difficulty;
+    resolved.dificultadReal = difficulty;
+  }
+  if (grade !== undefined) resolved.cantoGrade = grade;
+  if (seconds !== undefined) resolved.cantoSeconds = seconds;
+  if (rawAny.cantoType) {
+    resolved.cantoType = rawAny.cantoType;
+  } else if (rawAny.simulacro) {
+    resolved.cantoType = 'preparador';
+  }
+  if (notes) resolved.notes = notes;
+  if (mistakes) resolved.mistakes = mistakes;
+
+  if (startPage !== undefined) resolved.startPage = Number(startPage);
+  if (endPage !== undefined) resolved.endPage = Number(endPage);
+  if (pagesCount !== undefined) resolved.pagesCount = Number(pagesCount);
+  if (pagesText) resolved.pagesText = pagesText;
+  if (rawAny.distractionSeconds || rawAny.segundosDistraccion) {
+    resolved.distractionSeconds = Number(rawAny.distractionSeconds || rawAny.segundosDistraccion);
+  }
+  if (rawAny.summaryLine) resolved.summaryLine = rawAny.summaryLine;
+
+  if (rawAny.pageInfo || (startPage !== undefined && endPage !== undefined)) {
+    resolved.pageInfo = {
+      startPage: startPage !== undefined ? Number(startPage) : undefined,
+      endPage: endPage !== undefined ? Number(endPage) : undefined,
+      pagesRead: pagesCount !== undefined ? Number(pagesCount) : undefined,
+      currentPage: endPage !== undefined ? Number(endPage) : undefined,
+    };
+  }
+
+  return resolved;
 }

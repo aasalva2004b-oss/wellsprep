@@ -47,6 +47,7 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
     webhookToken,
     purgeAllAeroFocusData,
     purgePhantomTema5Cante,
+    migratePenalSessionsToConstitucional5,
     deduplicateUserSessions,
     recoverHistoricalUserData,
     quarantinedEvents = [],
@@ -55,6 +56,10 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
     approveQuarantineEvent,
     discardQuarantineEvent,
     clearAllQuarantine,
+    addQuarantineEventManually,
+    updateQuarantineEvent,
+    updateQuarantineTopic,
+    mergeQuarantineTopics,
     aerofocusBetaEnabled,
     setAerofocusBetaEnabled,
   } = useFirebase();
@@ -71,6 +76,16 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
   // Reconciling state
   const [isReconciling, setIsReconciling] = useState(false);
   const [isTestingWebhook, setIsTestingWebhook] = useState(false);
+
+  // Manual Paste Modal state
+  const [isPasteModalOpen, setIsPasteModalOpen] = useState(false);
+  const [pasteJsonText, setPasteJsonText] = useState("");
+  const [isImportingPaste, setIsImportingPaste] = useState(false);
+  const [isMigratingPenal, setIsMigratingPenal] = useState(false);
+
+  // Topic Reassign state
+  const [reassigningItem, setReassigningItem] = useState<{ eventId: string; topicIndex: number } | null>(null);
+  const [reassignSearch, setReassignSearch] = useState("");
 
   // Raw logs state
   const [rawEvents, setRawEvents] = useState<WebhookSyncRecord[]>([]);
@@ -205,33 +220,167 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
     }
   };
 
-  // Handle Quick Webhook Test
+  // Handle Penal sessions migration to Constitucional 5
+  const handleMigratePenal = async () => {
+    try {
+      setIsMigratingPenal(true);
+      await migratePenalSessionsToConstitucional5(false);
+    } catch (e: any) {
+      toast.error("Error al migrar sesiones: " + e.message);
+    } finally {
+      setIsMigratingPenal(false);
+    }
+  };
+
+  // Handle Quick Webhook Test with realistic multi-session payload (split review)
   const handleTestWebhook = async () => {
     try {
       setIsTestingWebhook(true);
-      const res = await fetch("/api/webhook/test", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          topicId: "jud-const-01",
-          topicNumber: 1,
-          topicTitle: "Derecho Constitucional - Tema 1: La Constitución Española de 1978",
-          category: "Derecho Constitucional",
-          effectiveHours: 1.5,
-          modality: "repaso",
-        }),
-      });
-      if (res.ok) {
-        toast.success("Webhook de prueba enviado a la Bandeja de Cuarentena (expediente intacto).");
-        await fetchQuarantinedEvents();
-        if (activeTab === "raw_logs") fetchLogs();
-      } else {
-        toast.error("Error al enviar test de webhook.");
+      const todayStr = new Date().toISOString().split("T")[0];
+      const testRecordPayload = {
+        schemaVersion: "2.0.0",
+        event: "daily_sync",
+        transactionId: `daily_${todayStr}`,
+        timestamp: new Date().toISOString(),
+        date: todayStr,
+        fecha: todayStr,
+        targetDailyHour: 22,
+        source: "aerofocus_pro",
+        pilotCallsign: "Comandante",
+        callsignName: "Piloto Judicatura",
+        dailyTotalFlightMinutes: 240,
+        dailyTotalEffectiveMinutes: 225,
+        dailyTotalEffectiveHours: 3.75,
+        totalEffectiveHours: 3.75,
+        horasEfectivas: 3.75,
+        minutosEfectivos: 225,
+        tiempoFormateado: "3h 45m",
+        totalDistractionMinutes: 15,
+        sessionsCount: 3,
+        focusScore: 94,
+        subject: "Derecho Constitucional",
+        materia: "Derecho Constitucional",
+        subjects: [
+          {
+            subjectId: "derecho_constitucional",
+            subjectName: "Derecho Constitucional",
+            subject: "Derecho Constitucional",
+            materia: "Derecho Constitucional",
+            asignatura: "Derecho Constitucional",
+            effectiveMinutes: 225,
+            minutosEfectivos: 225,
+            effectiveHours: 3.75,
+            horasEfectivas: 3.75,
+            timeFormatted: "3h 45m",
+            topicsCount: 1,
+            temasCount: 1
+          }
+        ],
+        topics: [
+          {
+            topicId: "jud-const-01",
+            subjectId: "derecho_constitucional",
+            subjectName: "Derecho Constitucional",
+            subject: "Derecho Constitucional",
+            materia: "Derecho Constitucional",
+            asignatura: "Derecho Constitucional",
+            category: "Derecho Constitucional",
+            topicNumber: 1,
+            temaNumero: 1,
+            topicTitle: "Tema 1: La Constitución Española de 1978. Principios y valores",
+            topic: "Tema 1: La Constitución Española de 1978. Principios y valores",
+            tema: "Tema 1: La Constitución Española de 1978. Principios y valores",
+            modality: "estudio",
+            modalidad: "estudio",
+            type: "study",
+            effectiveHours: 3.75,
+            horasEfectivas: 3.75,
+            effectiveMinutes: 225,
+            minutosEfectivos: 225,
+            grossMinutes: 240,
+            minutosBrutos: 240,
+            timeFormatted: "3h 45m",
+            distractionSeconds: 900,
+            segundosDistraccion: 900,
+            pages: {
+              pageStart: 1,
+              pageEnd: 28,
+              pagesCount: 28,
+              rawText: "Págs. 1-28"
+            },
+            startPage: 1,
+            endPage: 28,
+            pagesCount: 28,
+            pagesText: "Págs. 1-28",
+            paginas: "Págs. 1-28",
+            isTopicCompleted: true,
+            completed: true,
+            completado: true,
+            status: "completed",
+            summaryLine: "Derecho Constitucional · Tema 1: La Constitución Española de 1978 (estudio) · Págs. 1-28 · 3h 45m [COMPLETADO]"
+          }
+        ],
+        summary: {
+          estudioHours: 3.75,
+          repasoHours: 0,
+          refrescoHours: 0,
+          totalHours: 3.75,
+          horasEstudio: 3.75,
+          horasRepaso: 0,
+          horasRefresco: 0,
+          totalMinutos: 240,
+          minutosEfectivos: 225
+        },
+        resumen: {
+          horasEfectivas: 3.75,
+          minutosEfectivos: 225,
+          tiempoFormateado: "3h 45m",
+          horasEstudio: 3.75,
+          horasRepaso: 0,
+          horasRefresco: 0
+        },
+        reportMarkdown: "# 📋 CIERRE DIARIO DE ESTUDIO · " + todayStr + "\n\n**Piloto:** Comandante (Piloto Judicatura)\n**Tiempo Efectivo Neto:** 3h 45m (225 min)\n**Índice de Foco:** 94%\n- **Tema 1:** La Constitución Española de 1978 (Págs. 1-28) [COMPLETADO]",
+        textSummary: "CIERRE DIARIO DE ESTUDIO · " + todayStr + " · 3h 45m en Derecho Constitucional Tema 1 (Págs. 1-28, COMPLETADO)",
+        message: "Cierre diario consolidado del " + todayStr + ": 3h 45m en Derecho Constitucional.",
+        telemetry: {
+          appVersion: "2.6.0",
+          sourceApp: "AeroFocus Pro",
+          environment: "web_standalone"
+        }
+      };
+
+      const success = await addQuarantineEventManually(testRecordPayload);
+      if (success) {
+        toast.success("⚡ Sesión de prueba incorporada a la Bandeja de Cuarentena. Puedes calificarla o fusionarla.");
+        setActiveTab("quarantine");
       }
     } catch (e: any) {
-      toast.error("Fallo al probar webhook: " + e.message);
+      toast.error("Fallo al generar simulación: " + e.message);
     } finally {
       setIsTestingWebhook(false);
+    }
+  };
+
+  // Handle Manual Paste JSON
+  const handleImportPaste = async () => {
+    if (!pasteJsonText.trim()) {
+      toast.error("Pega el JSON de la sesión primero.");
+      return;
+    }
+    try {
+      setIsImportingPaste(true);
+      const parsed = JSON.parse(pasteJsonText);
+      const success = await addQuarantineEventManually(parsed);
+      if (success) {
+        toast.success("¡Sesión de AeroFocus cargada con éxito en Cuarentena!");
+        setPasteJsonText("");
+        setIsPasteModalOpen(false);
+        setActiveTab("quarantine");
+      }
+    } catch (e: any) {
+      toast.error("JSON inválido: " + e.message);
+    } finally {
+      setIsImportingPaste(false);
     }
   };
 
@@ -265,6 +414,16 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
 
           {/* Quick Header Actions */}
           <div className="flex items-center gap-2">
+            <button
+              onClick={handleMigratePenal}
+              disabled={isMigratingPenal}
+              className="px-3 py-1.5 rounded-xl text-xs font-black bg-emerald-50 hover:bg-emerald-100 text-emerald-900 border border-emerald-300 shadow-xs transition-all flex items-center gap-1.5 disabled:opacity-50"
+              title="Migra las sesiones de Derecho Penal (5 y 12) al Tema 5 de Constitucional y actualiza tu expediente"
+            >
+              <Sparkles size={13} className={cn("text-emerald-600", isMigratingPenal && "animate-spin")} />
+              <span>{isMigratingPenal ? "Migrando..." : "Migrar Penal a Const. 5"}</span>
+            </button>
+
             <button
               onClick={() => purgePhantomTema5Cante()}
               className="px-3 py-1.5 rounded-xl text-xs font-bold bg-rose-50 hover:bg-rose-100 text-rose-800 border border-rose-200/80 shadow-xs transition-all flex items-center gap-1.5"
@@ -415,7 +574,7 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
         {/* TAB: QUARANTINE STAGING BUFFER */}
         {activeTab === "quarantine" && (
           <div className="flex-1 flex flex-col min-h-0 overflow-hidden bg-slate-50/50">
-            {/* Quarantine Info Banner */}
+            {/* Quarantine Info Banner & Actions */}
             <div className="p-4 border-b border-amber-200/60 bg-amber-50/50 flex flex-wrap items-center justify-between gap-3 shrink-0">
               <div className="flex items-start gap-3">
                 <div className="p-2 rounded-xl bg-amber-100 text-amber-800 shrink-0">
@@ -423,16 +582,33 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                 </div>
                 <div>
                   <h4 className="text-xs font-black uppercase tracking-wider text-amber-900">
-                    Modo Cuarentena Activo — Blindaje de Expediente
+                    Modo Cuarentena Activo — Blindaje de Expediente Oficial
                   </h4>
                   <p className="text-xs text-amber-800/80 mt-0.5 max-w-2xl leading-relaxed">
-                    Los eventos enviados por AeroFocus Pro (vía cierre diario de las 22:00h o sincronización de vuelos) se retienen aquí de forma aislada. 
-                    <strong> No modifican tus notas oficiales, cantos, ni vueltas</strong> hasta que tú los revises y pulses <em>"Aprobar"</em>.
+                    Las sesiones enviadas por AeroFocus se retienen aquí. Puedes <strong>calificar su dificultad (1-10)</strong>, 
+                    <strong> ajustar si completan o no vuelta oficial</strong>, y <strong>unificar repasos partidos</strong> antes de incorporarlas a tu expediente.
                   </p>
                 </div>
               </div>
 
-              <div className="flex items-center gap-2 shrink-0">
+              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                <button
+                  onClick={() => setIsPasteModalOpen(true)}
+                  className="px-3 py-1.5 rounded-xl text-xs font-bold bg-white hover:bg-slate-100 text-indigo-700 border border-indigo-200 shadow-xs transition-all flex items-center gap-1.5"
+                >
+                  <Send size={12} className="text-indigo-600" />
+                  <span>Pegar JSON AeroFocus</span>
+                </button>
+
+                <button
+                  onClick={handleTestWebhook}
+                  disabled={isTestingWebhook}
+                  className="px-3 py-1.5 rounded-xl text-xs font-bold bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 shadow-xs transition-all flex items-center gap-1.5"
+                >
+                  <Sparkles size={12} className="text-amber-600" />
+                  <span>{isTestingWebhook ? "Simulando..." : "Simular Sesión Prueba"}</span>
+                </button>
+
                 <button
                   onClick={() => fetchQuarantinedEvents()}
                   disabled={isLoadingQuarantine}
@@ -465,93 +641,301 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                     Bandeja de Cuarentena Limpia y Protegida
                   </h3>
                   <p className="text-xs text-slate-500 max-w-md mt-1 leading-relaxed">
-                    No hay ningún evento pendiente de revisión. Tu expediente oficial está 100% libre de datos sospechosos o simulaciones no deseadas.
+                    No hay ningún evento pendiente de revisión. Todas las sesiones que envíe AeroFocus aparecerán aquí de inmediato para que las califiques y apruebes.
                   </p>
-                  <div className="mt-4 flex items-center gap-2 text-[11px] text-slate-400 font-mono">
-                    <span>Token activo: wp_qLXi6WFkFY_live</span>
-                    <span>·</span>
-                    <span>Cierre: 22:00h</span>
+                  <div className="mt-6 flex flex-wrap items-center justify-center gap-2">
+                    <button
+                      onClick={handleTestWebhook}
+                      className="px-4 py-2 rounded-xl text-xs font-black text-white bg-slate-900 hover:bg-slate-800 shadow-sm transition-all flex items-center gap-1.5"
+                    >
+                      <Sparkles size={13} className="text-amber-400" />
+                      <span>Probar Flujo con Sesión Simulada</span>
+                    </button>
+                    <button
+                      onClick={() => setIsPasteModalOpen(true)}
+                      className="px-4 py-2 rounded-xl text-xs font-bold text-slate-700 bg-white hover:bg-slate-100 border border-slate-200 transition-all flex items-center gap-1.5"
+                    >
+                      <Send size={13} className="text-indigo-600" />
+                      <span>Pegar JSON Manualmente</span>
+                    </button>
                   </div>
                 </div>
               ) : (
-                <div className="space-y-4 max-w-4xl mx-auto">
-                  {quarantinedEvents.map((evt) => (
-                    <div
-                      key={evt.id}
-                      className="bg-white rounded-2xl border border-slate-200/90 shadow-sm p-4 hover:shadow-md transition-all flex flex-col gap-3"
-                    >
-                      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-3">
-                        <div className="flex items-center gap-2.5">
-                          <span className="px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-amber-50 text-amber-800 border border-amber-200">
-                            En Cuarentena
-                          </span>
-                          <span className="font-mono text-xs font-bold text-slate-800">
-                            ID: {evt.id}
-                          </span>
-                          <span className="text-slate-300">·</span>
-                          <span className="text-xs text-slate-500 flex items-center gap-1">
-                            <Clock size={12} />
-                            {evt.date || "Hoy"}
-                          </span>
-                        </div>
+                <div className="space-y-6 max-w-4xl mx-auto">
+                  {quarantinedEvents.map((evt) => {
+                    // Check for duplicate topics within this transmission (e.g. split reviews of same topic)
+                    const topicFrequency = new Map<string, number[]>();
+                    (evt.topics || []).forEach((t, index) => {
+                      const tid = t.resolvedTopicId;
+                      if (tid) {
+                        const existing = topicFrequency.get(tid) || [];
+                        existing.push(index);
+                        topicFrequency.set(tid, existing);
+                      }
+                    });
 
-                        <div className="flex items-center gap-2">
-                          <button
-                            onClick={() => discardQuarantineEvent(evt.id)}
-                            className="px-3 py-1 rounded-xl text-xs font-bold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200/70 transition-all flex items-center gap-1"
-                          >
-                            <Trash2 size={12} />
-                            <span>Descartar</span>
-                          </button>
-                          <button
-                            onClick={() => approveQuarantineEvent(evt.id)}
-                            className="px-3.5 py-1 rounded-xl text-xs font-black text-white bg-emerald-600 hover:bg-emerald-700 shadow-xs transition-all flex items-center gap-1.5"
-                          >
-                            <CheckCircle2 size={13} />
-                            <span>Aprobar e Incorporar</span>
-                          </button>
-                        </div>
-                      </div>
+                    const duplicateEntries = Array.from(topicFrequency.entries()).filter(([_, indices]) => indices.length > 1);
 
-                      {/* Topics inside this quarantined event */}
-                      <div className="space-y-2">
-                        <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">
-                          Temas incluidos en este evento ({evt.topics?.length || 0}):
-                        </div>
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                          {(evt.topics || []).map((t, idx) => (
-                            <div
-                              key={idx}
-                              className="p-2.5 rounded-xl bg-slate-50 border border-slate-100 flex items-center justify-between gap-2"
+                    return (
+                      <div
+                        key={evt.id}
+                        className="bg-white rounded-3xl border border-slate-200/90 shadow-sm hover:shadow-md transition-all flex flex-col overflow-hidden"
+                      >
+                        {/* Event Card Header */}
+                        <div className="px-5 py-4 bg-slate-50/80 border-b border-slate-100 flex flex-wrap items-center justify-between gap-3">
+                          <div className="flex items-center gap-2.5">
+                            <span className="px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-amber-100 text-amber-900 border border-amber-200">
+                              En Cuarentena
+                            </span>
+                            <span className="font-mono text-xs font-bold text-slate-700">
+                              Vuelo #{evt.flightId || evt.id.slice(-6)}
+                            </span>
+                            <span className="text-slate-300">·</span>
+                            <span className="text-xs text-slate-500 flex items-center gap-1">
+                              <Clock size={12} />
+                              {evt.date || "Hoy"}
+                            </span>
+                            <span className="text-slate-300">·</span>
+                            <span className="text-xs font-bold text-slate-700">
+                              {evt.totalFlightEffectiveHours || (evt.totalFlightEffectiveMinutes ? (evt.totalFlightEffectiveMinutes / 60).toFixed(1) : 0)} horas netas
+                            </span>
+                          </div>
+
+                          <div className="flex items-center gap-2">
+                            <button
+                              onClick={() => discardQuarantineEvent(evt.id)}
+                              className="px-3.5 py-1.5 rounded-xl text-xs font-bold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200/70 transition-all flex items-center gap-1"
+                              title="Descartar sin alterar tu expediente"
                             >
-                              <div className="min-w-0">
-                                <div className="text-xs font-bold text-slate-800 truncate">
-                                  {t.resolvedTopicTitle || t.resolvedTopicId || "Tema"}
-                                </div>
-                                <div className="text-[10px] text-slate-500 flex items-center gap-1.5 mt-0.5">
-                                  <span className="uppercase font-semibold text-indigo-600">
-                                    {t.modality || "repaso"}
-                                  </span>
-                                  <span>·</span>
-                                  <span>{t.effectiveMinutes || Math.round((t.effectiveHours || 0) * 60)} min</span>
-                                  {t.cantoGrade !== undefined && (
-                                    <>
-                                      <span>·</span>
-                                      <span className="text-amber-700 font-bold">Nota: {t.cantoGrade}/10</span>
-                                    </>
-                                  )}
-                                </div>
-                              </div>
+                              <Trash2 size={13} />
+                              <span>Denegar / Descartar</span>
+                            </button>
+                            <button
+                              onClick={() => approveQuarantineEvent(evt.id)}
+                              className="px-4 py-1.5 rounded-xl text-xs font-black text-white bg-emerald-600 hover:bg-emerald-700 shadow-sm transition-all flex items-center gap-1.5"
+                            >
+                              <CheckCircle2 size={14} />
+                              <span>Aprobar e Incorporar</span>
+                            </button>
+                          </div>
+                        </div>
 
-                              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-200 text-slate-700 shrink-0">
-                                {t.resolvedTopicId}
+                        {/* Split Review Merge Notice Banner if duplicates exist */}
+                        {duplicateEntries.length > 0 && (
+                          <div className="px-5 py-3 bg-indigo-50/70 border-b border-indigo-100 flex flex-wrap items-center justify-between gap-2">
+                            <div className="flex items-center gap-2 text-xs text-indigo-950 font-bold">
+                              <Layers size={14} className="text-indigo-600 shrink-0" />
+                              <span>
+                                Se han detectado {duplicateEntries.length} temas divididos en varias sesiones (repasos partidos).
                               </span>
                             </div>
-                          ))}
+                            <div className="flex items-center gap-2">
+                              {duplicateEntries.map(([tid, indices]) => {
+                                const firstTopic = evt.topics[indices[0]];
+                                return (
+                                  <button
+                                    key={tid}
+                                    onClick={() => mergeQuarantineTopics(evt.id, indices[0], indices[1])}
+                                    className="px-3 py-1 rounded-lg text-xs font-black text-indigo-700 bg-white hover:bg-indigo-100 border border-indigo-200 shadow-2xs transition-all flex items-center gap-1.5"
+                                  >
+                                    <Sparkles size={11} className="text-indigo-600" />
+                                    <span>Fusionar {firstTopic?.resolvedTopicTitle?.split(":")[0] || tid} ({indices.length} partes)</span>
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Interactive Topics List */}
+                        <div className="p-5 space-y-4">
+                          <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider flex items-center justify-between">
+                            <span>Personalización previa de temas ({evt.topics?.length || 0}):</span>
+                            <span className="text-[10px] text-slate-400 font-normal">
+                              Puedes calificar dificultad y ajustar si suma vuelta antes de aprobar
+                            </span>
+                          </div>
+
+                          <div className="space-y-3">
+                            {(evt.topics || []).map((t, idx) => {
+                              const durationMins = t.effectiveMinutes || Math.round((t.effectiveHours || 0) * 60) || 45;
+                              const currentDiff = t.dificultadReal !== undefined ? t.dificultadReal : t.difficulty;
+                              const isRated = currentDiff !== undefined && currentDiff > 0;
+                              const completesVuelta = t.completesVuelta !== undefined ? t.completesVuelta : (t.modality === 'repaso' || t.modality === 'canto');
+
+                              return (
+                                <div
+                                  key={idx}
+                                  className="p-4 rounded-2xl bg-slate-50/70 border border-slate-200/80 hover:border-slate-300 transition-all flex flex-col gap-3.5"
+                                >
+                                  {/* Row 1: Topic Title, Badge & Reassign */}
+                                  <div className="flex flex-wrap items-center justify-between gap-2">
+                                    <div className="flex items-center gap-2 min-w-0">
+                                      <span className="text-[11px] font-mono px-2 py-0.5 rounded-md bg-slate-200 font-bold text-slate-700 shrink-0">
+                                        {t.resolvedTopicId}
+                                      </span>
+                                      <span className="text-xs font-black text-slate-900 truncate">
+                                        {t.resolvedTopicTitle || "Tema no especificado"}
+                                      </span>
+                                    </div>
+
+                                    <button
+                                      onClick={() => {
+                                        setReassigningItem({ eventId: evt.id, topicIndex: idx });
+                                        setReassignSearch("");
+                                      }}
+                                      className="px-2.5 py-1 rounded-lg text-[11px] font-bold text-slate-600 bg-white hover:bg-slate-100 border border-slate-200 transition-all flex items-center gap-1"
+                                      title="Cambiar tema asignado"
+                                    >
+                                      <Edit2 size={11} />
+                                      <span>Cambiar tema</span>
+                                    </button>
+                                  </div>
+
+                                  {/* Row 2: Modality, Duration & Vuelta Toggle */}
+                                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 items-center">
+                                    {/* Modality Selector */}
+                                    <div>
+                                      <label className="text-[10px] font-black uppercase tracking-wider text-slate-400 block mb-1">
+                                        Modalidad
+                                      </label>
+                                      <select
+                                        value={t.modality || "repaso"}
+                                        onChange={(e) => updateQuarantineTopic(evt.id, idx, { modality: e.target.value as any })}
+                                        className="w-full px-2.5 py-1.5 rounded-xl bg-white border border-slate-200 text-xs font-bold text-slate-800 focus:outline-none"
+                                      >
+                                        <option value="repaso">Repaso</option>
+                                        <option value="primer_estudio">Primer Estudio</option>
+                                        <option value="refresco">Refresco</option>
+                                        <option value="canto">Cante</option>
+                                      </select>
+                                    </div>
+
+                                    {/* Duration Adjuster */}
+                                    <div>
+                                      <label className="text-[10px] font-black uppercase tracking-wider text-slate-400 block mb-1">
+                                        Duración Efectiva (minutos)
+                                      </label>
+                                      <div className="flex items-center gap-1">
+                                        <button
+                                          onClick={() => {
+                                            const newMins = Math.max(5, durationMins - 15);
+                                            updateQuarantineTopic(evt.id, idx, { 
+                                              effectiveMinutes: newMins,
+                                              effectiveHours: Math.round((newMins / 60) * 100) / 100 
+                                            });
+                                          }}
+                                          className="w-7 h-7 rounded-lg bg-white border border-slate-200 text-xs font-black text-slate-600 hover:bg-slate-100 flex items-center justify-center shrink-0"
+                                        >
+                                          -
+                                        </button>
+                                        <input
+                                          type="number"
+                                          min="1"
+                                          max="600"
+                                          value={durationMins}
+                                          onChange={(e) => {
+                                            const val = parseInt(e.target.value, 10) || 0;
+                                            updateQuarantineTopic(evt.id, idx, { 
+                                              effectiveMinutes: val,
+                                              effectiveHours: Math.round((val / 60) * 100) / 100 
+                                            });
+                                          }}
+                                          className="w-full text-center px-2 py-1.5 rounded-xl bg-white border border-slate-200 text-xs font-mono font-bold text-slate-900"
+                                        />
+                                        <button
+                                          onClick={() => {
+                                            const newMins = durationMins + 15;
+                                            updateQuarantineTopic(evt.id, idx, { 
+                                              effectiveMinutes: newMins,
+                                              effectiveHours: Math.round((newMins / 60) * 100) / 100 
+                                            });
+                                          }}
+                                          className="w-7 h-7 rounded-lg bg-white border border-slate-200 text-xs font-black text-slate-600 hover:bg-slate-100 flex items-center justify-center shrink-0"
+                                        >
+                                          +
+                                        </button>
+                                      </div>
+                                    </div>
+
+                                    {/* Vuelta Toggle (Critical for partial reviews) */}
+                                    <div>
+                                      <label className="text-[10px] font-black uppercase tracking-wider text-slate-400 block mb-1">
+                                        ¿Suma Vuelta Oficial?
+                                      </label>
+                                      <button
+                                        type="button"
+                                        onClick={() => updateQuarantineTopic(evt.id, idx, { completesVuelta: !completesVuelta })}
+                                        className={cn(
+                                          "w-full px-3 py-1.5 rounded-xl text-xs font-black border transition-all flex items-center justify-between gap-1.5",
+                                          completesVuelta
+                                            ? "bg-emerald-50 text-emerald-800 border-emerald-300"
+                                            : "bg-amber-50 text-amber-800 border-amber-300"
+                                        )}
+                                        title="Si fue un repaso partido que no terminó el tema, marca 'No' para sumar horas sin falsear tus vueltas"
+                                      >
+                                        <span>{completesVuelta ? "✓ Sí, completa vuelta" : "⚠️ No, repaso parcial"}</span>
+                                        <span className="text-[10px] underline font-normal">Cambiar</span>
+                                      </button>
+                                    </div>
+                                  </div>
+
+                                  {/* Row 3: Difficulty Rating Selector (1 to 10) */}
+                                  <div className="pt-2 border-t border-slate-200/60">
+                                    <div className="flex flex-wrap items-center justify-between gap-2 mb-1.5">
+                                      <span className="text-[10px] font-black uppercase tracking-wider text-slate-500">
+                                        Calificación de Dificultad (1 = Fácil, 10 = Máxima dificultad):
+                                      </span>
+                                      <button
+                                        onClick={() => updateQuarantineTopic(evt.id, idx, { difficulty: undefined, dificultadReal: undefined })}
+                                        className={cn(
+                                          "text-[10px] font-bold px-2 py-0.5 rounded-md transition-all",
+                                          !isRated ? "bg-amber-100 text-amber-800 font-black" : "text-slate-400 hover:text-slate-700"
+                                        )}
+                                      >
+                                        {!isRated ? "⚠️ Sin calificar (Pendiente)" : "Dejar sin calificar"}
+                                      </button>
+                                    </div>
+
+                                    <div className="flex flex-wrap items-center gap-1.5">
+                                      {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((score) => {
+                                        const isSelected = currentDiff === score;
+                                        return (
+                                          <button
+                                            key={score}
+                                            onClick={() => updateQuarantineTopic(evt.id, idx, { difficulty: score, dificultadReal: score })}
+                                            className={cn(
+                                              "w-7 h-7 rounded-lg text-xs font-black transition-all flex items-center justify-center font-mono cursor-pointer",
+                                              isSelected
+                                                ? "bg-slate-900 text-white shadow-xs scale-105 ring-2 ring-slate-900/20"
+                                                : "bg-white hover:bg-slate-200 text-slate-700 border border-slate-200"
+                                            )}
+                                          >
+                                            {score}
+                                          </button>
+                                        );
+                                      })}
+                                    </div>
+                                  </div>
+
+                                  {/* Row 4: Custom Notes */}
+                                  <div>
+                                    <input
+                                      type="text"
+                                      placeholder="Notas u observaciones de este repaso..."
+                                      value={t.notes || ""}
+                                      onChange={(e) => updateQuarantineTopic(evt.id, idx, { notes: e.target.value })}
+                                      className="w-full px-3 py-1 bg-white border border-slate-200 rounded-lg text-[11px] text-slate-700 focus:outline-none"
+                                    />
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
                         </div>
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -874,6 +1258,137 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
         </div>
 
       </div>
+
+      {/* Manual Paste Modal */}
+      {isPasteModalOpen && (
+        <div className="fixed inset-0 z-60 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl shadow-2xl border border-slate-200 w-full max-w-lg p-6 flex flex-col gap-4 animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-xl bg-indigo-50 text-indigo-600 flex items-center justify-center">
+                  <Send size={16} />
+                </div>
+                <div>
+                  <h3 className="text-sm font-black text-slate-900">Pegar Transmisión de AeroFocus</h3>
+                  <p className="text-[11px] text-slate-500">Pega el payload JSON recibido de AeroFocus Pro</p>
+                </div>
+              </div>
+              <button
+                onClick={() => setIsPasteModalOpen(false)}
+                className="text-slate-400 hover:text-slate-600 p-1 rounded-lg"
+              >
+                <X size={16} />
+              </button>
+            </div>
+
+            <div>
+              <label className="text-[10px] font-black uppercase tracking-wider text-slate-400 block mb-1">
+                JSON de la sesión
+              </label>
+              <textarea
+                rows={8}
+                value={pasteJsonText}
+                onChange={(e) => setPasteJsonText(e.target.value)}
+                placeholder='{"date": "2026-10-21", "topics": [{"topicTitle": "Constitucional 1", "effectiveMinutes": 90, "modality": "repaso"}]}'
+                className="w-full p-3 bg-slate-50 border border-slate-200 rounded-2xl text-xs font-mono text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
+              />
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setIsPasteModalOpen(false)}
+                className="px-4 py-2 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-100 transition-colors"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={handleImportPaste}
+                disabled={isImportingPaste}
+                className="px-4 py-2 rounded-xl text-xs font-black text-white bg-indigo-600 hover:bg-indigo-700 shadow-sm transition-all flex items-center gap-1.5"
+              >
+                {isImportingPaste ? <RefreshCw size={12} className="animate-spin" /> : <CheckCircle2 size={13} />}
+                <span>Cargar en Cuarentena</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Topic Reassignment Modal */}
+      {reassigningItem && (
+        <div className="fixed inset-0 z-60 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl shadow-2xl border border-slate-200 w-full max-w-lg h-[80vh] max-h-[600px] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+            <div className="p-5 border-b border-slate-100 flex items-center justify-between">
+              <div>
+                <h3 className="text-sm font-black text-slate-900">Reasignar Tema Oficial</h3>
+                <p className="text-[11px] text-slate-500">Selecciona el tema oficial correspondiente para esta sesión</p>
+              </div>
+              <button
+                onClick={() => setReassigningItem(null)}
+                className="text-slate-400 hover:text-slate-600 p-1.5 rounded-xl hover:bg-slate-100"
+              >
+                <X size={16} />
+              </button>
+            </div>
+
+            <div className="p-4 border-b border-slate-100 bg-slate-50/50">
+              <div className="relative">
+                <Search size={14} className="absolute left-3 top-2.5 text-slate-400" />
+                <input
+                  type="text"
+                  placeholder="Buscar por número o título del tema..."
+                  value={reassignSearch}
+                  onChange={(e) => setReassignSearch(e.target.value)}
+                  className="w-full pl-9 pr-3 py-1.5 bg-white border border-slate-200 rounded-xl text-xs font-medium text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
+                  autoFocus
+                />
+              </div>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-4 space-y-1.5">
+              {initialTopics
+                .filter((t) => {
+                  if (!reassignSearch) return true;
+                  const q = reassignSearch.toLowerCase();
+                  return t.title.toLowerCase().includes(q) || t.id.toLowerCase().includes(q) || String(t.number).includes(q);
+                })
+                .map((t) => {
+                  const sub = initialSubjects.find((s) => s.id === t.subjectId);
+                  return (
+                    <button
+                      key={t.id}
+                      onClick={() => {
+                        updateQuarantineTopic(reassigningItem.eventId, reassigningItem.topicIndex, {
+                          resolvedTopicId: t.id,
+                          resolvedTopicTitle: t.title,
+                          resolvedTopicNumber: t.number,
+                          resolvedSubjectId: t.subjectId
+                        });
+                        setReassigningItem(null);
+                        toast.success(`Tema reasignado a: ${t.title}`);
+                      }}
+                      className="w-full text-left p-3 rounded-xl hover:bg-indigo-50/60 border border-slate-100 hover:border-indigo-200 transition-all flex items-center justify-between gap-3 group"
+                    >
+                      <div className="min-w-0">
+                        <div className="text-xs font-black text-slate-900 group-hover:text-indigo-900 truncate">
+                          {t.title}
+                        </div>
+                        <div className="text-[10px] text-slate-400 mt-0.5">
+                          {sub?.name || t.subjectId} · Tema #{t.number}
+                        </div>
+                      </div>
+                      <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-100 text-slate-600 shrink-0">
+                        {t.id}
+                      </span>
+                    </button>
+                  );
+                })}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Edit Session Modal */}
       {editingSession && (

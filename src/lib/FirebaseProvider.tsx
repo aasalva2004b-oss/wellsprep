@@ -34,25 +34,58 @@ import { WebhookSyncRecord, WebhookResolvedTopic } from "./webhookTypes";
 import { isCantoSession, getCantoDuration, sessionMatchesTopic } from "./cantoUtils";
 import { resolveAeroFocusTopic } from "./topicResolver";
 
-export function cleanForFirestore<T extends Record<string, any>>(obj: T): T {
-  if (!obj || typeof obj !== "object") return obj;
-  const clean: any = {};
-  for (const [key, value] of Object.entries(obj)) {
-    if (value === undefined) continue;
-    // Preserve Firestore FieldValues (serverTimestamp, deleteField, etc.)
-    if (value !== null && typeof value === "object") {
-      const isPlain = Object.prototype.toString.call(value) === "[object Object]" && (value.constructor === Object || !value.constructor);
-      if (!isPlain && !(value instanceof Date) && !Array.isArray(value)) {
-        clean[key] = value;
-        continue;
-      }
+export function cleanForFirestore<T>(data: T): T {
+  if (data === null || data === undefined) {
+    return data;
+  }
+
+  // Handle Arrays: recursively clean each element and discard undefined items
+  if (Array.isArray(data)) {
+    return data
+      .filter((item) => item !== undefined)
+      .map((item) => cleanForFirestore(item)) as unknown as T;
+  }
+
+  // Handle non-objects or primitives
+  if (typeof data !== "object") {
+    if (typeof data === "number" && (isNaN(data) || !isFinite(data))) {
+      return 0 as unknown as T;
+    }
+    return data;
+  }
+
+  // Preserve Dates
+  if (data instanceof Date) {
+    return data;
+  }
+
+  // Preserve special Firestore types (FieldValue, serverTimestamp, deleteField, GeoPoint, etc.)
+  const isPlainObject =
+    Object.prototype.toString.call(data) === "[object Object]" &&
+    (data.constructor === Object || !data.constructor);
+
+  if (!isPlainObject) {
+    return data;
+  }
+
+  const cleanObj: Record<string, any> = {};
+  for (const [key, value] of Object.entries(data as Record<string, any>)) {
+    if (value === undefined) {
+      continue;
     }
     if (typeof value === "number") {
-      if (isNaN(value) || !isFinite(value)) continue;
+      if (isNaN(value) || !isFinite(value)) {
+        continue;
+      }
+      cleanObj[key] = value;
+      continue;
     }
-    clean[key] = value;
+    const cleanedVal = cleanForFirestore(value);
+    if (cleanedVal !== undefined) {
+      cleanObj[key] = cleanedVal;
+    }
   }
-  return clean;
+  return cleanObj as T;
 }
 
 export interface UserSettingsData {
@@ -126,6 +159,7 @@ interface FirebaseContextType {
   auditAndRestoreTopicIntegrity: () => Promise<{ restoredCount: number }>;
   purgeAllAeroFocusData: () => Promise<void>;
   purgePhantomTema5Cante: () => Promise<void>;
+  migratePenalSessionsToConstitucional5: (silent?: boolean) => Promise<{ migratedCount: number }>;
   deduplicateUserSessions: (silent?: boolean) => Promise<{ deletedCount: number; affectedTopics: string[] }>;
   recoverHistoricalUserData: (silent?: boolean) => Promise<any>;
   quarantinedEvents: WebhookSyncRecord[];
@@ -705,6 +739,11 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
       const bestCantoMins = hasRealCante && bestCantoTotalSecs > 0 ? Math.floor(bestCantoTotalSecs / 60) : null;
       const bestCantoSecs = hasRealCante && bestCantoTotalSecs > 0 ? bestCantoTotalSecs % 60 : null;
 
+      // Si el tema tiene sesiones o repasos acumulados, garantizar que cuente al menos 1 vuelta completa
+      if (vueltasCount === 0 && (repasoHours > 0 || (totalHours > 0 && targetTopicId === "constitucional-5"))) {
+        vueltasCount = 1;
+      }
+
       const progressUpdate: any = {
         userId: user.uid,
         topicId: targetTopicId,
@@ -1254,6 +1293,18 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
                     sTopicId = "constitucional-5";
                   } else if (clean.startsWith("const-") || clean.startsWith("const_")) {
                     sTopicId = `constitucional-${clean.replace(/^const[-_]/, "")}`;
+                  } else if (
+                    clean === "penal-5" ||
+                    clean === "penal-12" ||
+                    clean === "penal_5" ||
+                    clean === "penal_12" ||
+                    clean.startsWith("penal") ||
+                    clean.startsWith("jud-pen") ||
+                    String(sData.subjectId || "").toLowerCase().includes("penal") ||
+                    String(sData.category || "").toLowerCase().includes("penal") ||
+                    String(sData.topicTitle || "").toLowerCase().includes("penal")
+                  ) {
+                    sTopicId = "constitucional-5";
                   }
                 }
 
@@ -1349,6 +1400,18 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
                         sTopicId = "constitucional-5";
                       } else if (clean.startsWith("const-") || clean.startsWith("const_")) {
                         sTopicId = `constitucional-${clean.replace(/^const[-_]/, "")}`;
+                      } else if (
+                        clean === "penal-5" ||
+                        clean === "penal-12" ||
+                        clean === "penal_5" ||
+                        clean === "penal_12" ||
+                        clean.startsWith("penal") ||
+                        clean.startsWith("jud-pen") ||
+                        String(data.subjectId || "").toLowerCase().includes("penal") ||
+                        String(data.category || "").toLowerCase().includes("penal") ||
+                        String(data.topicTitle || "").toLowerCase().includes("penal")
+                      ) {
+                        sTopicId = "constitucional-5";
                       }
                     }
 
@@ -1409,29 +1472,149 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  // Purgado exhaustivo de datos inventados: Cante ficticio de 45m de Tema 5 y Derecho Penal
+  // Migración y consolidación de sesiones de Derecho Penal (Temas 5 y 12 u otros) a Constitucional 5
+  const migratePenalSessionsToConstitucional5 = async (silent: boolean = false): Promise<{ migratedCount: number }> => {
+    if (!user) return { migratedCount: 0 };
+    const toastId = silent ? null : toast.loading("Migrando sesiones de Penal a Constitucional 5...");
+    try {
+      let migratedCount = 0;
+      const snap = await getDocs(collection(db, `users/${user.uid}/sessions`));
+
+      for (const d of snap.docs) {
+        const data = d.data();
+        const sTopic = String(data.topicId || "").toLowerCase().trim();
+        const sSubj = String(data.subjectId || "").toLowerCase().trim();
+        const sCat = String(data.category || "").toLowerCase().trim();
+        const sTitle = String(data.topicTitle || "").toLowerCase();
+        const sNotes = String(data.notes || "").toLowerCase();
+
+        const isPenal =
+          sTopic === "penal-5" ||
+          sTopic === "penal-12" ||
+          sTopic === "penal_5" ||
+          sTopic === "penal_12" ||
+          sTopic === "jud-pen-05" ||
+          sTopic === "jud-pen-12" ||
+          sTopic === "jud_pen_5" ||
+          sTopic === "jud_pen_12" ||
+          sTopic === "penal" ||
+          sTopic.startsWith("penal-") ||
+          sTopic.startsWith("penal_") ||
+          sTopic.startsWith("jud-pen") ||
+          sSubj.includes("penal") ||
+          sCat.includes("penal") ||
+          sTitle.includes("penal 5") ||
+          sTitle.includes("penal 12") ||
+          sTitle.includes("delito imprudente") ||
+          sTitle.includes("circunstancias agravantes") ||
+          sTitle.includes("derecho penal") ||
+          sNotes.includes("penal 5") ||
+          sNotes.includes("penal 12") ||
+          sNotes.includes("derecho penal");
+
+        if (isPenal) {
+          await updateDoc(d.ref, {
+            topicId: "constitucional-5",
+            subjectId: "constitucional",
+            topicTitle: "Tema 5 - El principio y derecho fundamental a la igualdad y la prohibición de discriminación",
+            category: "Derecho Constitucional",
+            completesVuelta: data.completesVuelta !== undefined ? data.completesVuelta : true,
+            notes: (data.notes ? `${data.notes} · ` : "") + "[Migrado de Penal a Constitucional 5]",
+            updatedAt: serverTimestamp(),
+          });
+          migratedCount++;
+        }
+      }
+
+      // Limpiar progresos residuales de Penal en users/{uid}/progress
+      const penalProgIds = ["penal-5", "penal-12", "penal", "jud-pen-05", "jud-pen-12"];
+      for (const pId of penalProgIds) {
+        const pRef = doc(db, `users/${user.uid}/progress`, pId);
+        const pSnap = await getDoc(pRef);
+        if (pSnap.exists()) {
+          await deleteDoc(pRef).catch(() => {});
+        }
+      }
+
+      // Migrar también eventos retenidos en Cuarentena si hubiera temas de Penal
+      try {
+        const qSnap = await getDocs(collection(db, `users/${user.uid}/quarantine`));
+        for (const qDoc of qSnap.docs) {
+          const qData = qDoc.data();
+          let changed = false;
+          const updatedTopics = (qData.topics || []).map((t: any) => {
+            const tId = String(t.resolvedTopicId || t.topicId || "").toLowerCase();
+            const tTitle = String(t.resolvedTopicTitle || t.topicTitle || "").toLowerCase();
+            if (
+              tId.includes("penal") ||
+              tTitle.includes("penal") ||
+              tTitle.includes("imprudente") ||
+              tTitle.includes("agravantes")
+            ) {
+              changed = true;
+              return {
+                ...t,
+                resolvedTopicId: "constitucional-5",
+                resolvedSubjectId: "constitucional",
+                resolvedTopicTitle: "Tema 5 - El principio y derecho fundamental a la igualdad y la prohibición de discriminación",
+                category: "Derecho Constitucional",
+                completesVuelta: t.completesVuelta !== undefined ? t.completesVuelta : true
+              };
+            }
+            return t;
+          });
+
+          if (changed) {
+            await setDoc(qDoc.ref, cleanForFirestore({ ...qData, topics: updatedTopics }), { merge: true });
+          }
+        }
+      } catch (qErr) {
+        console.warn("Notice in quarantine migration:", qErr);
+      }
+
+      // Recalcular Constitucional 5
+      await recalculateTopicFromSessions("constitucional-5");
+
+      // Refrescar sesiones recientes en memoria
+      const refreshedSnap = await getDocs(collection(db, `users/${user.uid}/sessions`));
+      const newRecent = refreshedSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      setRecentSessions(newRecent);
+
+      if (toastId) toast.dismiss(toastId);
+      if (migratedCount > 0) {
+        toast.success(`¡Éxito! Se migraron ${migratedCount} sesiones de Penal al Tema 5 de Constitucional. Progreso y vueltas actualizados.`);
+      } else if (!silent) {
+        toast.info("No se encontraron sesiones de Penal pendientes de migrar. Tema 5 de Constitucional recalculado.");
+      }
+
+      return { migratedCount };
+    } catch (err: any) {
+      console.error("Error migrando sesiones de Penal:", err);
+      if (toastId) {
+        toast.dismiss(toastId);
+        toast.error("Error al migrar sesiones de Penal: " + err.message);
+      }
+      return { migratedCount: 0 };
+    }
+  };
+
+  // Purgado exhaustivo de cante ficticio y mantenimiento
   const purgePhantomTema5Cante = async () => {
     if (!user) return;
     try {
+      // 1. Migrar automáticamente cualquier sesión de Penal a Constitucional 5
+      await migratePenalSessionsToConstitucional5(true);
+
       const snap = await getDocs(collection(db, `users/${user.uid}/sessions`));
       let deletedCount = 0;
       for (const d of snap.docs) {
         const data = d.data();
         const sTopic = String(data.topicId || "").toLowerCase().trim();
-        const sSubj = String(data.subjectId || "").toLowerCase().trim();
         const sNotes = String(data.notes || "").toLowerCase();
         const sType = String(data.type || data.modality || "").toLowerCase();
         const dur = Number(data.durationMinutes || data.durationReal || 0);
 
-        // 1. Eliminar cualquier registro de Derecho Penal
-        const isPenal =
-          sTopic.startsWith("penal-") ||
-          sTopic === "penal" ||
-          sSubj.includes("penal") ||
-          sNotes.includes("derecho penal") ||
-          (data.category && String(data.category).toLowerCase().includes("penal"));
-
-        // 2. Eliminar cualquier cante inventado del Tema 5 (45 min, 30s, nota 8.5, o cierre_22h)
+        // 2. Eliminar exclusivamente cantes ficticios/inventados de prueba
         const isTopic5 =
           sTopic === "constitucional-5" ||
           sTopic === "5" ||
@@ -1448,25 +1631,15 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
             data.flightId === "cierre_22h" ||
             (data.source === "aerofocus" && sType === "canto"));
 
-        // 3. Eliminar cualquier sesión etiquetada como prueba/inventada
         const isInvented =
           sNotes.includes("inventado") ||
           sNotes.includes("mock") ||
           sNotes.includes("simulado test") ||
           data.flightId === "FLIGHT_TEST_AERO_99";
 
-        if (isPenal || isFakeTopic5Cante || isInvented) {
+        if (isFakeTopic5Cante || isInvented) {
           await deleteDoc(d.ref);
           deletedCount++;
-        }
-      }
-
-      // Limpiar progreso de temas de Penal si existen
-      const progSnap = await getDocs(collection(db, `users/${user.uid}/progress`));
-      for (const pDoc of progSnap.docs) {
-        const pId = pDoc.id.toLowerCase();
-        if (pId.startsWith("penal-") || pId === "penal") {
-          await deleteDoc(pDoc.ref);
         }
       }
 
@@ -1476,9 +1649,8 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
       if (progSnapDoc.exists()) {
         const pData = progSnapDoc.data();
         if (
-          Number(pData.ultimoCantoNota) === 8.5 ||
-          Number(pData.ultimoCantoSegundos) === 30 ||
-          Number(pData.studyTimeHours) === 0.75 ||
+          Number(pData.ultimoCantoNota) === 8.5 &&
+          Number(pData.ultimoCantoSegundos) === 30 &&
           pData.ultimoCantoFecha === "2026-10-16"
         ) {
           await updateDoc(progRef, {
@@ -1513,10 +1685,6 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
         }),
         { merge: true }
       );
-
-      if (deletedCount > 0) {
-        toast.success(`Limpieza completada: ${deletedCount} registros ficticios/Penal eliminados. Temario 100% real.`);
-      }
     } catch (err) {
       console.warn("Purge notice:", err);
     }
@@ -1864,7 +2032,12 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
           try {
             const data = JSON.parse(text);
             const serverEvents: WebhookSyncRecord[] = data.events || [];
-            serverEvents.forEach((e) => combined.set(e.id, e));
+            serverEvents.forEach((e) => {
+              combined.set(e.id, e);
+              if (user && (e.status === "quarantined" || e.status === "pending")) {
+                setDoc(doc(db, `users/${user.uid}/quarantine`, e.id), cleanForFirestore(e), { merge: true }).catch(() => {});
+              }
+            });
           } catch {}
         }
       } catch (err) {
@@ -1913,7 +2086,7 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
         rawTopics = rawPayload.sessions;
       } else if (Array.isArray(rawPayload.items)) {
         rawTopics = rawPayload.items;
-      } else if (rawPayload.topicId || rawPayload.topicTitle || rawPayload.topicNumber) {
+      } else if (rawPayload.topicId || rawPayload.topicTitle || rawPayload.topicNumber || rawPayload.tema || rawPayload.topic || rawPayload.materia || rawPayload.subject) {
         rawTopics = [rawPayload];
       }
 
@@ -1924,30 +2097,71 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
 
       const resolvedTopics: WebhookResolvedTopic[] = [];
       for (const t of rawTopics) {
+        const materia = t.materia || t.subject || t.subjectName || t.category || rawPayload.materia || rawPayload.subject || "Constitucional";
+        const modalidad = t.modalidad || t.modality || t.type || rawPayload.modalidad || rawPayload.modality || "repaso";
+        const horas = Number(t.horasEfectivas ?? t.effectiveHours ?? (t.effectiveMinutes ? Number(t.effectiveMinutes) / 60 : 0)) || 0;
+        const minutos = Number(t.minutosEfectivos ?? t.effectiveMinutes ?? Math.round(horas * 60)) || 0;
+        const startPage = t.startPage ?? t.pages?.pageStart ?? null;
+        const endPage = t.endPage ?? t.pages?.pageEnd ?? null;
+        const pagesCount = t.pagesCount ?? t.pages?.pagesCount ?? (startPage != null && endPage != null ? Math.max(0, endPage - startPage + 1) : 0);
+        const pagesText = t.pagesText ?? t.pages?.rawText ?? t.paginas ?? (startPage != null && endPage != null ? `Págs. ${startPage}-${endPage}` : undefined);
+        const isCompleted = Boolean(t.completado || t.completed || t.isTopicCompleted || t.status === 'completed');
+
         const enriched = {
           ...t,
-          category: t.category || rawPayload.category || rawPayload.subject || "Constitucional",
-          modality: t.modality || rawPayload.modality || "repaso",
+          category: materia,
+          materia,
+          modality: modalidad,
+          modalidad,
+          effectiveHours: horas,
+          horasEfectivas: horas,
+          effectiveMinutes: minutos,
+          minutosEfectivos: minutos,
+          startPage,
+          endPage,
+          pagesCount,
+          pagesText,
+          isTopicCompleted: isCompleted,
+          completesVuelta: isCompleted || Boolean(t.completesVuelta)
         };
         const resolved = resolveAeroFocusTopic(enriched);
         if (resolved) {
-          resolvedTopics.push(resolved);
-        } else {
           resolvedTopics.push({
+            ...resolved,
+            startPage: startPage !== null ? Number(startPage) : resolved.startPage,
+            endPage: endPage !== null ? Number(endPage) : resolved.endPage,
+            pagesCount: pagesCount || resolved.pagesCount,
+            pagesText: pagesText || resolved.pagesText,
+            isTopicCompleted: isCompleted || resolved.isTopicCompleted,
+            completesVuelta: isCompleted || resolved.completesVuelta
+          });
+        } else {
+          const fallbackTopic: WebhookResolvedTopic = {
             resolvedTopicId: String(t.topicId || t.topicNumber || t.id || "topic-unknown"),
             resolvedSubjectId: "general",
-            resolvedTopicNumber: Number(t.topicNumber || 0),
-            resolvedTopicTitle: t.topicTitle || t.title || `Tema ${t.topicNumber || ""}`,
-            effectiveMinutes: Number(t.effectiveMinutes) || Math.round((Number(t.effectiveHours) || 0) * 60) || 30,
-            effectiveHours: Number(t.effectiveHours) || (Number(t.effectiveMinutes) || 30) / 60,
-            modality: (t.modality as any) || "repaso",
-            cantoGrade: t.cantoGrade ?? t.grade,
-            cantoSeconds: t.cantoSeconds,
-            cantoType: t.cantoType,
-            mistakes: t.mistakes,
-            notes: t.notes || "Importado desde AeroFocus",
+            resolvedTopicNumber: Number(t.topicNumber || t.temaNumero || 0),
+            resolvedTopicTitle: t.topicTitle || t.tema || t.topic || t.title || `Tema ${t.topicNumber || ""}`,
+            effectiveMinutes: minutos || 30,
+            effectiveHours: horas || 0.5,
+            modality: (modalidad as any) || "repaso",
+            startPage: startPage !== null ? Number(startPage) : undefined,
+            endPage: endPage !== null ? Number(endPage) : undefined,
+            pagesCount: pagesCount || undefined,
+            pagesText: pagesText || undefined,
+            isTopicCompleted: isCompleted,
+            completesVuelta: isCompleted || Boolean(t.completesVuelta),
+            notes: t.notes || "Importado desde AeroFocus Pro",
             original: t,
-          });
+          };
+          if (t.cantoGrade !== undefined || t.grade !== undefined) fallbackTopic.cantoGrade = t.cantoGrade ?? t.grade;
+          if (t.cantoSeconds !== undefined) fallbackTopic.cantoSeconds = t.cantoSeconds;
+          if (t.cantoType !== undefined) fallbackTopic.cantoType = t.cantoType;
+          if (t.mistakes !== undefined) fallbackTopic.mistakes = t.mistakes;
+          if (t.difficulty !== undefined) {
+            fallbackTopic.difficulty = Number(t.difficulty);
+            fallbackTopic.dificultadReal = Number(t.difficulty);
+          }
+          resolvedTopics.push(fallbackTopic);
         }
       }
 
@@ -2069,6 +2283,12 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
           cantoType: topic.cantoType,
           mistakes: topic.mistakes,
           completesVuelta,
+          startPage: topic.startPage !== undefined ? topic.startPage : topic.pageInfo?.startPage,
+          endPage: topic.endPage !== undefined ? topic.endPage : topic.pageInfo?.endPage,
+          pagesCount: topic.pagesCount !== undefined ? topic.pagesCount : topic.pageInfo?.pagesRead,
+          pagesText: topic.pagesText || (topic.startPage && topic.endPage ? `Págs. ${topic.startPage}-${topic.endPage}` : undefined),
+          distractionSeconds: topic.distractionSeconds,
+          summaryLine: topic.summaryLine,
           createdAt: serverTimestamp(),
         });
         await setDoc(sessionRef, sessionDoc);
@@ -2138,6 +2358,119 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
     }
   }, [user]);
 
+  // Actualizar un evento completo en cuarentena (persistir en memoria, Firestore y servidor)
+  const updateQuarantineEvent = useCallback(async (eventId: string, updatedRecord: Partial<WebhookSyncRecord>) => {
+    setQuarantinedEvents(prev => prev.map(e => e.id === eventId ? { ...e, ...updatedRecord } : e));
+    if (user) {
+      try {
+        await setDoc(doc(db, `users/${user.uid}/quarantine`, eventId), cleanForFirestore(updatedRecord), { merge: true });
+      } catch (e) {
+        console.error("Error actualizando cuarentena en Firestore:", e);
+      }
+    }
+    fetch("/api/webhook/update-quarantine", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ eventId, updatedRecord })
+    }).catch(() => {});
+  }, [user]);
+
+  // Actualizar un tema concreto dentro de una transmisión en cuarentena (ej. dificultad, modalidad, horas, completesVuelta)
+  const updateQuarantineTopic = useCallback(async (eventId: string, topicIndex: number, updatedFields: Partial<WebhookResolvedTopic>) => {
+    const event = quarantinedEvents.find(e => e.id === eventId);
+    if (!event || !event.topics || !event.topics[topicIndex]) return;
+
+    const newTopics = [...event.topics];
+    newTopics[topicIndex] = {
+      ...newTopics[topicIndex],
+      ...updatedFields
+    };
+
+    const totalMinutes = newTopics.reduce((acc, t) => acc + (t.effectiveMinutes || 0), 0);
+    const totalHours = Math.round((totalMinutes / 60) * 100) / 100;
+
+    const updatedRecord: WebhookSyncRecord = {
+      ...event,
+      topics: newTopics,
+      totalFlightEffectiveMinutes: totalMinutes,
+      totalFlightEffectiveHours: totalHours
+    };
+
+    await updateQuarantineEvent(eventId, updatedRecord);
+  }, [quarantinedEvents, updateQuarantineEvent]);
+
+  // Fusionar dos repasos/bloques del mismo tema dentro de una transmisión
+  const mergeQuarantineTopics = useCallback(async (eventId: string, indexA: number, indexB: number) => {
+    const event = quarantinedEvents.find(e => e.id === eventId);
+    if (!event || !event.topics) return;
+    const topicA = event.topics[indexA];
+    const topicB = event.topics[indexB];
+    if (!topicA || !topicB) return;
+
+    const combinedMins = (topicA.effectiveMinutes || 0) + (topicB.effectiveMinutes || 0);
+    const combinedHours = Math.round(((topicA.effectiveHours || 0) + (topicB.effectiveHours || 0)) * 100) / 100;
+    const mergedNotes = [topicA.notes, topicB.notes].filter(Boolean).join(" | ");
+
+    const mergedTopic: WebhookResolvedTopic = {
+      ...topicA,
+      effectiveMinutes: combinedMins,
+      effectiveHours: combinedHours,
+      notes: mergedNotes,
+      completesVuelta: topicA.completesVuelta || topicB.completesVuelta || false,
+      difficulty: topicA.difficulty || topicB.difficulty,
+      dificultadReal: topicA.dificultadReal || topicB.dificultadReal
+    };
+
+    const newTopics = event.topics.filter((_, idx) => idx !== indexB);
+    newTopics[indexA] = mergedTopic;
+
+    const totalMinutes = newTopics.reduce((acc, t) => acc + (t.effectiveMinutes || 0), 0);
+    const totalHours = Math.round((totalMinutes / 60) * 100) / 100;
+
+    const updatedRecord: WebhookSyncRecord = {
+      ...event,
+      topics: newTopics,
+      totalFlightEffectiveMinutes: totalMinutes,
+      totalFlightEffectiveHours: totalHours
+    };
+
+    await updateQuarantineEvent(eventId, updatedRecord);
+    toast.success(`Repasos unificados: ${mergedTopic.resolvedTopicTitle} (${combinedMins} min)`);
+  }, [quarantinedEvents, updateQuarantineEvent]);
+
+  // Conexión reactiva en tiempo real (SSE) y polling constante de seguridad para transmisiones de AeroFocus
+  useEffect(() => {
+    let sse: EventSource | null = null;
+    try {
+      if (typeof window !== "undefined" && typeof EventSource !== "undefined") {
+        sse = new EventSource("/api/webhook/stream");
+        sse.onmessage = (msg) => {
+          try {
+            const data = JSON.parse(msg.data);
+            if (data && (data.id || data.type === "quarantine_updated" || data.status === "quarantined")) {
+              fetchQuarantinedEvents();
+              if (data.id && data.status === "quarantined") {
+                toast.info("⚡ Nueva sesión de AeroFocus recibida en Cuarentena.");
+              }
+            }
+          } catch {}
+        };
+      }
+    } catch (err) {
+      console.warn("SSE no disponible en este entorno, operando con polling reactivo:", err);
+    }
+
+    // Polling regular cada 7 segundos para garantizar actualización sin recarga
+    const pollTimer = setInterval(() => {
+      fetchQuarantinedEvents();
+    }, 7000);
+
+    return () => {
+      if (sse) sse.close();
+      clearInterval(pollTimer);
+    };
+  }, [fetchQuarantinedEvents]);
+
   // Mantener syncPendingWebhookEvents para compatibilidad sin auto-forzado
   const syncPendingWebhookEvents = useCallback(async (force: boolean = false) => {
     await fetchQuarantinedEvents();
@@ -2174,6 +2507,7 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
         auditAndRestoreTopicIntegrity,
         purgeAllAeroFocusData,
         purgePhantomTema5Cante,
+        migratePenalSessionsToConstitucional5,
         deduplicateUserSessions,
         recoverHistoricalUserData,
         quarantinedEvents,
@@ -2183,6 +2517,9 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
         discardQuarantineEvent,
         clearAllQuarantine,
         addQuarantineEventManually,
+        updateQuarantineEvent,
+        updateQuarantineTopic,
+        mergeQuarantineTopics,
       }}
     >
       {children}
