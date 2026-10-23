@@ -149,6 +149,7 @@ export interface WebhookSyncRecord {
   source: string;
   flightId: string;
   transactionId?: string;
+  dailyTotalEffectiveHours?: number;
   totalFlightEffectiveMinutes: number;
   totalFlightEffectiveHours: number;
   status: 'pending' | 'quarantined' | 'processed' | 'error';

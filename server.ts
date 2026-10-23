@@ -3,6 +3,13 @@ import path from "path";
 import multer from "multer";
 import { GoogleGenAI, Type } from "@google/genai";
 import fs from "fs";
+import {
+  corsHeaders,
+  isAuthorizedWebhookRequest,
+  processIncomingAeroFocusPayload,
+  loadWebhookEvents,
+  saveWebhookEvents
+} from "./src/lib/webhookStorage";
 
 // NOTE: require Vite explicitly to avoid ts-node / tsx dynamic import issues
 import { createServer as createViteServer } from "vite";
@@ -87,36 +94,6 @@ Return a JSON array of these objects. ONLY valid JSON.`;
     }
   });
 
-  // Webhook event store helper
-  const eventsFilePath = path.join(process.cwd(), 'uploads', 'aerofocus_events.json');
-  function loadWebhookEvents() {
-    try {
-      if (!fs.existsSync(path.dirname(eventsFilePath))) {
-        fs.mkdirSync(path.dirname(eventsFilePath), { recursive: true });
-      }
-      if (fs.existsSync(eventsFilePath)) {
-        const raw = fs.readFileSync(eventsFilePath, 'utf-8');
-        return JSON.parse(raw);
-      }
-    } catch (e) {
-      console.error("Error reading webhook events:", e);
-    }
-    return [];
-  }
-
-  function saveWebhookEvents(events: any[]) {
-    try {
-      if (!fs.existsSync(path.dirname(eventsFilePath))) {
-        fs.mkdirSync(path.dirname(eventsFilePath), { recursive: true });
-      }
-      // Keep last 150 events to avoid unbounded file growth
-      const trimmed = events.slice(-150);
-      fs.writeFileSync(eventsFilePath, JSON.stringify(trimmed, null, 2), 'utf-8');
-    } catch (e) {
-      console.error("Error saving webhook events:", e);
-    }
-  }
-
   // SSE active listeners
   let sseClients: express.Response[] = [];
 
@@ -129,13 +106,6 @@ Return a JSON array of these objects. ONLY valid JSON.`;
       }
     });
   }
-
-  const EXPECTED_TOKEN = 'wp_qLXi6WFkFY_live';
-  const corsHeaders = {
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Event, X-API-Key, X-Source, X-Test-Ping',
-  };
 
   // Webhook endpoint for AeroFocus Pro (supports all variations and routes)
   app.all([
@@ -170,12 +140,7 @@ Return a JSON array of these objects. ONLY valid JSON.`;
 
     try {
       // 1. Verificación de Seguridad
-      const authHeader = req.headers.authorization;
-      const apiKey = (req.headers['x-api-key'] || req.headers['x-token'] || req.headers['x-webhook-token']) as string | undefined;
-      const token = apiKey || (authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null);
-
-      if (token && token !== EXPECTED_TOKEN) {
-        console.warn(`[AeroFocus Webhook] Token no autorizado: "${token}". Esperado: "${EXPECTED_TOKEN}"`);
+      if (!isAuthorizedWebhookRequest(req.headers)) {
         return res.status(401).json({ error: 'Token no autorizado' });
       }
 
@@ -195,7 +160,7 @@ Return a JSON array of these objects. ONLY valid JSON.`;
         try { payload = JSON.parse(payload.payload); } catch {}
       }
 
-      console.log(`[AeroFocus Webhook] Recibida petición desde ${req.ip}. Evento: ${payload.event || 'daily_sync'}. Token provisto: ${Boolean(token)}`);
+      console.log(`[AeroFocus Webhook] Recibida petición desde ${req.ip}. Evento: ${payload.event || 'daily_sync'}. Autenticado: ${Boolean(req.headers.authorization || req.headers['x-api-key'])}`);
 
       // 3. Test de conexión / Handshake de AeroFocus (no toca la base de datos)
       if (payload.isTest || payload.event === 'test_connection' || req.headers['x-test-ping']) {
