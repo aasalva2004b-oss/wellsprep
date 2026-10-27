@@ -1,5 +1,5 @@
 import React from "react";
-import { BrainCircuit, CheckCircle2, ShieldCheck, AlertTriangle, AlertCircle, Zap, Clock, Scale, Mic, RefreshCw } from "lucide-react";
+import { BrainCircuit, CheckCircle2, ShieldCheck, AlertTriangle, AlertCircle, Zap, Clock, Scale, Mic, RefreshCw, Award, Sparkles } from "lucide-react";
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, ReferenceLine } from "recharts";
 import { cn } from "../../lib/utils";
 import { EbbinghausAnalysis, formatTimeMins } from "../../lib/ebbinghaus";
@@ -38,11 +38,11 @@ export const TopicEbbinghausCard: React.FC<TopicEbbinghausCardProps> = ({
               Curva del Olvido de Ebbinghaus
             </h3>
             <span className="text-[10px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 font-mono">
-              Modelo Multifactorial
+              Fijadores Ponderados (Cantos & Vueltas)
             </span>
           </div>
           <p className="text-xs font-medium text-slate-400">
-            Cálculo biométrico adaptativo: horas de estudio, dificultad (1–10), cantes, velocidad y ciclo de refrescos
+            Freno de olvido diferencial: cante oral 100%, repasos 50% y multiplicación sináptica por vueltas
           </p>
         </div>
 
@@ -83,7 +83,9 @@ export const TopicEbbinghausCard: React.FC<TopicEbbinghausCardProps> = ({
                         de margen
                       </span>
                     </div>
-                    <p className="text-[9px] font-bold text-slate-400 mt-0.5">Sobre umbral 80%</p>
+                    <p className="text-[9px] font-bold text-slate-400 mt-0.5 font-mono">
+                      {ebbinghausAnalysis.critical80DateStr ? `Límite 80%: ${ebbinghausAnalysis.critical80DateStr}` : "Sobre umbral 80%"}
+                    </p>
                   </>
                 ) : (
                   <>
@@ -139,8 +141,26 @@ export const TopicEbbinghausCard: React.FC<TopicEbbinghausCardProps> = ({
                   {ebbinghausAnalysis.statusTitle}
                 </span>
                 <span className="text-[10px] font-bold text-slate-400 bg-slate-800/80 px-2 py-0.5 rounded-full border border-slate-700 font-mono tabular-nums">
-                  Estabilidad: <strong className="text-slate-200">{ebbinghausAnalysis.stabilityDays} d</strong>
+                  Vida media: <strong className="text-slate-200">{ebbinghausAnalysis.stabilityDays} d</strong>
                 </span>
+                <span className="text-[10px] font-bold text-slate-400 bg-slate-800/80 px-2 py-0.5 rounded-full border border-slate-700 font-mono tabular-nums">
+                  Días efectivos: <strong className="text-indigo-300">{ebbinghausAnalysis.factors.effectiveDaysElapsed} d</strong>
+                </span>
+                {ebbinghausAnalysis.factors.hasMasteryBonus && (
+                  <span className="text-[10px] font-black uppercase tracking-wider text-amber-300 bg-amber-500/20 px-2 py-0.5 rounded-full border border-amber-500/30 flex items-center gap-1">
+                    <Award size={11} className="text-amber-400" />
+                    Maestría +15%
+                  </span>
+                )}
+                {ebbinghausAnalysis.factors.brakeType && (
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-cyan-300 bg-cyan-500/10 px-2 py-0.5 rounded-full border border-cyan-500/30">
+                    {ebbinghausAnalysis.factors.brakeType === 'cante_total'
+                      ? 'Freno Cante 100%'
+                      : ebbinghausAnalysis.factors.brakeType === 'freno_mixto'
+                        ? 'Freno Mixto 50%'
+                        : 'Repaso Pasivo'}
+                  </span>
+                )}
               </div>
               <p className="text-slate-300 font-medium text-[11px] leading-relaxed">
                 {ebbinghausAnalysis.diagnostic}
@@ -271,9 +291,9 @@ export const TopicEbbinghausCard: React.FC<TopicEbbinghausCardProps> = ({
         )}
       </div>
 
-      {/* 4 Multi-Factor Breakdown */}
+      {/* 5 Multi-Factor Breakdown */}
       {ebbinghausAnalysis.hasData && (
-        <div className="mt-4 pt-3.5 border-t border-slate-800/80 relative z-10 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5">
+        <div className="mt-4 pt-3.5 border-t border-slate-800/80 relative z-10 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-2.5">
           {/* Factor 1: Horas */}
           <div className="bg-slate-800/50 rounded-xl p-3 border border-slate-700/60 flex flex-col justify-between">
             <div className="flex items-center justify-between mb-1">
@@ -314,11 +334,11 @@ export const TopicEbbinghausCard: React.FC<TopicEbbinghausCardProps> = ({
             </div>
           </div>
 
-          {/* Factor 3: Cante */}
+          {/* Factor 3: Cantos */}
           <div className="bg-slate-800/50 rounded-xl p-3 border border-slate-700/60 flex flex-col justify-between">
             <div className="flex items-center justify-between mb-1">
               <span className="text-[10px] font-black uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
-                <Mic size={12} className="text-fuchsia-400" /> Cantes
+                <Mic size={12} className="text-fuchsia-400" /> Cantos Orales
               </span>
               <span
                 className={cn(
@@ -328,41 +348,60 @@ export const TopicEbbinghausCard: React.FC<TopicEbbinghausCardProps> = ({
                     : "bg-slate-700 text-slate-400"
                 )}
               >
-                {ebbinghausAnalysis.factors.cantosCount}{" "}
-                {ebbinghausAnalysis.factors.cantosCount === 1 ? "cante" : "cantes"}
+                {ebbinghausAnalysis.factors.cantosFactor}x
               </span>
             </div>
             <div>
               <div className="flex items-center justify-between gap-1">
                 <h5 className="text-xs font-black text-white font-mono tabular-nums tracking-tight">
-                  {ebbinghausAnalysis.factors.lastCantoTotalMins !== null
-                    ? formatTimeMins(ebbinghausAnalysis.factors.lastCantoTotalMins)
-                    : "Sin cante"}
+                  {ebbinghausAnalysis.factors.cantosCount}{" "}
+                  {ebbinghausAnalysis.factors.cantosCount === 1 ? "cante" : "cantes"}
                 </h5>
                 {ebbinghausAnalysis.factors.lastCantoGrade !== null && (
                   <span
                     className={cn(
-                      "text-[11px] font-black font-mono tabular-nums px-1.5 py-0.5 rounded",
+                      "text-[10px] font-black font-mono tabular-nums px-1.5 py-0.2 rounded",
                       ebbinghausAnalysis.factors.lastCantoGrade >= 5
                         ? "bg-emerald-500/20 text-emerald-300"
                         : "bg-rose-500/20 text-rose-300"
                     )}
                   >
-                    Nota: {ebbinghausAnalysis.factors.lastCantoGrade.toFixed(1)}
+                    {ebbinghausAnalysis.factors.lastCantoGrade.toFixed(1)}
                   </span>
                 )}
               </div>
-              <p className="text-[10px] font-semibold text-slate-400 mt-0.5">
-                {ebbinghausAnalysis.factors.cantoSpeedImpactLabel}
+              <p className="text-[10px] font-semibold text-slate-400 mt-0.5 truncate" title={ebbinghausAnalysis.factors.cantosImpactLabel}>
+                {ebbinghausAnalysis.factors.cantosImpactLabel}
               </p>
             </div>
           </div>
 
-          {/* Factor 4: Refrescos */}
+          {/* Factor 4: Vueltas (Fijador Sináptico de Largo Plazo) */}
           <div className="bg-slate-800/50 rounded-xl p-3 border border-slate-700/60 flex flex-col justify-between">
             <div className="flex items-center justify-between mb-1">
               <span className="text-[10px] font-black uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
-                <RefreshCw size={12} className="text-emerald-400" /> Refrescos
+                <Sparkles size={12} className="text-purple-400" /> Vueltas
+              </span>
+              <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-300 font-mono tabular-nums">
+                {ebbinghausAnalysis.factors.vueltasFactor}x
+              </span>
+            </div>
+            <div>
+              <h5 className="text-xs font-black text-white font-mono tabular-nums tracking-tight">
+                {ebbinghausAnalysis.factors.vueltas}{" "}
+                {ebbinghausAnalysis.factors.vueltas === 1 ? "vuelta" : "vueltas"}
+              </h5>
+              <p className="text-[10px] font-semibold text-slate-400 mt-0.5">
+                {ebbinghausAnalysis.factors.vueltasImpactLabel}
+              </p>
+            </div>
+          </div>
+
+          {/* Factor 5: Refrescos & Freno */}
+          <div className="bg-slate-800/50 rounded-xl p-3 border border-slate-700/60 flex flex-col justify-between">
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-[10px] font-black uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
+                <RefreshCw size={12} className="text-emerald-400" /> Refrescos & Freno
               </span>
               <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-mono tabular-nums">
                 {ebbinghausAnalysis.factors.refrescosFactor}x
@@ -370,7 +409,7 @@ export const TopicEbbinghausCard: React.FC<TopicEbbinghausCardProps> = ({
             </div>
             <div>
               <h5 className="text-xs font-black text-white font-mono tabular-nums tracking-tight">
-                {ebbinghausAnalysis.factors.refrescosCompleted}/3 • V{ebbinghausAnalysis.factors.vueltas}
+                {ebbinghausAnalysis.factors.refrescosCompleted}/3 Refrescos
               </h5>
               <p className="text-[10px] font-semibold text-slate-400 mt-0.5">
                 {ebbinghausAnalysis.factors.refrescosImpactLabel}

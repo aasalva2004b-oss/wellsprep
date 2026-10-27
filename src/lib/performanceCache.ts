@@ -31,6 +31,9 @@ export interface FastTopicTelemetry {
     status: TopicMemoryStatus;
     statusTitle: string;
     isDue: boolean;
+    daysUntil80: number;
+    stabilityDays: number;
+    critical80DateStr: string | null;
   };
 }
 
@@ -183,6 +186,9 @@ export function buildSubjectTelemetryIndex(
         status: ebbAnalysis.status,
         statusTitle: ebbAnalysis.statusTitle,
         isDue: ebbAnalysis.isBelowCritical80 || isDueToday || isOverdue,
+        daysUntil80: ebbAnalysis.daysUntilCritical80,
+        stabilityDays: ebbAnalysis.stabilityDays,
+        critical80DateStr: ebbAnalysis.critical80DateStr,
       },
     });
   }

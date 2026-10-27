@@ -63,6 +63,8 @@ export interface TopicPreparationEvaluation {
 
   // Consejo ejecutivo para alcanzar el 10
   actionPlan: string;
+  stabilityLabel: string;        // "Estable" | "Desgaste leve" | "Alerta olvido"
+  isReadyForTribunal: boolean;   // true si nota >= 7.5 y entra en la ventana reglamentaria
 }
 
 export const OPTIMAL_CANTO_SECS = 12 * 60 + 30; // 750s = 12m 30s
@@ -237,33 +239,39 @@ export function calculateEbbinghausRetention(
 
   // 1. Estabilidad de la memoria (S en días):
   // Vuelta 0 -> 3.5 días base.
-  // Cada vuelta aumenta la estabilidad un 60%.
-  // Cada repaso consolida el trazado sináptico (+20% por sesión, máx 10).
-  const diffFactor = Math.max(0.75, Math.min(1.25, 1.0 - ((difficulty - 5) * 0.05)));
-  const memoryStabilityDays = +(3.5 * (1 + 0.60 * Math.max(0, vueltas)) * (1 + 0.20 * Math.min(10, reviewsCount)) * diffFactor).toFixed(1);
+  // Escalamiento reforzado de Vueltas y Cantos como fijadores principales:
+  let vueltasFactor = 1.0;
+  if (vueltas === 1) vueltasFactor = 1.85;
+  else if (vueltas === 2) vueltasFactor = 3.10;
+  else if (vueltas === 3) vueltasFactor = 4.60;
+  else if (vueltas >= 4) vueltasFactor = Math.min(6.20, 4.60 + (vueltas - 3) * 0.80);
 
-  // 2. Días efectivos transcurridos (t_eff) con freno de olvido:
-  // Regla: El cante frena al 100% el olvido y los repasos al 50%.
+  // Efecto de cante oral: retrieval practice activa
+  const hasCanto = daysSinceCanto !== null;
+  const cantosFactor = hasCanto ? 2.10 : 1.0;
+  const reviewsFactor = 1 + 0.15 * Math.min(6, reviewsCount);
+  const diffFactor = Math.min(1.40, Math.max(0.55, 1.40 - (difficulty * 0.08)));
+
+  const memoryStabilityDays = +(3.5 * vueltasFactor * cantosFactor * reviewsFactor * diffFactor).toFixed(1);
+
+  // 2. Días efectivos transcurridos (t_eff) con freno de olvido diferencial:
+  // Regla: El cante frena al 100% el olvido y los repasos de estudio al 50%.
   let effectiveDays = 0;
 
   if (daysSinceCanto == null && daysSinceReview == null && daysSinceTouch == null) {
     effectiveDays = 45; // Sin sesiones: olvido total
   } else if (daysSinceCanto != null && daysSinceReview != null) {
     if (daysSinceReview < daysSinceCanto) {
-      // Repasó después del último cante.
-      // El repaso amortigua el 50% del olvido acumulado:
-      // t_eff = daysSinceReview + 0.5 * (daysSinceCanto - daysSinceReview)
+      // Repasó después del último cante: amortigua 50% del olvido posterior
       effectiveDays = daysSinceReview + 0.5 * (daysSinceCanto - daysSinceReview);
     } else {
-      // El cante fue el evento más reciente (freno al 100%):
+      // Cante reciente: freno al 100%
       effectiveDays = daysSinceCanto;
     }
   } else if (daysSinceCanto != null) {
     effectiveDays = daysSinceCanto;
   } else if (daysSinceReview != null) {
-    // Solo ha repasado con estudio (sin cante oral previo):
-    // La solidez vocal es menor que si hubiera cantado:
-    effectiveDays = daysSinceReview * 1.5 + 2.0;
+    effectiveDays = daysSinceReview * 1.25;
   } else if (daysSinceTouch != null) {
     effectiveDays = daysSinceTouch * 1.2;
   }
@@ -477,6 +485,16 @@ export function evaluateTopicPreparation(params: {
     actionPlan = '¡Tema en plenitud! Mantén serenidad, vocalización firme y ritmo constante de 12:30 ante el preparador.';
   }
 
+  // Estabilidad y preparación para Tribunal
+  let stabilityLabel = "Estable";
+  if (scoreDecay >= 1.5) {
+    stabilityLabel = "Alerta olvido";
+  } else if (scoreDecay >= 0.6) {
+    stabilityLabel = "Desgaste leve";
+  }
+
+  const isReadyForTribunal = overallScore >= 7.5 && (timeEval.zone === "perfect" || timeEval.zone === "in_window");
+
   return {
     overallScore,
     projectedScore,
@@ -517,7 +535,9 @@ export function evaluateTopicPreparation(params: {
     reviewsCount,
     masteryScore,
     masteryDiagnosis,
-    actionPlan
+    actionPlan,
+    stabilityLabel,
+    isReadyForTribunal,
   };
 }
 

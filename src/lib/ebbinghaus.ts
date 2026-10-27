@@ -39,12 +39,18 @@ export interface EbbinghausFactorBreakdown {
   refrescosImpactLabel: string;
   vueltas: number;
   vueltasFactor: number;
+  vueltasImpactLabel: string;
+
+  // Mastery bonus
+  hasMasteryBonus?: boolean;
+  brakeType?: 'cante_total' | 'freno_mixto' | 'repaso_pasivo' | 'estudio_inicial';
 
   // Overall Stability & Anchors
   stabilityDays: number; // S: memory stability / half-life in days
   anchorDate: string | null;
   anchorType: 'estudio_inicial' | 'refresco' | 'canto' | 'repaso' | 'none';
   daysSinceAnchor: number;
+  effectiveDaysElapsed: number;
 }
 
 export interface EbbinghausPoint {
@@ -146,7 +152,7 @@ export function calculateEbbinghausCurve(
     return createEmptyAnalysis(difficulty, pages);
   }
 
-  // 1. Identificar la última interacción y punto de anclaje (Anchor)
+  // 1. Identificar la última interacción y eventos específicos (Cante, Repaso, Estudio)
   const lastSession = topicSessions[topicSessions.length - 1];
   let anchorDateStr = lastSession?.date || progress?.lastReviewDate || progress?.firstStudyDate || todayStr;
   let anchorType: EbbinghausFactorBreakdown['anchorType'] = 'estudio_inicial';
@@ -167,10 +173,49 @@ export function calculateEbbinghausCurve(
   const rawDaysSince = Math.max(0, (todayDate.getTime() - anchorDateObj.getTime()) / (1000 * 3600 * 24));
   const daysSinceAnchor = Math.round(rawDaysSince * 10) / 10;
 
+  // Días específicos por tipo de evento para el freno diferencial
+  const lastCantoSession = cantosSessions[cantosSessions.length - 1];
+  const lastCantoDateStr = lastCantoSession?.date || (hasProgressCanto && progress?.lastReviewDate ? progress.lastReviewDate : null);
+  const daysSinceCanto = lastCantoDateStr 
+    ? Math.max(0, (todayDate.getTime() - new Date(lastCantoDateStr).getTime()) / (1000 * 3600 * 24))
+    : null;
+
+  const lastReviewSession = repasosSessions[repasosSessions.length - 1];
+  const lastReviewDateStr = lastReviewSession?.date || progress?.lastReviewDate || null;
+  const daysSinceReview = lastReviewDateStr
+    ? Math.max(0, (todayDate.getTime() - new Date(lastReviewDateStr).getTime()) / (1000 * 3600 * 24))
+    : null;
+
+  // Cálculo de días efectivos (t_eff) con FRENO DIFERENCIAL:
+  // - El cante oral (retrieval practice activa) frena el 100% de la curva.
+  // - Los repasos de estudio amortiguan el 50% del olvido posterior si hubo cante previo.
+  // - Los repasos de estudio sin cante tienen un decaimiento un 25% más acelerado.
+  let effectiveDays = daysSinceAnchor;
+  let brakeType: EbbinghausFactorBreakdown['brakeType'] = 'estudio_inicial';
+
+  if (daysSinceCanto !== null && daysSinceReview !== null) {
+    if (daysSinceReview < daysSinceCanto) {
+      effectiveDays = daysSinceReview + 0.5 * (daysSinceCanto - daysSinceReview);
+      brakeType = 'freno_mixto';
+    } else {
+      effectiveDays = daysSinceCanto;
+      brakeType = 'cante_total';
+    }
+  } else if (daysSinceCanto !== null) {
+    effectiveDays = daysSinceCanto;
+    brakeType = 'cante_total';
+  } else if (daysSinceReview !== null) {
+    effectiveDays = daysSinceReview * 1.25;
+    brakeType = 'repaso_pasivo';
+  } else {
+    effectiveDays = daysSinceAnchor;
+    brakeType = 'estudio_inicial';
+  }
+  const effectiveDaysElapsed = Math.max(0, Math.round(effectiveDays * 10) / 10);
+
   // =========================================================================
   // FACTOR 1: HORAS DE ESTUDIO TOTALES (Asimilación e Inversión Cognitiva)
   // =========================================================================
-  // Suma de horas acumuladas de estudio
   let studyHoursTotal = progress?.studyTimeHours || 0;
   if (studyHoursTotal <= 0) {
     const totalMinsEstudio = topicSessions
@@ -178,11 +223,9 @@ export function calculateEbbinghausCurve(
       .reduce((acc, s) => acc + (s.duration || s.durationMinutes || 0), 0);
     studyHoursTotal = Math.round((totalMinsEstudio / 60) * 10) / 10;
   }
-  // Horas de referencia estimadas según volumen de páginas (0.6h por página estándar)
   const expectedHours = Math.max(2, (pages || 15) * 0.55);
   const hoursRatio = studyHoursTotal > 0 ? (studyHoursTotal / expectedHours) : 0.7;
   
-  // Multiplicador: entre 0.70x y 1.75x
   const studyHoursFactor = Math.min(1.75, Math.max(0.70, 0.70 + 0.45 * Math.sqrt(Math.max(0.1, hoursRatio))));
   const studyHoursImpactLabel = studyHoursFactor >= 1.25 
     ? `+${Math.round((studyHoursFactor - 1) * 100)}% (Estudio profundo)` 
@@ -194,7 +237,6 @@ export function calculateEbbinghausCurve(
   // FACTOR 2: DIFICULTAD DEL TEMA (Sobrecarga de Trabajo)
   // =========================================================================
   const effDifficulty = Math.min(10, Math.max(1, progress?.difficulty || difficulty || 5));
-  // Dificultad 1 = 1.32x; Dificultad 5 = 1.00x; Dificultad 8 = 0.76x; Dificultad 10 = 0.60x
   const difficultyFactor = Math.min(1.40, Math.max(0.55, 1.40 - (effDifficulty * 0.08)));
   const difficultyImpactLabel = effDifficulty <= 4 
     ? `+${Math.round((difficultyFactor - 1) * 100)}% (Tema accesible)` 
@@ -203,25 +245,28 @@ export function calculateEbbinghausCurve(
       : `${Math.round((difficultyFactor - 1) * 100)}% (Alta exigencia conceptual)`;
 
   // =========================================================================
-  // FACTOR 3: CANTOS REALIZADOS (Efecto de Evocación Oral Activa)
+  // FACTOR 3: CANTOS REALIZADOS (Efecto de Evocación Oral Activa Ponderado)
+  // REFORZADO: Cante oral actúa como el fijador sináptico más potente
+  // 0 cantos: 1.0x | 1 cante: 2.10x | 2 cantos: 3.30x | 3 cantos: 4.40x | 4+ cantos: hasta 5.20x
   // =========================================================================
   let cantosCount = cantosSessions.length;
   if (cantosCount === 0 && hasProgressCanto) {
     cantosCount = Math.max(1, progress?.vueltas || 1);
   }
 
-  // Sin cantos: 1.0x; 1 cante: 1.55x; 2 cantos: 2.05x; 4 cantos: 2.75x; etc.
-  const cantosFactor = cantosCount === 0 
-    ? 1.0 
-    : Math.min(3.2, 1.25 * (1 + Math.log(1 + 0.75 * cantosCount)));
-  const cantosImpactLabel = cantosCount === 0 
-    ? "Sin cantos (Solo memoria de lectura)" 
-    : `+${Math.round((cantosFactor - 1) * 100)}% (${cantosCount} ${cantosCount === 1 ? 'cante realizado' : 'cantos realizados'})`;
+  let cantosFactor = 1.0;
+  if (cantosCount === 1) {
+    cantosFactor = 2.10;
+  } else if (cantosCount === 2) {
+    cantosFactor = 3.30;
+  } else if (cantosCount === 3) {
+    cantosFactor = 4.40;
+  } else if (cantosCount >= 4) {
+    cantosFactor = Math.min(5.20, 4.40 + (cantosCount - 3) * 0.40);
+  }
 
   // =========================================================================
   // FACTOR 4: MINUTOS EMPLEADOS EN EL CANTE (Velocidad y Automatización Fluida)
-  // Como pide el usuario: "en cuántos minutos lo he cantado porque en cuanto 
-  // menos minutos cante más bien me lo sé por tanto más tiempo estar en olvidarme"
   // =========================================================================
   let lastCantoMinutes: number | null = null;
   let lastCantoSeconds: number | null = null;
@@ -252,27 +297,22 @@ export function calculateEbbinghausCurve(
 
   if (lastCantoTotalMins !== null && lastCantoTotalMins > 0) {
     if (lastCantoTotalMins <= 12.0) {
-      // Menos de 12 minutos: Rapidez excepcional, tema hiperfluido sin titubeos
       cantoSpeedFactor = 1.35;
       cantoSpeedLabel = `Muy rápido y fluido (≤ 12:00 min)`;
       cantoSpeedImpactLabel = "+35% estabilidad (máxima fluidez y retención)";
     } else if (lastCantoTotalMins <= 13.0) {
-      // 12:00 a 13:00 min: Ritmo óptimo de tribunal, gran agilidad
       cantoSpeedFactor = 1.22;
       cantoSpeedLabel = "Ágil y en ventana (12:01–13:00 min)";
       cantoSpeedImpactLabel = "+22% estabilidad (ritmo firme y seguro)";
-    } else if (lastCantoTotalMins <= 13.67) { // 13:40 min
-      // 13:01 a 13:40 min: En ventana reglamentaria límite
+    } else if (lastCantoTotalMins <= 13.67) {
       cantoSpeedFactor = 1.08;
       cantoSpeedLabel = "En ventana límite (13:01–13:40 min)";
       cantoSpeedImpactLabel = "+8% estabilidad (aprobado en tiempo)";
     } else if (lastCantoTotalMins <= 15.0) {
-      // 13:41 a 15:00 min: Exceso moderado de tiempo, dudas o paradas breves
       cantoSpeedFactor = 0.86;
       cantoSpeedLabel = "Lento con pausas (13:41–15:00 min)";
       cantoSpeedImpactLabel = "-14% estabilidad (titubeos detectados)";
     } else {
-      // Más de 15:00 min: Muy lento, paradas frecuentes o falta de estructura
       cantoSpeedFactor = 0.70;
       cantoSpeedLabel = "Exceso crítico (> 15:00 min)";
       cantoSpeedImpactLabel = "-30% estabilidad (inseguridad mnemotécnica)";
@@ -281,8 +321,6 @@ export function calculateEbbinghausCurve(
 
   // =========================================================================
   // FACTOR 5: CALIFICACIÓN / NOTA DEL CANTE
-  // Como pide el usuario: "la nota que me he puesto en el cante porque si 
-  // cuanto más nota más más bien me lo sé y cuando lo dan peor me lo sé"
   // =========================================================================
   let lastCantoGrade: number | null = null;
   let bestCantoGrade: number | null = null;
@@ -330,9 +368,27 @@ export function calculateEbbinghausCurve(
     }
   }
 
+  // BONUS DE MAESTRÍA ANTE TRIBUNAL:
+  // Cante en ventana reglamentaria (11:50 a 13:40 min = 11.83 a 13.67 min) con nota >= 7.5
+  const hasMasteryBonus = cantosCount > 0 &&
+    lastCantoTotalMins !== null &&
+    lastCantoTotalMins >= 11.83 &&
+    lastCantoTotalMins <= 13.67 &&
+    lastCantoGrade !== null &&
+    lastCantoGrade >= 7.5;
+
+  if (hasMasteryBonus) {
+    cantosFactor = +(cantosFactor * 1.15).toFixed(2);
+  }
+
+  const cantosImpactLabel = cantosCount === 0 
+    ? "Sin cantos (Solo memoria de lectura)" 
+    : hasMasteryBonus
+      ? `+${Math.round((cantosFactor - 1) * 100)}% (${cantosCount} ${cantosCount === 1 ? 'cante' : 'cantes'} · Bonus Maestría Tribunal +15%)`
+      : `+${Math.round((cantosFactor - 1) * 100)}% (${cantosCount} ${cantosCount === 1 ? 'cante realizado' : 'cantos realizados'})`;
+
   // =========================================================================
   // FACTOR 6: REFRESCOS Y REPASOS (La Ley de los 3 Refrescos y Repetición Espaciada)
-  // Como pide el usuario: "si lo ha refrescado si no he refrescado todo creo que lo tengas todo súper en cuenta"
   // =========================================================================
   const refrescosCompleted = Math.min(3, refrescosSessions.length);
   let refrescosFactor = 1.0;
@@ -348,20 +404,35 @@ export function calculateEbbinghausCurve(
     refrescosFactor = 1.25;
     refrescosImpactLabel = "+25% estabilidad (1/3 Refresco realizado)";
   } else {
-    // Si no ha hecho ningún refresco tras el estudio inicial, el decaimiento en las primeras 48h es muy severo
     refrescosFactor = 0.85;
     refrescosImpactLabel = "-15% estabilidad (Falta consolidación de refresco)";
   }
 
-  // Vueltas / Repasos mensuales espaciados
+  // =========================================================================
+  // FACTOR 7: VUELTAS MENSUALES (Consolidador Sináptico de Largo Plazo)
+  // REFORZADO: V0: 1.0x | V1: 1.85x | V2: 3.10x | V3: 4.60x | V4+: hasta 6.20x
+  // =========================================================================
   const vueltas = Math.max(0, progress?.vueltas || (repasosSessions.length + (cantosCount > 0 ? 1 : 0)));
-  const vueltasFactor = vueltas === 0 ? 1.0 : Math.min(3.5, 1.0 + (vueltas * 0.55));
+  let vueltasFactor = 1.0;
+  if (vueltas === 1) {
+    vueltasFactor = 1.85;
+  } else if (vueltas === 2) {
+    vueltasFactor = 3.10;
+  } else if (vueltas === 3) {
+    vueltasFactor = 4.60;
+  } else if (vueltas >= 4) {
+    vueltasFactor = Math.min(6.20, 4.60 + (vueltas - 3) * 0.80);
+  }
+
+  const vueltasImpactLabel = vueltas === 0
+    ? "Vuelta inicial (Sin vueltas completas)"
+    : `+${Math.round((vueltasFactor - 1) * 100)}% (${vueltas} ${vueltas === 1 ? 'vuelta consolidada' : 'vueltas consolidadas'})`;
 
   // =========================================================================
   // CÁLCULO DE LA ESTABILIDAD MNÉMICA TOTAL (S en días)
   // S = S_base * F_horas * F_dificultad * F_cantos * F_velocidad * F_nota * F_refrescos * F_vueltas
   // =========================================================================
-  const baseMemoryStrength = 3.5; // Días de vida media inicial teórica de Ebbinghaus
+  const baseMemoryStrength = 3.5;
 
   let stabilityDays = baseMemoryStrength 
     * studyHoursFactor 
@@ -372,25 +443,25 @@ export function calculateEbbinghausCurve(
     * refrescosFactor 
     * vueltasFactor;
 
-  // Límite de seguridad fisiológica: mínimo 1.2 días, máximo 150 días
-  stabilityDays = Math.min(150, Math.max(1.2, stabilityDays));
+  // Límite de seguridad fisiológica: mínimo 1.5 días, máximo 180 días
+  stabilityDays = Math.min(180, Math.max(1.5, stabilityDays));
   stabilityDays = Math.round(stabilityDays * 10) / 10;
 
   // =========================================================================
   // CÁLCULO DE LA RETENCIÓN ACTUAL (R_hoy en %)
-  // Fórmula: R(t) = 100 * e^(-t / S)
+  // Fórmula: R(t) = 100 * e^(-t_eff / S)
   // =========================================================================
-  const rawRetention = 100 * Math.exp(-daysSinceAnchor / stabilityDays);
+  const rawRetention = 100 * Math.exp(-effectiveDaysElapsed / stabilityDays);
   const currentRetention = Math.min(100, Math.max(5, Math.round(rawRetention * 10) / 10));
 
   // Días hasta el Umbral Crítico del 80% (t_80 = -S * ln(0.80) ≈ 0.22314 * S)
   const daysTotalTo80 = Math.max(0.5, -stabilityDays * Math.log(0.80));
-  const daysUntilCritical80 = Math.round(daysTotalTo80 - daysSinceAnchor);
+  const daysUntilCritical80 = Math.round(daysTotalTo80 - effectiveDaysElapsed);
   const isBelowCritical80 = currentRetention < 80;
 
-  // Fecha proyectada de cruce del umbral 80%
-  const critDate = new Date(anchorDateObj);
-  critDate.setDate(critDate.getDate() + Math.round(daysTotalTo80));
+  // Fecha proyectada de cruce del umbral 80% a partir de hoy
+  const critDate = new Date(todayDate);
+  critDate.setDate(critDate.getDate() + daysUntilCritical80);
   const critical80DateStr = getLocalDateString(critDate);
 
   // =========================================================================
@@ -450,12 +521,29 @@ export function calculateEbbinghausCurve(
   // Generar Diagnóstico Pedagógico y Detallado
   const diagParts: string[] = [];
 
+  // Fijadores principales: Cantos y Vueltas
+  if (vueltas > 0 || cantosCount > 0) {
+    const anchors: string[] = [];
+    if (vueltas > 0) anchors.push(`${vueltas} ${vueltas === 1 ? 'vuelta completada' : 'vueltas consolidadas'} (+${Math.round((vueltasFactor - 1) * 100)}% estabilidad)`);
+    if (cantosCount > 0) anchors.push(`${cantosCount} ${cantosCount === 1 ? 'cante oral' : 'cantes orales'} (+${Math.round((cantosFactor - 1) * 100)}% retención)`);
+    diagParts.push(`Fijación sináptica reforzada por ${anchors.join(" y ")}: vida media ampliada a ${stabilityDays} días.`);
+  }
+
+  // Freno diferencial
+  if (brakeType === 'freno_mixto') {
+    diagParts.push(`Freno diferencial activo: tu repaso de estudio amortigua el 50% del decaimiento acumulado (${effectiveDaysElapsed}d efectivos).`);
+  } else if (brakeType === 'cante_total') {
+    diagParts.push(`Evocación oral dominante: el cante oral fijó el 100% de la curva mnémica.`);
+  }
+
   // Diagnóstico sobre cantos, velocidad y nota
   if (cantosCount > 0) {
-    if (lastCantoGrade !== null && lastCantoGrade >= 7.0 && lastCantoTotalMins && lastCantoTotalMins <= 13.0) {
-      diagParts.push(`Dominio oral destacado: cantaste en ${formatTimeMins(lastCantoTotalMins)} con nota ${lastCantoGrade.toFixed(1)}/10. Tu rapidez sin titubeos ha expandido la vida media de este tema a ${stabilityDays} días.`);
+    if (hasMasteryBonus) {
+      diagParts.push(`¡Maestría ante tribunal! Cantaste en ventana (${formatTimeMins(lastCantoTotalMins!)} min) con nota ${lastCantoGrade!.toFixed(1)}/10 (+15% bonus de fijación de élite).`);
+    } else if (lastCantoGrade !== null && lastCantoGrade >= 7.0 && lastCantoTotalMins && lastCantoTotalMins <= 13.0) {
+      diagParts.push(`Dominio oral destacado: cantaste en ${formatTimeMins(lastCantoTotalMins)} con nota ${lastCantoGrade.toFixed(1)}/10. Tu rapidez sin titubeos consolida la memoria.`);
     } else if (lastCantoTotalMins && lastCantoTotalMins > 13.67) {
-      diagParts.push(`Cante lento (${formatTimeMins(lastCantoTotalMins)}): superaste los 13:40 min reglamentarios, lo que evidencia pausas o dudas para recordar epígrafes, acelerando el decaimiento mnemotécnico.`);
+      diagParts.push(`Cante lento (${formatTimeMins(lastCantoTotalMins)}): superaste los 13:40 min reglamentarios, lo que evidencia pausas para recordar epígrafes.`);
     } else if (lastCantoGrade !== null && lastCantoGrade < 5.0) {
       diagParts.push(`Calificación suspensa (${lastCantoGrade.toFixed(1)}/10) en tu último cante: refleja lagunas conceptuales que debilitan la huella de memoria.`);
     } else {
@@ -475,12 +563,12 @@ export function calculateEbbinghausCurve(
   }
 
   // Diagnóstico sobre tiempo transcurrido
-  if (daysSinceAnchor === 0) {
+  if (effectiveDaysElapsed === 0) {
     diagParts.push(`Interacción registrada hoy: la retención se encuentra al ${Math.round(currentRetention)}%.`);
-  } else if (daysSinceAnchor <= 7) {
-    diagParts.push(`Último contacto hace ${daysSinceAnchor} ${daysSinceAnchor === 1 ? 'día' : 'días'} (${anchorType}).`);
+  } else if (effectiveDaysElapsed <= 7) {
+    diagParts.push(`Último contacto hace ${effectiveDaysElapsed} ${effectiveDaysElapsed === 1 ? 'día efectivo' : 'días efectivos'} (${anchorType}).`);
   } else {
-    diagParts.push(`Han transcurrido ${daysSinceAnchor} días sin contacto, reduciendo la retención al ${Math.round(currentRetention)}%.`);
+    diagParts.push(`Han transcurrido ${effectiveDaysElapsed} días efectivos sin contacto, reduciendo la retención al ${Math.round(currentRetention)}%.`);
   }
 
   const diagnostic = diagParts.join(" ");
@@ -491,12 +579,12 @@ export function calculateEbbinghausCurve(
     if (cantosCount > 0 && lastCantoGrade !== null && lastCantoGrade < 5.0) {
       actionAdvice = "Repaso urgente hoy: revisa los epígrafes donde fallaste en el cante y realiza una lectura cronometrada.";
     } else {
-      actionAdvice = `Repaso prioritario: la retención estimada está en el ${Math.round(currentRetention)}% (por debajo del umbral del 80%). Programa un repaso de vuelta hoy o mañana.`;
+      actionAdvice = `Repaso prioritario: retención estimada en ${Math.round(currentRetention)}% (bajo el umbral de seguridad del 80%). Programa un repaso de vuelta hoy o mañana.`;
     }
   } else if (daysUntilCritical80 <= 3) {
-    actionAdvice = `Toca repaso en los próximos ${daysUntilCritical80} días para renovar la curva antes de caer bajo el 80%.`;
+    actionAdvice = `Toca repaso en los próximos ${daysUntilCritical80} días para renovar la curva antes de descender del 80%.`;
   } else if (cantosCount === 0 && refrescosCompleted >= 2) {
-    actionAdvice = "El tema está bien asimilado: es el momento perfecto para cantar el tema con cronómetro (objetivo 11:00–13:40 min).";
+    actionAdvice = "El tema está bien asimilado: momento idóneo para cantar ante cronómetro (objetivo 11:50–13:40 min).";
   } else {
     actionAdvice = `Memoria estable: tienes ${daysUntilCritical80} días de margen de retención segura antes de necesitar un nuevo repaso.`;
   }
@@ -504,14 +592,13 @@ export function calculateEbbinghausCurve(
   // =========================================================================
   // GENERAR PUNTOS DE LA GRÁFICA DE EBBINGHAUS (0 a 30-45 días)
   // =========================================================================
-  const chartDaysTotal = Math.max(28, Math.min(60, Math.ceil(Math.max(daysSinceAnchor + 14, daysTotalTo80 + 7))));
+  const chartDaysTotal = Math.max(28, Math.min(60, Math.ceil(Math.max(effectiveDaysElapsed + 14, daysTotalTo80 + 7))));
   const chartData: EbbinghausPoint[] = [];
 
   // Generamos puntos con mayor resolución en los primeros días
   const sampleDays: number[] = [];
   for (let d = 0; d <= chartDaysTotal; d++) {
-    // Tomamos todos los primeros 14 días y luego cada 2 días
-    if (d <= 14 || d % 2 === 0 || d === Math.round(daysSinceAnchor) || d === Math.round(daysTotalTo80)) {
+    if (d <= 14 || d % 2 === 0 || d === Math.round(effectiveDaysElapsed) || d === Math.round(daysTotalTo80)) {
       if (!sampleDays.includes(d)) sampleDays.push(d);
     }
   }
@@ -524,7 +611,7 @@ export function calculateEbbinghausCurve(
     const fullDate = getLocalDateString(ptDate);
 
     const ret = Math.min(100, Math.max(0, 100 * Math.exp(-dayNum / stabilityDays)));
-    const isToday = Math.abs(dayNum - daysSinceAnchor) < 0.8;
+    const isToday = Math.abs(dayNum - effectiveDaysElapsed) < 0.8;
     const isAnchor = dayNum === 0;
     const isThreshold80 = Math.abs(dayNum - daysTotalTo80) < 0.9;
 
@@ -571,10 +658,14 @@ export function calculateEbbinghausCurve(
     refrescosImpactLabel,
     vueltas,
     vueltasFactor: Number(vueltasFactor.toFixed(2)),
+    vueltasImpactLabel,
+    hasMasteryBonus,
+    brakeType,
     stabilityDays,
     anchorDate: anchorDateStr,
     anchorType,
-    daysSinceAnchor
+    daysSinceAnchor,
+    effectiveDaysElapsed
   };
 
   return {
@@ -644,10 +735,14 @@ function createEmptyAnalysis(difficulty: number, pages: number): EbbinghausAnaly
       refrescosImpactLabel: '0/3 Refrescos',
       vueltas: 0,
       vueltasFactor: 1.0,
+      vueltasImpactLabel: 'Sin vueltas',
+      hasMasteryBonus: false,
+      brakeType: 'estudio_inicial',
       stabilityDays: 3.5,
       anchorDate: null,
       anchorType: 'none',
-      daysSinceAnchor: 0
+      daysSinceAnchor: 0,
+      effectiveDaysElapsed: 0
     },
     chartData: []
   };

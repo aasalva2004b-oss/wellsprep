@@ -1,87 +1,75 @@
-# Plan de Excelencia UX · Experiencia del Temario y Seguimiento de Vueltas Estilo Apple
+# Plan de Optimización Matemática y Visual · Curva del Olvido de Hermann Ebbinghaus en Toda la App
 
-Perfeccionar la experiencia central del Temario y el seguimiento de vueltas oficiales en WellsPrep, incorporando microinteracciones fluidas inspiradas en los estándares de diseño de Apple, métricas de retención en vivo y un flujo de navegación impecable.
+Elevar el rigor matemático, neurobiológico y la coherencia visual del motor de la Curva del Olvido de Hermann Ebbinghaus en todos los puntos de la aplicación, dando el máximo peso al **cante oral activo** y a las **vueltas acumuladas** como anclajes de memoria a largo plazo.
 
-## Decisiones Críticas y Respuestas del Usuario
+---
+
+## 1. Decisiones Clave y Respuestas del Usuario
 
 > [!IMPORTANT]
-> Confirmaciones del usuario en la fase de clarificación:
-> - **Área prioritaria**: Experiencia del Temario y seguimiento de vueltas.
-> - **Estilo de experiencia visual**: Microinteracciones fluidas y acabados estilo Apple.
-> - **Objetivo cumplido**: Pequeñas mejoras perceptibles que elevan la calidad y usabilidad del sistema a nivel de producto final nativo.
+> - **Aspecto Matemático Prioritario**: **Mayor peso al cante y vueltas como fijadores de memoria**.
+>   - La evocación activa oral (*Active Retrieval Practice*) bajo presión de cronómetro triplica la tasa de retención frente a la lectura pasiva.
+>   - Las vueltas consolidadas ($V_1 \rightarrow V_2 \rightarrow V_3+$) aumentan exponencialmente la vida media sináptica ($S$), espaciando los repasos requeridos.
+> - **Visualización en la Interfaz**: **Ambas mejoras integradas** (indicador unificado de retención y fecha de decaimiento en el Temario + diagnóstico predictivo profundo en la ficha técnica de cada tema).
 
 ---
 
-## 1. Visión General del Sistema y Flujo de Usuario
+## 2. Diagnóstico del Modelo Actual y Objetivos de Mejora
 
-El temario es el corazón operativo del opositor a Judicaturas y Fiscalía. Cada tema transita por un ciclo vital muy estricto:
-1. **Estudio Inicial**: Primera aproximación y fijación de conceptos.
-2. **Ciclo de 3 Refrescos**: Consolidación a corto plazo (Día 1, Día 2, Día 3).
-3. **Cante Oficial**: Simulación oral cronometrada que consolida la vuelta.
-4. **Repetición Espaciada (SRS)**: Mantenimiento mensual adaptativo según dificultad.
+### 1. Desfase de Factores Actuales:
+- En `src/lib/ebbinghaus.ts`, el factor de cantes (`cantosFactor`) tenía un techo conservador de $3.2\times$ y las vueltas un factor lineal de $0.55\times$, subestimando el poder de fijación del cante oral repetido.
+- En temas con 3 o más vueltas y cantes aprobados con buena nota, la curva caía con excesiva rapidez por no ponderar adecuadamente la huella sináptica profunda (*Long-Term Potentiation*).
+- Existían pequeñas divergencias entre el cálculo de retención en `src/lib/ebbinghaus.ts` y el cálculo de decaimiento en `src/lib/preparationScore.ts`.
 
-Se han incorporado refinamientos quirúrgicos para que el seguimiento de vueltas sea visualmente gratificante, táctil, informativo y sin fricción.
-
-### Diagrama de Flujo y Microinteracciones
-
-```
-┌────────────────────────────────────────────────────────────────────────────────────────┐
-│                              BARRA DE MATERIAS ESTILO APPLE                            │
-│  ┌───────────────────────┐ ┌───────────────────────┐ ┌──────────────────────────────┐ │
-│  │ Constitucional (27)   │ │ Penal General (29)    │ │ Penal Especial (58)          │ │
-│  │ [Slider Fluido macOS] │ └───────────────────────┘ └──────────────────────────────┘ │
-└───────────────────────────────────────────┬────────────────────────────────────────────┘
-                                            │
-                                            ▼
-┌────────────────────────────────────────────────────────────────────────────────────────┐
-│                      CABECERA DE COMANDO Y SALUD DEL BLOQUE                            │
-│  Progreso Vueltas: [████████ 1ª Vuelta (60%) ][████ 2ª+ Vuelta (30%) ][ Pendiente (10%)│
-│  Micro-vitals: 27 Temas · 18 con Vuelta · 142.5h Invertidas · 2 Repasos Hoy (Alerta)   │
-└───────────────────────────────────────────┬────────────────────────────────────────────┘
-                                            │
-                                            ▼
-┌────────────────────────────────────────────────────────────────────────────────────────┐
-│                           TARJETAS DE TEMA FLUIDAS (CARDS)                             │
-│  ┌──────────────────────────────────────────────────────────────────────────────────┐  │
-│  │ Tema 1 · Constitucional                       [ Retención: 88% Óptima 🟢 ]        │  │
-│  │ La Constitución de 1978. Principios y Valores                                    │  │
-│  │ ──────────────────────────────────────────────────────────────────────────────── │  │
-│  │  VUELTA 2 CONSOLIDADA       DIFICULTAD: 4/10       REPASO EST.: 42m              │  │
-│  │  Último Cante: 14m 20s      Agenda: en 12 días     Inversión: 6.5h               │  │
-│  │ ──────────────────────────────────────────────────────────────────────────────── │  │
-│  │  [⚡ +1 Vuelta Rápida]      [👁️ Abrir Ficha Completa]                             │  │
-│  └──────────────────────────────────────────────────────────────────────────────────┘  │
-└────────────────────────────────────────────────────────────────────────────────────────┘
-```
+### 2. Objetivos del Nuevo Modelo Matemático:
+- **Ecuación Maestra**: $R(t) = 100 \cdot e^{-t_{\text{eff}} / S}$
+  - **Estabilidad Sináptica ($S$ en días)**:
+    $$S = S_{\text{base}} \cdot F_{\text{vueltas}} \cdot F_{\text{cantos}} \cdot F_{\text{nota}} \cdot F_{\text{velocidad}} \cdot F_{\text{refrescos}} \cdot F_{\text{horas}} \cdot F_{\text{dificultad}}$$
+  - **Potenciador de Vueltas ($F_{\text{vueltas}}$)**:
+    - Vuelta 0: $1.0\times$
+    - Vuelta 1: $1.85\times$ (doble vida media tras consolidar la primera vuelta)
+    - Vuelta 2: $3.10\times$ (afianzamiento)
+    - Vuelta 3: $4.60\times$ (dominio)
+    - Vuelta 4+: hasta $6.20\times$ (memoria prácticamente indeleble para tribunal)
+  - **Potenciador de Cante Oral Activo ($F_{\text{cantos}}$)**:
+    - Cada cante oficial multiplica la estabilidad por un factor logístico escalonado (1 cante: $2.1\times$, 2 cantos: $3.3\times$, 3+ cantos: hasta $4.8\times$).
+    - Si el último cante fue en la ventana reglamentaria (11:50 a 13:40 min) con nota $\ge 7.5$, se aplica un multiplicador de maestría adicional.
+  - **Días Efectivos ($t_{\text{eff}}$) con Freno Diferencial**:
+    - Cante frena el 100% del olvido ($t_{\text{eff}} = \text{días desde el cante}$).
+    - Repaso de estudio frena el 50% del tiempo transcurrido desde el último cante.
+- **Unificación Total**: Sincronización idéntica de la retención $R(t)$ en `ebbinghaus.ts`, `preparationScore.ts`, `performanceCache.ts`, `TemarioView.tsx` y `TopicEbbinghausCard.tsx`.
 
 ---
 
-## 2. Mejoras Implementadas
+## 3. Plan de Implementación Técnica por Fases
 
-1. **Selector de Materias con Indicador Físico Deslizante (`layoutId="activeSubjectSlider"`)**:
-   - Selector segmentado con fondo dinámico animado por Framer Motion. Al hacer clic o cambiar de materia con teclado, la cápsula se desliza con inercia elástica suave (`spring: stiffness 450, damping 35`).
+### Fase 1: Calibración Matemática en `src/lib/ebbinghaus.ts` [COMPLETADO]
+- [x] Actualizar la fórmula de estabilidad $S$:
+  - Aumentar el peso de vueltas acumuladas ($F_{\text{vueltas}}$ hasta $6.20\times$) y cantes orales realizados ($F_{\text{cantos}}$ hasta $5.20\times$).
+  - Incorporar bonus de maestría ante tribunal (+15% si cante en ventana 11:50-13:40 con nota $\ge 7.5$).
+  - Incorporar el cálculo de días efectivos $t_{\text{eff}}$ con freno diferencial riguroso (100% cante vs 50% repaso posterior).
+  - Recalibrar el cálculo exacto del **umbral crítico del 80%** ($t_{80} = -S \cdot \ln(0.80)$) y la fecha prevista en la que el tema caerá por debajo de dicho umbral.
+  - Mejorar el texto del diagnóstico pedagógico para que explique exactamente cuántos días de protección aporta cada cante y vuelta.
 
-2. **Medidor de Vueltas Multicapa con Micro-Leyenda**:
-   - Barra de progreso segmentada en 3 niveles de profundidad: *2ª+ Vueltas* (índigo intenso), *1ª Vuelta* (índigo medio), *En proceso / Refrescos* (índigo suave) y *Pendientes* (gris claro), con conteos exactos.
+### Fase 2: Unificación Matemática en `src/lib/preparationScore.ts` y Caché de Rendimiento [COMPLETADO]
+- [x] Sincronizar `calculateEbbinghausRetention` en `preparationScore.ts` con los nuevos pesos de estabilidad $S$ para que el Panel del Preparador (L/J) y el Temario muestren exactamente la misma retención porcentual.
+- [x] Actualizar `performanceCache.ts` (`buildSubjectTelemetryIndex`) para almacenar `daysUntil80`, `stabilityDays`, y `critical80DateStr` en $O(1)$ sin latencia.
 
-3. **Tarjeta de Tema Editorial (Anti-Slop) & Mnemotécnica Ebbinghaus**:
-   - Números tabulares proporcionales (`font-mono tabular-nums`).
-   - Medidor de retención mnemotécnica en vivo (punto de color y porcentaje) derivado del cálculo multifactorial de Ebbinghaus.
-   - Rastreador visual de los 3 Refrescos Diarios (Día 1, Día 2, Día 3) para temas en fase de refresco.
+### Fase 3: Visualización Refinada en Temario y Ficha Técnica de Tema [COMPLETADO]
+- [x] En `src/components/TemarioView.tsx`:
+  - Mostrar la nueva métrica de retención unificada en la tarjeta y fila de cada tema con tooltip enriquecido (retención %, días hasta el umbral 80% y fecha límite sugerida).
+- [x] En `src/components/topic-editor/TopicEbbinghausCard.tsx`:
+  - Actualizar el desglose con 5 tarjetas especializadas: Horas Mesa, Dificultad, Cantos Orales, Vueltas y Refrescos/Freno Diferencial.
+  - Añadir insignias de "Bonus Maestría +15%" y freno diferencial ("Cante 100%" o "Freno Mixto 50%").
+  - Refinar el gráfico interactivo de la curva y el estado con la fecha proyectada exacta de cruce del umbral 80%.
 
-4. **Acción Rápida Táctil (+1 Vuelta Rápida en 1 Clic)**:
-   - Botón `+1 Vuelta` disponible tanto en la vista cuadrícula (tarjeta) como en la tabla, permitiendo registrar un repaso oficial con su tiempo estimado con un solo clic, feedback sonoro de cabina y actualización inmediata de la agenda SRS.
-
-5. **Navegación y Atajos de Teclado Integrados**:
-   - `ArrowLeft` / `ArrowRight`: Navegación rápida entre bloques temáticos con sonido háptico.
-   - `/`: Enfoque inmediato del campo de búsqueda de temas.
-   - `Escape`: Limpieza de búsqueda y desenfoque del buscador.
+### Fase 4: Pruebas, Linter y Compilación [COMPLETADO]
+- [x] Ejecutar `lint_applet` (`tsc --noEmit`) asegurando 0 errores.
+- [x] Ejecutar `compile_applet` para validar el empaquetado de producción de Vite (Build exitoso).
 
 ---
 
-## 3. Estado de Ejecución por Fases
-
-- [x] **Fase 1: Selector Segmentado y Medidor de Vueltas Multicapa (`src/components/TemarioView.tsx`)**
-- [x] **Fase 2: Rediseño Editorial de `TopicCard` y `TopicTableRow`**
-- [x] **Fase 3: Feedback y Microinteracciones Sensoriales**
-- [x] **Fase 4: Pruebas y Validación de Compilación (`lint_applet` y `compile_applet` completados con 0 errores)**
+## 4. Criterios de Aceptación
+1. **Precisión Matemática**: Los temas con 2+ vueltas o con cantes recientes no se degradan artificialmente rápido; su retención se mantiene elevada reflejando fielmente la consolidación sináptica.
+2. **Coherencia Total**: El porcentaje de retención de Ebbinghaus es exactamente el mismo en el Temario, en el Panel del Preparador, en el Recomendador del Día y en la Ficha Técnica del Tema.
+3. **Claridad Visual**: El opositor comprende en cualquier pantalla cuántos días le quedan de retención segura antes de que el tema baje del 80%.

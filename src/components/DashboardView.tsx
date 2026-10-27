@@ -1,11 +1,20 @@
 import { useState, useMemo } from "react";
 import { Topic } from "../types";
 import { toast } from "sonner";
-import { BookOpen, Mic, TrendingUp, Layers, Activity } from "lucide-react";
+import { BookOpen, Mic, TrendingUp, Layers, Activity, Sparkles, Target } from "lucide-react";
 import { cn, getLocalDateString } from "../lib/utils";
 import { calculateNextSRSState } from "../lib/srs";
 import { useFirebase } from "../lib/FirebaseProvider";
 import { initialTopics } from "../data/initialData";
+import { playSound } from "../lib/sound";
+import {
+  computeTodayActivity,
+  computeWeeklyConsistency,
+  computeTodayStudyQueue,
+  getDailyGoalMinutes,
+  setDailyGoalMinutes,
+  RecommendedStudyTask,
+} from "../lib/recommendationEngine";
 
 // Atomic Subcomponents
 import { TopicsEvolutionSection } from "./TopicsEvolutionSection";
@@ -17,12 +26,23 @@ import { DashboardDomainRadarChart } from "./dashboard/DashboardDomainRadarChart
 import { DashboardCantoScatterChart } from "./dashboard/DashboardCantoScatterChart";
 import { DashboardManageCantosModal } from "./dashboard/DashboardManageCantosModal";
 import { DashboardQuickCantoModal } from "./dashboard/DashboardQuickCantoModal";
+import { DashboardActivityRingsCard } from "./dashboard/DashboardActivityRingsCard";
+import { DashboardWeeklyConsistencyCard } from "./dashboard/DashboardWeeklyConsistencyCard";
+import { DashboardTodayRecommender } from "./dashboard/DashboardTodayRecommender";
 
 export function DashboardView({ onSelectTopic }: { onSelectTopic?: (topicId: string) => void }) {
   const { userProgress, recentSessions, deleteStudySession, addStudySession } = useFirebase();
 
-  // Section switcher: 'temas' | 'cantos' | 'general' | 'todo'
-  const [dashboardSection, setDashboardSection] = useState<"temas" | "cantos" | "general" | "todo">("temas");
+  // Section switcher: 'hoy' | 'temas' | 'cantos' | 'general' | 'todo'
+  const [dashboardSection, setDashboardSection] = useState<"hoy" | "temas" | "cantos" | "general" | "todo">("hoy");
+
+  // Daily Study Goal State (Apple Health style, default 6 hours = 360 min)
+  const [dailyGoalMinutes, setDailyGoalMinutesState] = useState<number>(() => getDailyGoalMinutes());
+
+  const handleGoalChange = (newGoal: number) => {
+    setDailyGoalMinutesState(newGoal);
+    setDailyGoalMinutes(newGoal);
+  };
 
   // Merge initial topics with user custom topics
   const allTopics = useMemo(() => {
@@ -527,6 +547,66 @@ export function DashboardView({ onSelectTopic }: { onSelectTopic?: (topicId: str
   const recentCantos = cantosConNota.slice(-10);
   const avgRecentCanto = recentCantos.length > 0 ? recentCantos.reduce((a, b) => a + (b.grade || 0), 0) / recentCantos.length : 0;
 
+  // Apple Health & Daily Activity Engine
+  const todayActivity = useMemo(() => {
+    return computeTodayActivity(rawSessions, dailyGoalMinutes);
+  }, [rawSessions, dailyGoalMinutes]);
+
+  const weeklyConsistency = useMemo(() => {
+    return computeWeeklyConsistency(rawSessions, dailyGoalMinutes, currentStreak);
+  }, [rawSessions, dailyGoalMinutes, currentStreak]);
+
+  const todayStudyQueue = useMemo(() => {
+    return computeTodayStudyQueue(allTopics, userProgress, recentSessions);
+  }, [allTopics, userProgress, recentSessions]);
+
+  // Handlers for Plan del Día
+  const handleTodayQuickReview = async (task: RecommendedStudyTask) => {
+    try {
+      playSound.click();
+      const currentVueltas = userProgress[task.topic.id]?.vueltas || 0;
+      const newVueltas = currentVueltas + 1;
+      await addStudySession({
+        topicId: task.topic.id,
+        date: getLocalDateString(),
+        type: "repaso",
+        durationMinutes: task.estimatedMinutes || 45,
+        difficulty: userProgress[task.topic.id]?.difficulty || task.topic.difficulty || 4,
+        completesVuelta: true,
+        notes: `Repaso rápido oficial (+1 Vuelta) desde Plan del Día. Estimado: ${task.estimatedMinutes} min.`,
+      });
+      playSound.success();
+      toast.success(`🎉 ¡Vuelta ${newVueltas} consolidada para el Tema ${task.topic.number}!`);
+    } catch (err: any) {
+      toast.error("Error al registrar repaso: " + (err.message || err));
+    }
+  };
+
+  const handleTodayQuickRefresco = async (task: RecommendedStudyTask) => {
+    try {
+      playSound.click();
+      await addStudySession({
+        topicId: task.topic.id,
+        date: getLocalDateString(),
+        type: "refresco",
+        durationMinutes: task.estimatedMinutes || 30,
+        difficulty: userProgress[task.topic.id]?.difficulty || task.topic.difficulty || 4,
+        completesVuelta: false,
+        notes: `Refresco diario oficial desde Plan del Día.`,
+      });
+      playSound.success();
+      toast.success(`⚡ ¡Refresco registrado para el Tema ${task.topic.number}!`);
+    } catch (err: any) {
+      toast.error("Error al registrar refresco: " + (err.message || err));
+    }
+  };
+
+  const handleTodayQuickCanto = (task: RecommendedStudyTask) => {
+    playSound.click();
+    setSelectedTopicCantoFilter(task.topic.id);
+    setIsLoggingCanto(true);
+  };
+
   // Handlers
   const handleSaveNewCanto = async (data: any) => {
     setIsSavingCanto(true);
@@ -582,7 +662,24 @@ export function DashboardView({ onSelectTopic }: { onSelectTopic?: (topicId: str
           {/* Section Navigation Tabs */}
           <div className="w-full lg:w-auto flex items-center bg-white/95 backdrop-blur-xl p-1 rounded-2xl border border-slate-200/80 shadow-xs gap-1 overflow-x-auto no-scrollbar">
             <button
-              onClick={() => setDashboardSection("temas")}
+              onClick={() => {
+                playSound.click();
+                setDashboardSection("hoy");
+              }}
+              className={cn(
+                "px-3 py-1.5 sm:py-2 rounded-xl text-xs font-black transition-all flex items-center gap-1.5 shrink-0 active:scale-[0.98]",
+                dashboardSection === "hoy" ? "bg-slate-900 text-white shadow-xs" : "text-slate-600 hover:text-slate-900 hover:bg-slate-100"
+              )}
+            >
+              <Target size={13} className={dashboardSection === "hoy" ? "text-indigo-300" : "text-indigo-600"} />
+              <span className="sm:hidden">Hoy</span>
+              <span className="hidden sm:inline">Hoy & Plan de Estudio</span>
+            </button>
+            <button
+              onClick={() => {
+                playSound.click();
+                setDashboardSection("temas");
+              }}
               className={cn(
                 "px-3 py-1.5 sm:py-2 rounded-xl text-xs font-black transition-all flex items-center gap-1.5 shrink-0 active:scale-[0.98]",
                 dashboardSection === "temas" ? "bg-slate-900 text-white shadow-xs" : "text-slate-600 hover:text-slate-900 hover:bg-slate-100"
@@ -593,7 +690,10 @@ export function DashboardView({ onSelectTopic }: { onSelectTopic?: (topicId: str
               <span className="hidden sm:inline">Evolución de Temas</span>
             </button>
             <button
-              onClick={() => setDashboardSection("cantos")}
+              onClick={() => {
+                playSound.click();
+                setDashboardSection("cantos");
+              }}
               className={cn(
                 "px-3 py-1.5 sm:py-2 rounded-xl text-xs font-black transition-all flex items-center gap-1.5 shrink-0 active:scale-[0.98]",
                 dashboardSection === "cantos" ? "bg-slate-900 text-white shadow-xs" : "text-slate-600 hover:text-slate-900 hover:bg-slate-100"
@@ -604,7 +704,10 @@ export function DashboardView({ onSelectTopic }: { onSelectTopic?: (topicId: str
               <span className="hidden sm:inline">Evolución de Cantos</span>
             </button>
             <button
-              onClick={() => setDashboardSection("general")}
+              onClick={() => {
+                playSound.click();
+                setDashboardSection("general");
+              }}
               className={cn(
                 "px-3 py-1.5 sm:py-2 rounded-xl text-xs font-black transition-all flex items-center gap-1.5 shrink-0 active:scale-[0.98]",
                 dashboardSection === "general" ? "bg-slate-900 text-white shadow-xs" : "text-slate-600 hover:text-slate-900 hover:bg-slate-100"
@@ -615,7 +718,10 @@ export function DashboardView({ onSelectTopic }: { onSelectTopic?: (topicId: str
               <span className="hidden sm:inline">Visión General & Agenda</span>
             </button>
             <button
-              onClick={() => setDashboardSection("todo")}
+              onClick={() => {
+                playSound.click();
+                setDashboardSection("todo");
+              }}
               className={cn(
                 "px-3 py-1.5 sm:py-2 rounded-xl text-xs font-black transition-all flex items-center gap-1.5 shrink-0 active:scale-[0.98]",
                 dashboardSection === "todo" ? "bg-slate-900 text-white shadow-xs" : "text-slate-600 hover:text-slate-900 hover:bg-slate-100"
@@ -639,6 +745,42 @@ export function DashboardView({ onSelectTopic }: { onSelectTopic?: (topicId: str
 
         {/* BENTO GRID */}
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 auto-rows-auto gap-4 sm:gap-6 mt-3 sm:mt-4 pb-6 sm:pb-8">
+          {/* SECCIÓN 0: HOY & PLAN DE ESTUDIO (APPLE HEALTH & SMART RECOMMENDER) */}
+          {(dashboardSection === "hoy" || dashboardSection === "todo") && (
+            <>
+              {/* Row 1: Apple Health Activity Ring (Col 1) + 7-Day Consistency (Col 2) */}
+              <div className="md:col-span-1 xl:col-span-1">
+                <DashboardActivityRingsCard
+                  activity={todayActivity}
+                  currentStreak={currentStreak}
+                  onGoalChange={handleGoalChange}
+                />
+              </div>
+
+              <div className="md:col-span-1 xl:col-span-2">
+                <DashboardWeeklyConsistencyCard weeklyData={weeklyConsistency} />
+              </div>
+
+              {/* Row 2: Today's Smart Study Queue (Full width) */}
+              <div className="md:col-span-2 xl:col-span-3">
+                <DashboardTodayRecommender
+                  tasks={todayStudyQueue.tasks}
+                  onSelectTopic={onSelectTopic}
+                  onQuickReview={handleTodayQuickReview}
+                  onQuickRefresco={handleTodayQuickRefresco}
+                  onQuickCanto={handleTodayQuickCanto}
+                />
+              </div>
+
+              {/* In 'hoy' mode, also show the SRS Forecast so student sees the 14-day horizon */}
+              {dashboardSection === "hoy" && (
+                <div className="md:col-span-2 xl:col-span-3">
+                  <DashboardSRSForecastChart forecastData={forecastData} />
+                </div>
+              )}
+            </>
+          )}
+
           {/* SECCIÓN 1: EVOLUCIÓN DE TEMAS */}
           {(dashboardSection === "temas" || dashboardSection === "todo") && (
             <div className="md:col-span-2 xl:col-span-3">

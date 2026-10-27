@@ -885,31 +885,33 @@ const TopicCard = React.memo(function TopicCard({
             )}
           </div>
 
-          {/* Ebbinghaus Retention Indicator (Apple Health Style) */}
+          {/* Ebbinghaus Retention & Threshold Indicator (Apple Health Style) */}
           {hasStarted && ebbinghaus && (
             <div
               className={cn(
-                "flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-bold border transition-colors shrink-0",
+                "flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-bold border transition-colors shrink-0 font-mono tabular-nums",
                 ebbinghaus.retention >= 80
-                  ? "bg-emerald-50 text-emerald-700 border-emerald-200/80"
-                  : ebbinghaus.retention >= 60
-                    ? "bg-amber-50 text-amber-700 border-amber-200/80"
-                    : "bg-rose-50 text-rose-700 border-rose-200/80"
+                  ? "bg-emerald-50 text-emerald-800 border-emerald-200/90"
+                  : ebbinghaus.retention >= 65
+                    ? "bg-amber-50 text-amber-800 border-amber-200/90"
+                    : "bg-rose-50 text-rose-800 border-rose-200/90"
               )}
-              title={`Retención mnemotécnica: ${ebbinghaus.retention}% (${ebbinghaus.statusTitle})`}
+              title={`Curva Ebbinghaus: ${ebbinghaus.retention}% (${ebbinghaus.statusTitle}) · Vida media: ${ebbinghaus.stabilityDays}d · ${ebbinghaus.daysUntil80 > 0 ? `Margen de seguridad: +${ebbinghaus.daysUntil80} días hasta cruzar el 80% (${ebbinghaus.critical80DateStr || ''})` : 'Umbral del 80% superado: conviene repasar'}`}
             >
               <span
                 className={cn(
                   "w-1.5 h-1.5 rounded-full shrink-0",
                   ebbinghaus.retention >= 80
                     ? "bg-emerald-500"
-                    : ebbinghaus.retention >= 60
+                    : ebbinghaus.retention >= 65
                       ? "bg-amber-500"
                       : "bg-rose-500 animate-pulse"
                 )}
               />
-              <span className="font-mono tabular-nums">{ebbinghaus.retention}%</span>
-              <span className="text-[9px] text-slate-400 font-medium hidden sm:inline">ret.</span>
+              <span className="font-black">{ebbinghaus.retention}%</span>
+              <span className="text-[9px] text-slate-400 font-semibold border-l border-slate-200/80 pl-1 ml-0.5">
+                {ebbinghaus.daysUntil80 > 0 ? `+${ebbinghaus.daysUntil80}d` : "alerta"}
+              </span>
             </div>
           )}
         </div>
@@ -1173,9 +1175,32 @@ const TopicTableRow = React.memo(function TopicTableRow({
           )}
 
           {hasStarted && ebbinghaus && (
-            <span className="text-[9px] font-mono tabular-nums text-slate-400 font-bold" title={`Retención estimada: ${ebbinghaus.retention}%`}>
-              {ebbinghaus.retention}% ret.
-            </span>
+            <div
+              className={cn(
+                "inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[9px] font-mono tabular-nums font-bold border transition-colors",
+                ebbinghaus.retention >= 80
+                  ? "bg-emerald-50 text-emerald-800 border-emerald-200/80"
+                  : ebbinghaus.retention >= 65
+                    ? "bg-amber-50 text-amber-800 border-amber-200/80"
+                    : "bg-rose-50 text-rose-800 border-rose-200/80"
+              )}
+              title={`Ebbinghaus: ${ebbinghaus.retention}% (${ebbinghaus.statusTitle}) · ${ebbinghaus.daysUntil80 > 0 ? `+${ebbinghaus.daysUntil80}d hasta el 80%` : 'Bajo el 80%'}`}
+            >
+              <span
+                className={cn(
+                  "w-1 h-1 rounded-full",
+                  ebbinghaus.retention >= 80
+                    ? "bg-emerald-500"
+                    : ebbinghaus.retention >= 65
+                      ? "bg-amber-500"
+                      : "bg-rose-500"
+                )}
+              />
+              <span>{ebbinghaus.retention}%</span>
+              <span className="text-[8px] text-slate-400 font-normal">
+                ({ebbinghaus.daysUntil80 > 0 ? `+${ebbinghaus.daysUntil80}d` : 'urg'})
+              </span>
+            </div>
           )}
         </div>
       </td>

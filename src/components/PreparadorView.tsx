@@ -24,6 +24,9 @@ import { motion, AnimatePresence } from "motion/react";
 import { toast } from "sonner";
 import { doc, getDoc, setDoc, serverTimestamp } from "firebase/firestore";
 import { db } from "../lib/firebase";
+import { playSound } from "../lib/sound";
+import { PreparadorTopicCard } from "./preparador/PreparadorTopicCard";
+import { PreparadorQuickFeedbackModal } from "./preparador/PreparadorQuickFeedbackModal";
 
 type DayOption = "lunes" | "jueves" | "historial";
 type SortOption = "menor_nota" | "mayor_nota" | "orden_numero";
@@ -325,25 +328,32 @@ export function PreparadorView() {
   };
 
   // Save preparador feedback / cante session with double-submit guard
-  const handleSavePreparadorFeedback = async () => {
-    if (!feedbackTopic || isSavingFeedback) return;
+  const handleSavePreparadorFeedback = async (data: {
+    topicId: string;
+    durationMinutes: number;
+    durationSeconds: number;
+    grade: number;
+    notes: string;
+  }) => {
+    if (isSavingFeedback) return;
     try {
       setIsSavingFeedback(true);
       await addStudySession(
-        feedbackTopic.id,
-        prepMinutes,
-        feedbackTopic.difficulty || 5,
+        data.topicId,
+        data.durationMinutes,
+        feedbackTopic?.difficulty || 5,
         "canto",
         getLocalDateString(),
         {
-          cantoSeconds: prepSeconds,
-          cantoGrade: prepGrade,
+          cantoSeconds: data.durationSeconds,
+          cantoGrade: data.grade,
           cantoType: "preparador",
-          mistakes: prepNotes,
-          notes: `Sesión de cante ante preparador: ${prepMinutes}m ${prepSeconds}s. Nota: ${prepGrade}. Feedback: ${prepNotes}`
+          mistakes: data.notes,
+          notes: `Sesión de cante ante preparador: ${data.durationMinutes}m ${data.durationSeconds}s. Nota: ${data.grade}. Feedback: ${data.notes}`
         }
       );
-      toast.success(`Evaluación del preparador guardada (Nota ${prepGrade.toFixed(1)})`);
+      playSound.success();
+      toast.success(`Evaluación del preparador guardada (Nota ${data.grade.toFixed(1)})`);
       setFeedbackTopic(null);
       setPrepNotes("");
     } catch (e: any) {
@@ -743,319 +753,29 @@ export function PreparadorView() {
                 </div>
               </div>
             ) : (
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                {sortedTopicsAnalysis.map((item) => {
-                  const { topic, subject, evaluation, hasCanto, lastCantoMins, lastCantoSecs, lastGrade, daysSinceTouch, vueltas, reviewsCount } = item;
-
-                  // Gauge calculations for the 10:00 to 15:00 scale
-                  // Range: 600s (10m) to 900s (15m) -> 300s window
-                  const minGaugeSecs = 10 * 60; // 600s
-                  const maxGaugeSecs = 15 * 60; // 900s
-                  const clampCantoSecs = Math.max(minGaugeSecs, Math.min(maxGaugeSecs, evaluation.totalCantoSecs));
-                  const cantoGaugePct = ((clampCantoSecs - minGaugeSecs) / (maxGaugeSecs - minGaugeSecs)) * 100;
-
-                  // Target 12:30 pct on gauge: (750 - 600) / 300 = 50%
-                  const optimalGaugePct = 50;
-                  // Min window 11:50 pct: (710 - 600) / 300 = 36.6%
-                  const windowMinGaugePct = ((WINDOW_MIN_SECS - minGaugeSecs) / (maxGaugeSecs - minGaugeSecs)) * 100;
-                  // Max window 13:40 pct: (820 - 600) / 300 = 73.3%
-                  const windowMaxGaugePct = ((WINDOW_MAX_SECS - minGaugeSecs) / (maxGaugeSecs - minGaugeSecs)) * 100;
-
-                  return (
-                    <motion.div
-                      key={topic.id}
-                      layout
-                      initial={{ opacity: 0, y: 10 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      exit={{ opacity: 0, scale: 0.95 }}
-                      className={cn(
-                        "bg-white rounded-3xl p-6 border shadow-sm transition-all relative overflow-hidden flex flex-col justify-between",
-                        evaluation.gradeBorderColor
-                      )}
-                    >
-                      {/* Top Master Score Accent Ribbon */}
-                      <div className={cn(
-                        "absolute top-0 left-0 right-0 h-1.5",
-                        evaluation.gradeCategory === "sobresaliente" ? "bg-emerald-500" :
-                        evaluation.gradeCategory === "notable" ? "bg-indigo-600" :
-                        evaluation.gradeCategory === "bien" ? "bg-amber-500" :
-                        evaluation.gradeCategory === "suficiente" ? "bg-orange-500" : "bg-rose-500"
-                      )} />
-
-                      <div>
-                        {/* Header metadata row */}
-                        <div className="flex items-center justify-between gap-2 mb-3">
-                          <div className="flex items-center gap-2">
-                            <span className="text-[10px] font-black uppercase tracking-wider px-2.5 py-1 bg-slate-100 rounded-lg text-slate-700 border border-slate-200/60">
-                              {subject?.name.split(" ")[0] || "Bloque"} · Tema {topic.number}
-                            </span>
-                            <span className="text-[10px] font-bold text-slate-500 bg-slate-50 px-2 py-0.5 rounded-md border border-slate-200/50">
-                              {vueltas > 0 ? `Vuelta ${vueltas}` : "Vuelta 0"} · {reviewsCount} {reviewsCount === 1 ? "sesión" : "sesiones"}
-                            </span>
-                          </div>
-
-                          <div className="flex items-center gap-2.5">
-                            {/* DUAL MASTER SCORE: Nota Proyectada Real en Grande + Nota Histórica Pico al Lado */}
-                            <div className="flex items-center gap-2">
-                              {/* Nota Proyectada Actual (Grande) */}
-                              <div className={cn(
-                                "flex items-baseline gap-1.5 px-3 py-1.5 rounded-2xl border shadow-xs transition-all",
-                                evaluation.gradeBadgeClass
-                              )}>
-                                <div className="flex flex-col items-start leading-none">
-                                  <span className="text-[8px] font-black uppercase tracking-wider opacity-75">
-                                    Nota Actual
-                                  </span>
-                                  <span className="text-[7px] font-bold opacity-60">
-                                    Ebbinghaus
-                                  </span>
-                                </div>
-                                <span className="text-xl font-black font-serif tabular-nums tracking-tight">
-                                  {evaluation.projectedScore.toFixed(1)}
-                                </span>
-                                <span className="text-[10px] font-bold opacity-70">/ 10</span>
-                              </div>
-
-                              {/* Nota Teórica Máxima Histórica al Lado */}
-                              <div 
-                                className="flex flex-col items-end px-2.5 py-1 rounded-xl bg-slate-100/90 border border-slate-200/80 text-right shrink-0"
-                                title={`Nota pico alcanzada en su mejor momento: ${evaluation.peakScore.toFixed(1)}/10`}
-                              >
-                                <div className="flex items-center gap-1 text-[8px] font-black uppercase tracking-wider text-slate-500">
-                                  <Star size={9} className="text-amber-500 fill-amber-500" />
-                                  <span>Pico Máx</span>
-                                </div>
-                                <div className="flex items-baseline gap-0.5">
-                                  <span className="text-xs font-black text-slate-800 font-serif tabular-nums">
-                                    {evaluation.peakScore.toFixed(1)}
-                                  </span>
-                                  <span className="text-[8px] font-bold text-slate-400">/ 10</span>
-                                </div>
-                                {evaluation.isDecayed && (
-                                  <span className="text-[8px] font-black text-rose-600 flex items-center gap-0.5 mt-0.5">
-                                    <TrendingDown size={8} />
-                                    <span>-{evaluation.scoreDecay.toFixed(1)}</span>
-                                  </span>
-                                )}
-                              </div>
-                            </div>
-
-                            <button
-                              onClick={() => handleRemoveTopic(topic.id)}
-                              className="text-slate-400 hover:text-rose-600 p-1.5 rounded-xl hover:bg-rose-50 transition-colors"
-                              title="Quitar tema de la sesión"
-                            >
-                              <Trash2 size={14} />
-                            </button>
-                          </div>
-                        </div>
-
-                        {/* Topic Title & Sub-score Level */}
-                        <div className="mb-3">
-                          <div className="flex items-baseline justify-between gap-2">
-                            <h3 
-                              className="text-base font-black font-serif text-slate-900 leading-snug"
-                              title={topic.fullTitle || topic.title}
-                            >
-                              {topic.title}
-                            </h3>
-                          </div>
-                          <span className={cn("text-[11px] font-bold", evaluation.gradeTextColor)}>
-                            {evaluation.gradeLabel}
-                          </span>
-                        </div>
-
-                        {/* Memory Decay Warning Banner if Topic has Lost Score */}
-                        {evaluation.isDecayed && (
-                          <div className="mb-3.5 px-3 py-2 rounded-2xl bg-amber-50/90 border border-amber-200/80 text-amber-950 text-xs flex items-center justify-between gap-2 shadow-2xs">
-                            <div className="flex items-center gap-2 min-w-0">
-                              <div className="w-6 h-6 rounded-lg bg-amber-500/15 flex items-center justify-center shrink-0 text-amber-700">
-                                <Brain size={13} strokeWidth={2.4} />
-                              </div>
-                              <div className="min-w-0 text-[11px] leading-tight">
-                                <span className="font-bold text-amber-900 block truncate">
-                                  {evaluation.decayDiagnosis}
-                                </span>
-                                <span className="text-amber-700 text-[10px]">
-                                  Freno: Cante frena 100% · Repaso frena 50%
-                                </span>
-                              </div>
-                            </div>
-                            <span className="shrink-0 text-[10px] font-black uppercase px-2 py-0.5 rounded-md bg-amber-200/70 text-amber-900 border border-amber-300/50">
-                              -{evaluation.scoreDecay.toFixed(1)} pts
-                            </span>
-                          </div>
-                        )}
-
-                        {/* CRONÓMETRO GAUGE VISUAL (Window 11:50 - 13:40 | Target 12:30) */}
-                        <div className="bg-slate-50/90 rounded-2xl p-3.5 border border-slate-200/70 mb-3.5">
-                          <div className="flex items-center justify-between mb-2">
-                            <div className="flex items-center gap-1.5">
-                              <Timer size={13} className="text-slate-600" />
-                              <span className="text-[10px] font-black uppercase tracking-wider text-slate-700">
-                                Cronómetro Cante
-                              </span>
-                              <span className="text-[10px] font-medium text-slate-400">
-                                (Meta 12:30)
-                              </span>
-                            </div>
-                            <div className="flex items-center gap-1.5">
-                              <span className={cn(
-                                "text-xs font-black",
-                                !hasCanto ? "text-slate-400" :
-                                evaluation.timeZone === "perfect" ? "text-emerald-700 font-extrabold" :
-                                evaluation.timeZone === "in_window" ? "text-indigo-700" :
-                                evaluation.timeZone === "slightly_short" || evaluation.timeZone === "slightly_long" ? "text-amber-700" : "text-rose-600"
-                              )}>
-                                {hasCanto ? `${lastCantoMins}m ${lastCantoSecs.toString().padStart(2, "0")}s` : "Sin cante grabado"}
-                              </span>
-                              {hasCanto && (
-                                <span className={cn(
-                                  "text-[10px] font-black px-1.5 py-0.2 rounded-md",
-                                  evaluation.timeZone === "perfect" ? "bg-emerald-100 text-emerald-800" :
-                                  evaluation.timeZone === "in_window" ? "bg-indigo-100 text-indigo-800" :
-                                  "bg-amber-100 text-amber-800"
-                                )}>
-                                  {evaluation.timeDevianceFormatted}
-                                </span>
-                              )}
-                            </div>
-                          </div>
-
-                          {/* Visual Time Track */}
-                          <div className="relative w-full h-3 bg-slate-200/80 rounded-full overflow-hidden my-2.5">
-                            {/* Window zone [11:50, 13:40] */}
-                            <div 
-                              className="absolute top-0 bottom-0 bg-emerald-100/90 border-x border-emerald-400/40"
-                              style={{ 
-                                left: `${windowMinGaugePct}%`, 
-                                width: `${windowMaxGaugePct - windowMinGaugePct}%` 
-                              }}
-                              title="Ventana oficial reglamentaria: 11:50 - 13:40"
-                            />
-                            {/* Perfect line at 12:30 */}
-                            <div 
-                              className="absolute top-0 bottom-0 w-1 bg-indigo-600 z-10"
-                              style={{ left: `${optimalGaugePct}%` }}
-                              title="Tiempo óptimo exacto: 12:30"
-                            />
-                            {/* User's Cante Needle */}
-                            {hasCanto && (
-                              <div 
-                                className="absolute top-0 bottom-0 w-2.5 bg-slate-900 rounded-full shadow-md z-20 -ml-1.25 ring-2 ring-white"
-                                style={{ left: `${cantoGaugePct}%` }}
-                                title={`Tu tiempo registrado: ${lastCantoMins}m ${lastCantoSecs}s`}
-                              />
-                            )}
-                          </div>
-
-                          {/* Gauge scale markers */}
-                          <div className="flex justify-between text-[9px] font-bold text-slate-400 mt-1">
-                            <span>10:00 (Corto)</span>
-                            <span className="text-emerald-600 font-extrabold">11:50 Min</span>
-                            <span className="text-indigo-700 font-black">★ 12:30 Óptimo</span>
-                            <span className="text-emerald-600 font-extrabold">13:40 Max</span>
-                            <span>15:00 (Corte)</span>
-                          </div>
-                        </div>
-
-                        {/* DIAGNOSTIC BENCHMARK GRID (3 PILLARS) */}
-                        <div className="grid grid-cols-3 gap-2 p-3 bg-slate-50/80 rounded-2xl border border-slate-200/60 mb-3.5">
-                          {/* 1. Curva de Ebbinghaus */}
-                          <div className="flex flex-col items-center justify-center text-center p-1">
-                            <span className="text-[9px] font-bold uppercase tracking-wider text-slate-400 mb-0.5 flex items-center gap-0.5">
-                              <Brain size={10} className="text-cyan-600" />
-                              <span>Ebbinghaus</span>
-                            </span>
-                            <span className={cn(
-                              "text-xs font-black",
-                              evaluation.retentionPct >= 85 ? "text-emerald-700" :
-                              evaluation.retentionPct >= 70 ? "text-indigo-700" :
-                              evaluation.retentionPct >= 50 ? "text-amber-700" : "text-rose-600"
-                            )}>
-                              {evaluation.retentionPct}%
-                            </span>
-                            <span className="text-[8px] font-bold text-slate-400 mt-0.5 leading-tight" title={`Vida media: ${evaluation.memoryStabilityDays} días`}>
-                              {item.daysSinceCanto !== null ? `Cante: hace ${item.daysSinceCanto}d` : item.daysSinceTouch !== null ? `Hace ${item.daysSinceTouch}d` : "Sin datos"}
-                            </span>
-                          </div>
-
-                          {/* 2. Last Preparador Grade & Peak */}
-                          <div className="flex flex-col items-center justify-center text-center p-1 border-x border-slate-200/60">
-                            <span className="text-[9px] font-bold uppercase tracking-wider text-slate-400 mb-0.5 flex items-center gap-0.5">
-                              <Star size={10} className="text-amber-500" />
-                              <span>Nota Prep.</span>
-                            </span>
-                            <span className={cn(
-                              "text-xs font-black",
-                              lastGrade === null ? "text-slate-400" :
-                              lastGrade >= 8.5 ? "text-emerald-600" :
-                              lastGrade >= 7.0 ? "text-indigo-600" :
-                              lastGrade >= 5.0 ? "text-amber-600" : "text-rose-600"
-                            )}>
-                              {lastGrade !== null ? `${lastGrade.toFixed(1)}/10` : "Pendiente"}
-                            </span>
-                            <span className="text-[8px] font-bold text-slate-400 mt-0.5">
-                              {lastGrade !== null ? (lastGrade >= 8 ? "Sobresaliente" : lastGrade >= 7 ? "Notable" : lastGrade >= 5 ? "Aprobado" : "Suspenso") : "Sin examen"}
-                            </span>
-                          </div>
-
-                          {/* 3. Puntuación Cronómetro */}
-                          <div className="flex flex-col items-center justify-center text-center p-1">
-                            <span className="text-[9px] font-bold uppercase tracking-wider text-slate-400 mb-0.5 flex items-center gap-0.5">
-                              <Clock size={10} className="text-indigo-600" />
-                              <span>Ritmo Cante</span>
-                            </span>
-                            <span className={cn(
-                              "text-xs font-black",
-                              !hasCanto ? "text-slate-400" :
-                              evaluation.timeScore >= 9.0 ? "text-emerald-700" :
-                              evaluation.timeScore >= 7.5 ? "text-indigo-700" :
-                              evaluation.timeScore >= 5.0 ? "text-amber-700" : "text-rose-600"
-                            )}>
-                              {hasCanto ? `${evaluation.timeScore.toFixed(1)}/10` : "—"}
-                            </span>
-                            <span className="text-[8px] font-bold text-slate-400 mt-0.5">
-                              {hasCanto ? evaluation.timeDevianceFormatted : "Cronometrar"}
-                            </span>
-                          </div>
-                        </div>
-
-                        {/* ACTIONABLE EXECUTIVE ADVICE PILL (How to reach 10/10) */}
-                        <div className={cn(
-                          "p-3 rounded-xl border text-xs mb-3 flex items-start gap-2",
-                          evaluation.overallScore >= 8.5 ? "bg-emerald-50/70 border-emerald-200/60 text-emerald-950" :
-                          evaluation.overallScore >= 7.0 ? "bg-indigo-50/70 border-indigo-200/60 text-indigo-950" :
-                          evaluation.overallScore >= 5.0 ? "bg-amber-50/70 border-amber-200/60 text-amber-950" :
-                          "bg-rose-50/70 border-rose-200/60 text-rose-950"
-                        )}>
-                          <Sparkles size={14} className="shrink-0 mt-0.5 text-indigo-600" />
-                          <div className="leading-relaxed">
-                            <strong className="font-black mr-1">Plan para el 10:</strong>
-                            <span>{evaluation.actionPlan}</span>
-                          </div>
-                        </div>
-                      </div>
-
-                      {/* ACTION BUTTONS ROW */}
-                      <div className="pt-2 border-t border-slate-100">
-                        {/* Registrar Feedback del Preparador / Cante Manual */}
-                        <button
-                          onClick={() => {
-                            setFeedbackTopic(topic);
-                            setPrepGrade(lastGrade || 7.5);
-                            setPrepMinutes(lastCantoMins || 12);
-                            setPrepSeconds(lastCantoSecs || 30);
-                          }}
-                          className="w-full px-3.5 py-2.5 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold transition-all shadow-sm flex items-center justify-center gap-2 active:scale-95"
-                        >
-                          <Star size={13} className="text-amber-400" />
-                          <span>Registrar Cante / Nota Preparador</span>
-                        </button>
-                      </div>
-                    </motion.div>
-                  );
-                })}
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3.5 sm:gap-4">
+                {sortedTopicsAnalysis.map((item) => (
+                  <PreparadorTopicCard
+                    key={item.topic.id}
+                    topic={item.topic}
+                    subject={item.subject}
+                    evaluation={item.evaluation}
+                    hasCanto={item.hasCanto}
+                    lastCantoMins={item.lastCantoMins}
+                    lastCantoSecs={item.lastCantoSecs}
+                    lastGrade={item.lastGrade}
+                    daysSinceTouch={item.daysSinceTouch}
+                    vueltas={item.vueltas}
+                    reviewsCount={item.reviewsCount}
+                    onRemove={handleRemoveTopic}
+                    onOpenFeedback={(topic) => {
+                      setFeedbackTopic(topic);
+                      setPrepGrade(item.lastGrade ?? 7.5);
+                      setPrepMinutes(item.lastCantoMins > 0 ? item.lastCantoMins : 12);
+                      setPrepSeconds(item.lastCantoSecs >= 0 ? item.lastCantoSecs : 30);
+                    }}
+                  />
+                ))}
               </div>
             )}
           </div>
@@ -1200,124 +920,16 @@ export function PreparadorView() {
       </AnimatePresence>
 
       {/* RECORD PREPARADOR FEEDBACK MODAL */}
-      <AnimatePresence>
-        {feedbackTopic && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-md">
-            <motion.div
-              initial={{ opacity: 0, scale: 0.95, y: 15 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.95, y: 15 }}
-              className="bg-white rounded-3xl max-w-lg w-full p-6 sm:p-8 flex flex-col shadow-2xl border border-slate-200/80 relative overflow-hidden"
-            >
-              <button
-                onClick={() => setFeedbackTopic(null)}
-                className="absolute top-5 right-5 p-1.5 text-slate-400 hover:text-slate-600 rounded-xl hover:bg-slate-100"
-              >
-                <X size={18} />
-              </button>
-
-              <div className="mb-5">
-                <span className="text-[10px] font-black uppercase tracking-wider px-3 py-1 bg-amber-50 text-amber-800 rounded-full border border-amber-200">
-                  Feedback Oficial del Preparador
-                </span>
-                <h3 className="text-xl font-black font-serif text-slate-900 mt-2">
-                  Tema {feedbackTopic.number}: {feedbackTopic.title}
-                </h3>
-                <p className="text-xs text-slate-500 mt-1">
-                  Introduce la nota oficial y observaciones que te dio el preparador en tu sesión de cante.
-                </p>
-              </div>
-
-              <div className="space-y-4">
-                {/* Nota del preparador */}
-                <div className="bg-slate-50 p-4 rounded-2xl border border-slate-200/60">
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="text-xs font-bold text-slate-700">Nota del Preparador (0 - 10):</span>
-                    <span className="text-lg font-black text-amber-600">{prepGrade.toFixed(2)}</span>
-                  </div>
-                  <input
-                    type="range"
-                    min="1"
-                    max="10"
-                    step="0.25"
-                    value={prepGrade}
-                    onChange={(e) => setPrepGrade(parseFloat(e.target.value))}
-                    className="w-full accent-amber-500"
-                  />
-                  <div className="flex justify-between text-[10px] text-slate-400 font-bold mt-1">
-                    <span>1 (Suspenso)</span>
-                    <span>5 (Aprobado)</span>
-                    <span>7 (Notable)</span>
-                    <span>10 (Sobresaliente)</span>
-                  </div>
-                </div>
-
-                {/* Tiempo cantado */}
-                <div className="bg-slate-50 p-4 rounded-2xl border border-slate-200/60">
-                  <span className="text-xs font-bold text-slate-700 block mb-2">
-                    Tiempo de Cante con el Preparador:
-                  </span>
-                  <div className="flex items-center gap-3">
-                    <div className="flex-1">
-                      <label className="text-[10px] font-bold text-slate-400 block mb-1 uppercase">Minutos</label>
-                      <input
-                        type="number"
-                        min="0"
-                        max="30"
-                        value={prepMinutes}
-                        onChange={(e) => setPrepMinutes(parseInt(e.target.value) || 0)}
-                        className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl text-sm font-bold text-slate-800"
-                      />
-                    </div>
-                    <div className="flex-1">
-                      <label className="text-[10px] font-bold text-slate-400 block mb-1 uppercase">Segundos</label>
-                      <input
-                        type="number"
-                        min="0"
-                        max="59"
-                        value={prepSeconds}
-                        onChange={(e) => setPrepSeconds(parseInt(e.target.value) || 0)}
-                        className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl text-sm font-bold text-slate-800"
-                      />
-                    </div>
-                  </div>
-                  <div className="text-[10px] text-slate-400 font-medium mt-2 flex items-center justify-between">
-                    <span>Meta óptima: 12m 30s.</span>
-                    <span className="text-indigo-600 font-bold">Ventana: 11:50 - 13:40</span>
-                  </div>
-                </div>
-
-                {/* Comentarios del preparador */}
-                <div>
-                  <label className="text-xs font-bold text-slate-700 block mb-1">
-                    Consejos y Correcciones del Preparador:
-                  </label>
-                  <textarea
-                    rows={3}
-                    value={prepNotes}
-                    onChange={(e) => setPrepNotes(e.target.value)}
-                    placeholder="Ej: Faltó hilar el art. 53.2 de la CE, buena dicción y postura, recortar epígrafe 3 para entrar en 12:30 minutos..."
-                    className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-slate-900/10 text-slate-800"
-                  />
-                </div>
-
-                {/* Botón guardar con protección anti-doble envío */}
-                <button
-                  onClick={handleSavePreparadorFeedback}
-                  disabled={isSavingFeedback}
-                  className={cn(
-                    "w-full py-3 bg-slate-900 hover:bg-slate-800 text-white rounded-2xl text-xs font-black shadow-md transition-all flex items-center justify-center gap-2 active:scale-95",
-                    isSavingFeedback && "opacity-60 cursor-not-allowed pointer-events-none"
-                  )}
-                >
-                  <Save size={14} className={cn(isSavingFeedback && "animate-spin")} />
-                  <span>{isSavingFeedback ? "Guardando Evaluación..." : "Guardar Evaluación del Preparador"}</span>
-                </button>
-              </div>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
+      <PreparadorQuickFeedbackModal
+        topic={feedbackTopic}
+        isOpen={Boolean(feedbackTopic)}
+        onClose={() => setFeedbackTopic(null)}
+        onSave={handleSavePreparadorFeedback}
+        initialGrade={prepGrade}
+        initialMinutes={prepMinutes}
+        initialSeconds={prepSeconds}
+        isSaving={isSavingFeedback}
+      />
     </div>
   );
 }
