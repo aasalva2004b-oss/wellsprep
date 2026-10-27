@@ -52,6 +52,17 @@ let memoryEvents: WebhookSyncRecord[] = [];
  * Returns safe file path for event storage across environments (Local Node vs Vercel Serverless)
  */
 export function getWebhookEventsFilePath(): string {
+  // En entornos serverless como Vercel o AWS Lambda, process.cwd() es de solo lectura. Usar /tmp directamente.
+  const isServerless = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME || process.env.NOW_REGION);
+  if (isServerless) {
+    const fallback = path.join('/tmp', 'aerofocus_events.json');
+    try {
+      const dir = path.dirname(fallback);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    } catch {}
+    return fallback;
+  }
+
   try {
     const primary = path.join(process.cwd(), 'uploads', 'aerofocus_events.json');
     const dir = path.dirname(primary);

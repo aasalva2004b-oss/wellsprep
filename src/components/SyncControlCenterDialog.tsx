@@ -272,11 +272,23 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
         })
       });
 
-      const data = await res.json();
-      if (res.ok && data.success) {
+      let data: any = {};
+      const contentType = res.headers.get("content-type") || "";
+      if (contentType.includes("application/json")) {
+        data = await res.json();
+      } else {
+        const text = await res.text();
+        try {
+          data = JSON.parse(text);
+        } catch {
+          data = { error: text || `Error HTTP ${res.status}` };
+        }
+      }
+
+      if (res.ok && (data.success || data.status === 'ok')) {
         toast.success("✅ Enlace operativo AeroFocus Pro <-> WellsPrep. La pasarela está lista para recibir tus transmisiones de estudio reales sin generar datos ficticios.");
       } else {
-        toast.error("Fallo de enlace: " + (data.error || "Respuesta no autorizada"));
+        toast.error("Fallo de enlace: " + (data.error || data.message || "Respuesta no autorizada"));
       }
     } catch (e: any) {
       toast.error("Error al comprobar enlace: " + (e?.message || "Error de red"));
