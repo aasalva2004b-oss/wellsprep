@@ -9,7 +9,7 @@ import { DashboardView } from "./components/DashboardView";
 import { PreparadorView } from "./components/PreparadorView";
 import { signOut } from "./lib/firebase";
 import { useFirebase } from "./lib/FirebaseProvider";
-import { Toaster } from "sonner";
+import { Toaster, toast } from "sonner";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { SyncControlCenterDialog } from "./components/SyncControlCenterDialog";
 import { CommandPalette } from "./components/CommandPalette";
@@ -17,6 +17,7 @@ import { playSound } from "./lib/sound";
 import { Topic } from "./types";
 import { initialTopics } from "./data/initialData";
 import { motion, AnimatePresence } from "motion/react";
+import { useAeroFocusSync } from "./hooks/useAeroFocusSync";
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<"dashboard" | "temario" | "preparador">("temario");
@@ -24,7 +25,25 @@ export default function App() {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isSyncCenterOpen, setIsSyncCenterOpen] = useState(false);
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
-  const { user, quarantinedEvents = [] } = useFirebase();
+  const { user, quarantinedEvents = [], addQuarantineEventManually } = useFirebase();
+
+  // Escucha universal en tiempo real de AeroFocus Pro (BroadcastChannel + Heartbeat 15s)
+  useAeroFocusSync(async (session) => {
+    if (!session) return;
+    try {
+      const payload = session.payload || session;
+      const success = await addQuarantineEventManually(payload);
+      if (success) {
+        playSound.success();
+        const flightId = payload.flightId || payload.transactionId || "Touchdown";
+        toast.success(`🛬 Vuelo sincronizado desde AeroFocus Pro (#${flightId})`, {
+          description: "La sesión ha aterrizado en tu Bandeja de Cuarentena para validar y calificar dificultad.",
+        });
+      }
+    } catch (err) {
+      console.warn("Aviso en auto-recepción AeroFocus:", err);
+    }
+  });
 
   // Global keyboard shortcut for Command Palette Spotlight (Cmd+K / Ctrl+K)
   useEffect(() => {

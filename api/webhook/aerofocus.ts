@@ -1,7 +1,8 @@
 import { 
   corsHeaders, 
   isAuthorizedWebhookRequest, 
-  processIncomingAeroFocusPayload 
+  processIncomingAeroFocusPayload,
+  getWebhookHealthOrSessions
 } from '../../src/lib/webhookStorage';
 
 export default async function handler(req: any, res: any) {
@@ -14,9 +15,9 @@ export default async function handler(req: any, res: any) {
     return res.status(204).end();
   }
 
-  // Health check (GET)
+  // GET: Consultar sesiones pendientes para el Dashboard o Frontend
   if (req.method === 'GET') {
-    return res.status(200).json({ status: 'ok', service: 'wellsprep_aerofocus_webhook', ready: true });
+    return res.status(200).json(getWebhookHealthOrSessions());
   }
 
   if (req.method !== 'POST') {

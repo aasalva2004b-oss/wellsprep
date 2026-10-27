@@ -32,7 +32,8 @@ import { Topic } from "../types";
 import { TopicProgressData } from "./prediction";
 import { WebhookSyncRecord, WebhookResolvedTopic } from "./webhookTypes";
 import { isCantoSession, getCantoDuration, sessionMatchesTopic } from "./cantoUtils";
-import { resolveAeroFocusTopic } from "./topicResolver";
+import { resolveAeroFocusTopic, extractMinutesFromAeroItem } from "./topicResolver";
+import { parseAeroFocusInput } from "./aeroFocusParser";
 
 export function cleanForFirestore<T>(data: T): T {
   if (data === null || data === undefined) {
@@ -267,7 +268,13 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
           (s.topicId === "constitucional-5" || s.topicId === "5") &&
           Number(s.cantoGrade) === 8.5 && Number(s.cantoSeconds) === 30;
 
-        if (isPhantomAero || isPhantomDirect) {
+        // Auto-prune phantom 1-minute AeroFocus sessions (pings/distraction artifacts)
+        const isPhantomOneMin =
+          (s.source === "aerofocus" || s.source === "aerofocus_pro" || s.source === "aerofocus_approved") &&
+          (Number(s.durationMinutes || s.durationReal || 0) <= 1) &&
+          !s.cantoGrade && Number(s.cantoGrade || 0) === 0;
+
+        if (isPhantomAero || isPhantomDirect || isPhantomOneMin) {
           deleteDoc(doc(db, `users/${user.uid}/sessions`, docSnap.id)).catch(() => {});
           return;
         }
@@ -944,11 +951,26 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
   const reconcileAllTopicsAndSessions = async (): Promise<{ updatedTopicsCount: number; totalSessionsCount: number }> => {
     if (!user) return { updatedTopicsCount: 0, totalSessionsCount: 0 };
     try {
+      // 1. Ejecución interna y automática de correcciones (limpieza de cante fantasma, migración penal y deduplicación)
+      try {
+        await purgePhantomTema5Cante();
+        await deduplicateUserSessions(true);
+      } catch (maintErr) {
+        console.warn("Aviso en mantenimiento interno de reconciliación:", maintErr);
+      }
+
       const sessionsSnap = await getDocs(collection(db, `users/${user.uid}/sessions`));
       const topicSessionsMap: Record<string, any[]> = {};
 
       sessionsSnap.forEach((docSnap) => {
         const s = { id: docSnap.id, ...docSnap.data() } as any;
+
+        // Purgar artefactos de tests automatizados si los hubiera
+        if (s.id === "test_curl_1" || s.source === "test_curl" || s.flightId === "test_flight_1") {
+          deleteDoc(doc(db, `users/${user.uid}/sessions`, docSnap.id)).catch(() => {});
+          return;
+        }
+
         let tId = s.topicId;
         if (tId === "5" || tId === 5) {
           tId = "constitucional-5";
@@ -1722,6 +1744,18 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
         const grade = typeof data.cantoGrade === "number" ? data.cantoGrade : (typeof data.grade === "number" ? data.grade : null);
         const isCante = isCantoSession(data);
 
+        // Si es una sesión fantasma de 1 minuto o menos procedente de AeroFocus sin nota de cante
+        const isAeroGhostOneMin =
+          (data.source === "aerofocus" || data.source === "aerofocus_pro" || data.source === "aerofocus_approved") &&
+          durMin <= 1 &&
+          grade === null;
+
+        if (isAeroGhostOneMin) {
+          toDeleteDocIds.push(d.id);
+          affectedTopics.add(topicId);
+          return;
+        }
+
         // Clave de firma unívoca para detectar duplicados (mismo tema, misma fecha, misma duración y nota)
         const dedupKey = isCante
           ? `${topicId}__${date}__canto__${durMin}m_${durSec}s__${grade !== null ? grade.toFixed(1) : "nograde"}`
@@ -2024,6 +2058,23 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
       setIsLoadingQuarantine(true);
       const combined = new Map<string, WebhookSyncRecord>();
 
+      // Detector de artefactos de prueba antiguos para mantener la bandeja estrictamente limpia
+      const isTestArtifact = (rec: any) => {
+        if (!rec) return true;
+        const idStr = String(rec.id || "");
+        const flightStr = String(rec.flightId || "");
+        const sourceStr = String(rec.source || "");
+        return (
+          idStr === "test_curl_1" ||
+          idStr.startsWith("test_") ||
+          idStr.includes("curl") ||
+          flightStr.startsWith("test_") ||
+          sourceStr.includes("curl") ||
+          rec.isTest === true ||
+          (rec.date === "2026-10-21" && Array.isArray(rec.topics) && rec.topics.some((t: any) => t.resolvedTopicId === "constitucional-1" && idStr.includes("test")))
+        );
+      };
+
       // 1. Intentar servidor HTTP local / Vercel
       try {
         const res = await fetch("/api/webhook/events");
@@ -2033,6 +2084,7 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
             const data = JSON.parse(text);
             const serverEvents: WebhookSyncRecord[] = data.events || [];
             serverEvents.forEach((e) => {
+              if (isTestArtifact(e)) return;
               combined.set(e.id, e);
               if (user && (e.status === "quarantined" || e.status === "pending")) {
                 setDoc(doc(db, `users/${user.uid}/quarantine`, e.id), cleanForFirestore(e), { merge: true }).catch(() => {});
@@ -2050,6 +2102,10 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
           const qSnap = await getDocs(collection(db, `users/${user.uid}/quarantine`));
           qSnap.forEach((docSnap) => {
             const record = { id: docSnap.id, ...docSnap.data() } as WebhookSyncRecord;
+            if (isTestArtifact(record)) {
+              deleteDoc(doc(db, `users/${user.uid}/quarantine`, docSnap.id)).catch(() => {});
+              return;
+            }
             combined.set(record.id, record);
           });
         } catch (fErr) {
@@ -2071,12 +2127,19 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
   }, [user]);
 
   // Importación e inserción manual de transmisiones de AeroFocus a la Bandeja de Cuarentena
-  const addQuarantineEventManually = useCallback(async (rawPayload: any): Promise<boolean> => {
+  const addQuarantineEventManually = useCallback(async (rawInput: any): Promise<boolean> => {
     if (!user) {
       toast.error("Debes iniciar sesión para importar sesiones.");
       return false;
     }
     try {
+      const parsedRes = parseAeroFocusInput(rawInput);
+      if (!parsedRes.success || !parsedRes.payload) {
+        toast.error(parsedRes.error || "No se pudo interpretar el formato de AeroFocus.");
+        return false;
+      }
+
+      const rawPayload = parsedRes.payload;
       let rawTopics: any[] = [];
       if (Array.isArray(rawPayload)) {
         rawTopics = rawPayload;
@@ -2096,11 +2159,46 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
       }
 
       const resolvedTopics: WebhookResolvedTopic[] = [];
-      for (const t of rawTopics) {
+
+      // Filtrar temas que sean meras marcas de distracción o pausa
+      const filteredRawTopics = rawTopics.filter(t => {
+        const mod = String(t.modalidad || t.modality || t.type || '').toLowerCase();
+        if (mod === 'distraction' || mod === 'distraccion' || mod === 'pausa' || mod === 'break' || mod === 'descanso') {
+          return false;
+        }
+        const title = String(t.tema || t.topic || t.topicTitle || '').toLowerCase();
+        if (title.includes('distracci') || title.includes('pausa') || title.includes('descanso')) {
+          return false;
+        }
+        return true;
+      });
+
+      const totalFlightMins = Number(
+        rawPayload.minutosEfectivos ??
+        rawPayload.totalEffectiveStudyMinutes ??
+        rawPayload.effectiveMinutes ??
+        rawPayload.dailyTotalEffectiveMinutes ??
+        rawPayload.totalFlightEffectiveMinutes ??
+        (rawPayload.dailyTotalEffectiveHours ? rawPayload.dailyTotalEffectiveHours * 60 : 0)
+      ) || 0;
+
+      const topicsCount = filteredRawTopics.length || 1;
+      const distributedFallbackMins = totalFlightMins > 0 ? Math.max(15, Math.round(totalFlightMins / topicsCount)) : 45;
+
+      for (const t of filteredRawTopics) {
         const materia = t.materia || t.subject || t.subjectName || t.category || rawPayload.materia || rawPayload.subject || "Constitucional";
         const modalidad = t.modalidad || t.modality || t.type || rawPayload.modalidad || rawPayload.modality || "repaso";
-        const horas = Number(t.horasEfectivas ?? t.effectiveHours ?? (t.effectiveMinutes ? Number(t.effectiveMinutes) / 60 : 0)) || 0;
-        const minutos = Number(t.minutosEfectivos ?? t.effectiveMinutes ?? Math.round(horas * 60)) || 0;
+        
+        // Extracción precisa de los minutos del tema
+        const directMins = extractMinutesFromAeroItem(t, 0);
+        const minutos = directMins > 0 ? directMins : distributedFallbackMins;
+        const horas = Math.round((minutos / 60) * 100) / 100;
+
+        // Descartar sesiones fantasmas de 1 minuto procedentes de pings o clics accidentales
+        if (minutos <= 1 && !t.cantoGrade && !t.grade) {
+          continue;
+        }
+
         const startPage = t.startPage ?? t.pages?.pageStart ?? null;
         const endPage = t.endPage ?? t.pages?.pageEnd ?? null;
         const pagesCount = t.pagesCount ?? t.pages?.pagesCount ?? (startPage != null && endPage != null ? Math.max(0, endPage - startPage + 1) : 0);
@@ -2128,6 +2226,8 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
         if (resolved) {
           resolvedTopics.push({
             ...resolved,
+            effectiveMinutes: minutos,
+            effectiveHours: horas,
             startPage: startPage !== null ? Number(startPage) : resolved.startPage,
             endPage: endPage !== null ? Number(endPage) : resolved.endPage,
             pagesCount: pagesCount || resolved.pagesCount,
@@ -2141,8 +2241,8 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
             resolvedSubjectId: "general",
             resolvedTopicNumber: Number(t.topicNumber || t.temaNumero || 0),
             resolvedTopicTitle: t.topicTitle || t.tema || t.topic || t.title || `Tema ${t.topicNumber || ""}`,
-            effectiveMinutes: minutos || 30,
-            effectiveHours: horas || 0.5,
+            effectiveMinutes: minutos,
+            effectiveHours: horas,
             modality: (modalidad as any) || "repaso",
             startPage: startPage !== null ? Number(startPage) : undefined,
             endPage: endPage !== null ? Number(endPage) : undefined,
@@ -2196,16 +2296,6 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
       const qDocRef = doc(db, `users/${user.uid}/quarantine`, record.id);
       await setDoc(qDocRef, cleanForFirestore(record));
 
-      // Guardar también en el servidor local si está conectado
-      fetch("/api/webhook/aerofocus", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${webhookToken || "wp_qLXi6WFkFY_live"}`
-        },
-        body: JSON.stringify({ ...rawPayload, topics: resolvedTopics })
-      }).catch(() => {});
-
       setQuarantinedEvents(prev => [record, ...prev.filter(e => e.id !== record.id)]);
       toast.success("¡Transmisión de AeroFocus incorporada a la Bandeja de Cuarentena!");
       return true;
@@ -2249,6 +2339,12 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
         const isLastForTopic = countSoFar === totalCount;
 
         const durationMins = topic.effectiveMinutes || Math.round((topic.effectiveHours || 0) * 60) || 60;
+        
+        // Descartar sesiones fantasmas de 1 minuto procedentes de pings o distracciones en la aprobación
+        if (durationMins <= 1 && !topic.cantoGrade && Number(topic.cantoGrade || 0) === 0) {
+          continue;
+        }
+
         const modalityType = topic.modality === 'primer_estudio'
           ? 'estudio_inicial'
           : (topic.modality === 'refresco' ? 'refresco' : (topic.modality === 'canto' ? 'canto' : 'repaso'));
@@ -2438,15 +2534,33 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
     toast.success(`Repasos unificados: ${mergedTopic.resolvedTopicTitle} (${combinedMins} min)`);
   }, [quarantinedEvents, updateQuarantineEvent]);
 
-  // Conexión reactiva en tiempo real (SSE) y polling constante de seguridad para transmisiones de AeroFocus
+  // Conexión reactiva en tiempo real (SSE + BroadcastChannel + Polling adaptativo)
   useEffect(() => {
     let sse: EventSource | null = null;
+    let channel: BroadcastChannel | null = null;
+
+    // 1. Canal entre pestañas / ventanas locales
+    try {
+      if (typeof window !== "undefined" && "BroadcastChannel" in window) {
+        channel = new BroadcastChannel("wellsprep_sync_bus");
+        channel.onmessage = async (event) => {
+          if (event.data?.type === "AEROFOCUS_TOUCHDOWN_SYNC" && event.data?.payload) {
+            toast.info("✈️ Vuelo de AeroFocus recibido por canal en vivo.");
+            await addQuarantineEventManually(event.data.payload);
+            await fetchQuarantinedEvents();
+          }
+        };
+      }
+    } catch {}
+
+    // 2. Conexión reactiva Server-Sent Events (SSE)
     try {
       if (typeof window !== "undefined" && typeof EventSource !== "undefined") {
         sse = new EventSource("/api/webhook/stream");
         sse.onmessage = (msg) => {
           try {
             const data = JSON.parse(msg.data);
+            if (data?.type === "ping") return;
             if (data && (data.id || data.type === "quarantine_updated" || data.status === "quarantined")) {
               fetchQuarantinedEvents();
               if (data.id && data.status === "quarantined") {
@@ -2460,16 +2574,17 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
       console.warn("SSE no disponible en este entorno, operando con polling reactivo:", err);
     }
 
-    // Polling regular cada 7 segundos para garantizar actualización sin recarga
+    // 3. Polling de respaldo cada 6 segundos
     const pollTimer = setInterval(() => {
       fetchQuarantinedEvents();
-    }, 7000);
+    }, 6000);
 
     return () => {
       if (sse) sse.close();
+      if (channel) channel.close();
       clearInterval(pollTimer);
     };
-  }, [fetchQuarantinedEvents]);
+  }, [fetchQuarantinedEvents, addQuarantineEventManually]);
 
   // Mantener syncPendingWebhookEvents para compatibilidad sin auto-forzado
   const syncPendingWebhookEvents = useCallback(async (force: boolean = false) => {

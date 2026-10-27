@@ -28,7 +28,9 @@ import {
   BarChart2,
   SlidersHorizontal,
   BookmarkCheck,
+  Zap,
 } from "lucide-react";
+import { toast } from "sonner";
 import { cn, formatDecimalHours, formatCleanStudyHours, safeParseDate, getLocalDateString } from "../lib/utils";
 import { calculateEstimatedReviewTime } from "../lib/repasoPredictor";
 import { TopicEditorDialog } from "./TopicEditorDialog";
@@ -48,7 +50,7 @@ import { buildSubjectTelemetryIndex, FastTopicTelemetry } from "../lib/performan
 import { playSound } from "../lib/sound";
 
 export function TemarioView() {
-  const { userProgress, user, userSettings, recentSessions = [] } = useFirebase();
+  const { userProgress, user, userSettings, recentSessions = [], addStudySession } = useFirebase();
   const activeSubjectsIds = userSettings?.activeSubjects || initialSubjects.map(s => s.id);
   const activeSubjects = initialSubjects.filter(s => activeSubjectsIds.includes(s.id));
   const [selectedSubjectId, setSelectedSubjectId] = useState<string>(
@@ -216,6 +218,8 @@ export function TemarioView() {
   const subjectStats = useMemo(() => {
     let pending = 0;
     let studying = 0;
+    let vuelta1 = 0;
+    let vueltas2Plus = 0;
     let withVueltas = 0;
     let totalHours = 0;
     let dueToday = 0;
@@ -256,7 +260,11 @@ export function TemarioView() {
         totalHours += prog.studyTimeHours;
       }
 
-      if (vueltas > 0) {
+      if (vueltas >= 2) {
+        vueltas2Plus++;
+        withVueltas++;
+      } else if (vueltas === 1) {
+        vuelta1++;
         withVueltas++;
       } else if (hasStarted) {
         studying++;
@@ -277,17 +285,27 @@ export function TemarioView() {
     const studiedCount = withVueltas + studying;
     const percentage = total > 0 ? Math.round((studiedCount / total) * 100) : 0;
     const vueltasPercentage = total > 0 ? Math.round((withVueltas / total) * 100) : 0;
+    const vueltas2PlusPercentage = total > 0 ? Math.round((vueltas2Plus / total) * 100) : 0;
+    const vuelta1Percentage = total > 0 ? Math.round((vuelta1 / total) * 100) : 0;
+    const studyingPercentage = total > 0 ? Math.round((studying / total) * 100) : 0;
 
     return {
       total,
       studiedCount,
       withVueltas,
+      vuelta1,
+      vueltas2Plus,
       studying,
       pending,
       totalHours: Math.round(totalHours * 10) / 10,
       dueToday,
+      enRefrescos,
+      listosCanto,
       percentage,
-      vueltasPercentage
+      vueltasPercentage,
+      vueltas2PlusPercentage,
+      vuelta1Percentage,
+      studyingPercentage
     };
   }, [selectedSubjectId, userProgress, recentSessions]);
 
@@ -295,6 +313,80 @@ export function TemarioView() {
   const telemetryIndex = useMemo(() => {
     return buildSubjectTelemetryIndex(subjectTopics, userProgress, recentSessions);
   }, [subjectTopics, userProgress, recentSessions]);
+
+  // Quick 1-click review action (+1 Vuelta) directly from Card or Row
+  const handleQuickReview = async (topic: Topic, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!user) return;
+    const topicId = topic.id;
+    const prog = userProgress[topicId];
+    const telemetry = telemetryIndex.get(topicId);
+    const estimatedMins = telemetry?.reviewEstimate?.predictedMinutes || 45;
+
+    try {
+      playSound.click();
+      const currentVueltas = prog?.vueltas || 0;
+      const newVueltas = currentVueltas + 1;
+      await addStudySession({
+        topicId,
+        date: getLocalDateString(),
+        type: "repaso",
+        durationMinutes: estimatedMins,
+        difficulty: prog?.difficulty || topic.difficulty || 4,
+        completesVuelta: true,
+        notes: `Repaso rápido oficial (+1 Vuelta). Estimado: ${estimatedMins} min.`,
+      });
+      playSound.success();
+      toast.success(`🎉 ¡Vuelta ${newVueltas} consolidada!`, {
+        description: `${topic.title} · Próximo repaso programado en 30 días.`,
+      });
+    } catch (err: any) {
+      toast.error("Error al registrar vuelta: " + (err?.message || err));
+    }
+  };
+
+  // Apple-grade keyboard navigation in Temario (ArrowLeft/ArrowRight to switch blocks, / to search)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement;
+      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) {
+        if (e.key === "Escape") {
+          (target as HTMLInputElement).blur();
+          setSearchQuery("");
+        }
+        return;
+      }
+
+      if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        playSound.click();
+        const currentIdx = activeSubjects.findIndex(s => s.id === selectedSubjectId);
+        if (currentIdx > 0) {
+          setSelectedSubjectId(activeSubjects[currentIdx - 1].id);
+        } else if (activeSubjects.length > 0) {
+          setSelectedSubjectId(activeSubjects[activeSubjects.length - 1].id);
+        }
+      } else if (e.key === "ArrowRight") {
+        e.preventDefault();
+        playSound.click();
+        const currentIdx = activeSubjects.findIndex(s => s.id === selectedSubjectId);
+        if (currentIdx < activeSubjects.length - 1) {
+          setSelectedSubjectId(activeSubjects[currentIdx + 1].id);
+        } else if (activeSubjects.length > 0) {
+          setSelectedSubjectId(activeSubjects[0].id);
+        }
+      } else if (e.key === "/" && !e.metaKey && !e.ctrlKey) {
+        e.preventDefault();
+        const searchInput = document.getElementById("temario-search-input") as HTMLInputElement;
+        if (searchInput) {
+          searchInput.focus();
+        }
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [activeSubjects, selectedSubjectId]);
 
   return (
     <div className="flex flex-col h-full bg-[#F5F5F7] relative pb-20 md:pb-0 overflow-hidden">
@@ -375,19 +467,45 @@ export function TemarioView() {
               </div>
 
               {/* Multi-layered Apple Progress Bar */}
-              <div className="h-2 w-full bg-slate-200/70 rounded-full overflow-hidden flex shadow-inner">
-                {/* Vueltas completadas (dark indigo) */}
+              <div className="h-2.5 w-full bg-slate-200/70 rounded-full overflow-hidden flex shadow-inner">
+                {/* 2+ Vueltas completadas (dark indigo) */}
                 <div 
-                  className="bg-indigo-600 h-full transition-all duration-700 ease-out relative"
-                  style={{ width: `${subjectStats.vueltasPercentage}%` }}
-                  title={`${subjectStats.withVueltas} temas con al menos 1 vuelta completa`}
+                  className="bg-indigo-700 h-full transition-all duration-700 ease-out relative"
+                  style={{ width: `${subjectStats.vueltas2PlusPercentage}%` }}
+                  title={`${subjectStats.vueltas2Plus} temas con 2 o más vueltas consolidadas`}
                 />
-                {/* En proceso (light indigo) */}
+                {/* 1ª Vuelta completada (vibrant indigo) */}
+                <div 
+                  className="bg-indigo-500 h-full transition-all duration-700 ease-out relative"
+                  style={{ width: `${subjectStats.vuelta1Percentage}%` }}
+                  title={`${subjectStats.vuelta1} temas con 1ª vuelta completa`}
+                />
+                {/* En proceso / refrescos (light indigo) */}
                 <div 
                   className="bg-indigo-300 h-full transition-all duration-700 ease-out"
-                  style={{ width: `${Math.max(0, subjectStats.percentage - subjectStats.vueltasPercentage)}%` }}
-                  title={`${subjectStats.studying} temas en primera vuelta`}
+                  style={{ width: `${subjectStats.studyingPercentage}%` }}
+                  title={`${subjectStats.studying} temas en estudio inicial o refrescos`}
                 />
+              </div>
+
+              {/* Progress Bar Micro-Legend */}
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-slate-500 font-medium mt-1.5">
+                <span className="flex items-center gap-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-indigo-700"></span>
+                  <span className="font-bold text-slate-700">2ª+ V</span>: {subjectStats.vueltas2Plus}
+                </span>
+                <span className="flex items-center gap-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-indigo-500"></span>
+                  <span className="font-bold text-slate-700">1ª V</span>: {subjectStats.vuelta1}
+                </span>
+                <span className="flex items-center gap-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-indigo-300"></span>
+                  <span className="font-bold text-slate-700">En curso</span>: {subjectStats.studying}
+                </span>
+                <span className="flex items-center gap-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-slate-300"></span>
+                  <span className="text-slate-400">Pend</span>: {subjectStats.pending}
+                </span>
               </div>
             </div>
 
@@ -437,7 +555,7 @@ export function TemarioView() {
           </div>
         </div>
 
-        {/* APPLE SEGMENTED SUBJECT TABS */}
+        {/* APPLE SEGMENTED SUBJECT TABS WITH SPRING SLIDER */}
         <div className="relative -mx-4 px-4 md:-mx-8 md:px-8 mb-3">
           <div className="flex overflow-x-auto pb-1 gap-2 snap-x no-scrollbar container-snap">
             {activeSubjects.map((subject, sIdx) => {
@@ -448,18 +566,28 @@ export function TemarioView() {
               return (
                 <button
                   key={subjectKey}
-                  onClick={() => setSelectedSubjectId(subject.id)}
+                  onClick={() => {
+                    playSound.click();
+                    setSelectedSubjectId(subject.id);
+                  }}
                   className={cn(
-                    "whitespace-nowrap px-3.5 py-2 rounded-xl text-xs font-bold transition-all snap-start flex items-center gap-2 active:scale-95 shrink-0 border",
+                    "whitespace-nowrap px-4 py-2 rounded-xl text-xs font-bold transition-all snap-start flex items-center gap-2 active:scale-95 shrink-0 border relative",
                     isSelected
-                      ? "bg-slate-900 text-white border-slate-900 shadow-sm shadow-slate-900/20"
+                      ? "text-white shadow-sm border-slate-900"
                       : "bg-white/90 text-slate-600 border-slate-200/80 hover:bg-white hover:text-slate-900 hover:border-slate-300"
                   )}
                 >
-                  <span>{subject.name}</span>
+                  {isSelected && (
+                    <motion.div
+                      layoutId="activeSubjectSlider"
+                      className="absolute inset-0 bg-slate-900 rounded-xl -z-0"
+                      transition={{ type: "spring", stiffness: 450, damping: 35 }}
+                    />
+                  )}
+                  <span className="relative z-10">{subject.name}</span>
                   <span
                     className={cn(
-                      "text-[10px] px-1.5 py-0.5 rounded-md font-black leading-none",
+                      "relative z-10 text-[10px] px-1.5 py-0.5 rounded-md font-black leading-none",
                       isSelected
                         ? "bg-white/20 text-white"
                         : "bg-slate-100 text-slate-500"
@@ -481,12 +609,18 @@ export function TemarioView() {
               <Search className="h-4 w-4 text-slate-400" />
             </div>
             <input
+              id="temario-search-input"
               type="text"
-              className="block w-full pl-9 pr-9 py-2 rounded-xl border border-slate-200/80 bg-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-900/10 focus:border-slate-400 text-xs md:text-sm font-medium text-slate-800 transition-all shadow-sm"
-              placeholder="Buscar por título, número o palabras clave..."
+              className="block w-full pl-9 pr-12 py-2 rounded-xl border border-slate-200/80 bg-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-900/10 focus:border-slate-400 text-xs md:text-sm font-medium text-slate-800 transition-all shadow-sm"
+              placeholder="Buscar por título, número o palabras clave (pulsa /)..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
             />
+            {!searchQuery && (
+              <span className="absolute inset-y-0 right-0 pr-3 flex items-center pointer-events-none text-[10px] font-mono font-bold text-slate-300 hidden sm:flex">
+                /
+              </span>
+            )}
             {searchQuery && (
               <button
                 onClick={() => setSearchQuery("")}
@@ -577,6 +711,7 @@ export function TemarioView() {
                   progress={progress}
                   telemetry={telemetry}
                   onClick={() => setSelectedTopicId(topic.id)}
+                  onQuickReview={handleQuickReview}
                 />
               );
             })}
@@ -613,6 +748,7 @@ export function TemarioView() {
                         progress={progress}
                         telemetry={telemetry}
                         onClick={() => setSelectedTopicId(topic.id)}
+                        onQuickReview={handleQuickReview}
                       />
                     );
                   })}
@@ -663,6 +799,7 @@ interface TopicCardProps {
   progress?: TopicProgressData;
   telemetry?: FastTopicTelemetry;
   onClick: () => void;
+  onQuickReview?: (topic: Topic, e: React.MouseEvent) => void;
 }
 
 // ULTRA-FAST ZERO-WASTE MEMOIZED APPLE CARD
@@ -671,6 +808,7 @@ const TopicCard = React.memo(function TopicCard({
   progress,
   telemetry,
   onClick,
+  onQuickReview,
 }: TopicCardProps) {
   const hasStarted =
     !!progress?.firstStudyDate ||
@@ -683,12 +821,13 @@ const TopicCard = React.memo(function TopicCard({
   const srs = telemetry?.srs || { isDueToday: false, isOverdue: false, nextDate: null, daysDiff: null };
   const lastCantoData = telemetry?.lastCanto || { hasCanto: false, formatted: "Sin cante", mins: 0, secs: 0, grade: null };
   const repasoEstimate = telemetry?.reviewEstimate || { formatted: "-", predictedMinutes: 0 };
+  const ebbinghaus = telemetry?.ebbinghaus;
 
   return (
     <div
       onClick={onClick}
       className={cn(
-        "group bg-white rounded-[2rem] p-6 cursor-pointer border border-slate-200/70 hover:border-slate-300 hover:shadow-[0_12px_30px_rgb(0,0,0,0.06)] hover:-translate-y-1 transition-all duration-300 flex flex-col justify-between h-full relative overflow-hidden shadow-sm",
+        "group bg-white rounded-3xl p-5 md:p-6 cursor-pointer border border-slate-200/80 hover:border-slate-300 hover:shadow-[0_12px_32px_rgba(0,0,0,0.06)] hover:-translate-y-1 active:scale-[0.99] transition-all duration-300 flex flex-col justify-between h-full relative overflow-hidden shadow-xs",
         hasStarted ? "bg-white" : "bg-white/95"
       )}
     >
@@ -696,39 +835,46 @@ const TopicCard = React.memo(function TopicCard({
       <div 
         className={cn(
           "absolute top-0 left-0 right-0 h-1 transition-colors",
-          vueltas > 0 
-            ? "bg-indigo-600" 
-            : hasStarted 
-              ? "bg-blue-500" 
-              : "bg-transparent"
+          vueltas >= 2
+            ? "bg-indigo-700"
+            : vueltas === 1
+              ? "bg-indigo-500" 
+              : hasStarted 
+                ? "bg-blue-500" 
+                : "bg-slate-200/60"
         )} 
       />
 
       <div>
-        {/* Header Badges */}
+        {/* Header Badges & Retention Indicator */}
         <div className="flex items-center justify-between gap-2 mb-3">
-          <div className="flex items-center gap-2">
-            <span className="inline-flex items-center px-2.5 py-1 bg-slate-100 text-slate-700 text-[10px] uppercase tracking-wider font-black rounded-lg border border-slate-200/50">
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <span className="inline-flex items-center px-2.5 py-0.5 bg-slate-100 text-slate-700 text-[10px] uppercase tracking-wider font-black rounded-lg border border-slate-200/50">
               {topic.number === 999 ? "Extra" : `Tema ${topic.number}`}
             </span>
 
             {cycle.phase === "en_refrescos" ? (
-              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 bg-amber-50 text-amber-900 text-[10px] uppercase tracking-wider font-black rounded-full border border-amber-200/80 shadow-sm">
+              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 bg-amber-50 text-amber-900 text-[10px] uppercase tracking-wider font-black rounded-full border border-amber-200/80 shadow-2xs">
                 <Flame size={11} className="text-amber-500" />
                 {cycle.refrescoDayLabel}
               </span>
             ) : cycle.phase === "listo_para_cantar" ? (
-              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 bg-fuchsia-50 text-fuchsia-800 text-[10px] uppercase tracking-wider font-black rounded-full border border-fuchsia-200/80 shadow-sm">
+              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 bg-fuchsia-50 text-fuchsia-800 text-[10px] uppercase tracking-wider font-black rounded-full border border-fuchsia-200/80 shadow-2xs">
                 <Mic size={11} className="text-fuchsia-600" />
                 Listo Canto
               </span>
             ) : vueltas > 0 ? (
-              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 bg-emerald-50 text-emerald-700 text-[10px] uppercase tracking-wider font-black rounded-full border border-emerald-200/60 shadow-sm">
-                <CheckCircle2 size={11} className="text-emerald-600" />
+              <span className={cn(
+                "inline-flex items-center gap-1 px-2.5 py-0.5 text-[10px] uppercase tracking-wider font-black rounded-full border shadow-2xs",
+                vueltas >= 2 
+                  ? "bg-indigo-50 text-indigo-800 border-indigo-200/80" 
+                  : "bg-emerald-50 text-emerald-700 border-emerald-200/60"
+              )}>
+                <CheckCircle2 size={11} className={vueltas >= 2 ? "text-indigo-600" : "text-emerald-600"} />
                 Vuelta {vueltas}
               </span>
             ) : hasStarted ? (
-              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 bg-blue-50 text-blue-700 text-[10px] uppercase tracking-wider font-black rounded-full border border-blue-200/60 shadow-sm">
+              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 bg-blue-50 text-blue-700 text-[10px] uppercase tracking-wider font-black rounded-full border border-blue-200/60 shadow-2xs">
                 <Clock size={11} className="text-blue-600" />
                 En Proceso
               </span>
@@ -738,6 +884,34 @@ const TopicCard = React.memo(function TopicCard({
               </span>
             )}
           </div>
+
+          {/* Ebbinghaus Retention Indicator (Apple Health Style) */}
+          {hasStarted && ebbinghaus && (
+            <div
+              className={cn(
+                "flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-bold border transition-colors shrink-0",
+                ebbinghaus.retention >= 80
+                  ? "bg-emerald-50 text-emerald-700 border-emerald-200/80"
+                  : ebbinghaus.retention >= 60
+                    ? "bg-amber-50 text-amber-700 border-amber-200/80"
+                    : "bg-rose-50 text-rose-700 border-rose-200/80"
+              )}
+              title={`Retención mnemotécnica: ${ebbinghaus.retention}% (${ebbinghaus.statusTitle})`}
+            >
+              <span
+                className={cn(
+                  "w-1.5 h-1.5 rounded-full shrink-0",
+                  ebbinghaus.retention >= 80
+                    ? "bg-emerald-500"
+                    : ebbinghaus.retention >= 60
+                      ? "bg-amber-500"
+                      : "bg-rose-500 animate-pulse"
+                )}
+              />
+              <span className="font-mono tabular-nums">{ebbinghaus.retention}%</span>
+              <span className="text-[9px] text-slate-400 font-medium hidden sm:inline">ret.</span>
+            </div>
+          )}
         </div>
 
         {/* Title */}
@@ -748,16 +922,39 @@ const TopicCard = React.memo(function TopicCard({
           {topic.title}
         </h3>
 
+        {/* In-Refresco Step Progression Bar (if in refresco cycle) */}
+        {cycle.phase === "en_refrescos" && (
+          <div className="mt-3.5 flex items-center gap-2 bg-amber-50/60 px-3 py-1.5 rounded-xl border border-amber-200/60 text-[11px]">
+            <Flame size={12} className="text-amber-600 shrink-0" />
+            <span className="font-bold text-amber-950">Refrescos diarios:</span>
+            <div className="flex items-center gap-1 ml-auto">
+              {[1, 2, 3].map((step) => {
+                const isPassed = (cycle.refrescosCount || 0) >= step;
+                return (
+                  <div
+                    key={step}
+                    className={cn(
+                      "w-4 h-1.5 rounded-full transition-all",
+                      isPassed ? "bg-amber-500" : "bg-amber-200"
+                    )}
+                    title={`Día ${step}`}
+                  />
+                );
+              })}
+            </div>
+          </div>
+        )}
+
         {/* Vitals Grid (Apple Health Style) */}
-        <div className="grid grid-cols-4 gap-1.5 mt-5">
+        <div className="grid grid-cols-4 gap-1.5 mt-4">
           {/* Difficulty */}
-          <div className="flex flex-col p-2 bg-slate-50 rounded-xl border border-slate-100 items-center justify-center text-center">
+          <div className="flex flex-col p-2 bg-slate-50/80 rounded-xl border border-slate-100/90 items-center justify-center text-center">
             <span className="text-[9px] font-bold uppercase tracking-wider text-slate-400 mb-0.5">
               Dif.
             </span>
             <span
               className={cn(
-                "font-black text-xs",
+                "font-black text-xs font-mono tabular-nums",
                 difficulty > 6
                   ? "text-rose-600"
                   : difficulty > 3
@@ -771,28 +968,28 @@ const TopicCard = React.memo(function TopicCard({
 
           {/* 1. Repaso Estimado Mensual */}
           <div 
-            className="flex flex-col p-2 bg-slate-50 rounded-xl border border-slate-100 items-center justify-center text-center" 
-            title={hasStarted ? `Tiempo estimado de repaso mensual: ${repasoEstimate.formatted}` : "Tema pendiente de inicio"}
+            className="flex flex-col p-2 bg-slate-50/80 rounded-xl border border-slate-100/90 items-center justify-center text-center" 
+            title={hasStarted ? `Tiempo estimado de repaso: ${repasoEstimate.formatted}` : "Tema pendiente"}
           >
             <span className="text-[9px] font-bold uppercase tracking-wider text-slate-400 mb-0.5">
               Repaso
             </span>
-            <span className="font-black text-slate-800 text-xs whitespace-nowrap tabular-nums">
+            <span className="font-black text-slate-800 text-xs whitespace-nowrap font-mono tabular-nums">
               {hasStarted ? repasoEstimate.formatted : "-"}
             </span>
           </div>
 
           {/* 2. Último Cante Realizado */}
           <div 
-            className="flex flex-col p-2 bg-slate-50 rounded-xl border border-slate-100 items-center justify-center text-center" 
-            title={lastCantoData.hasCanto ? `Tiempo del último cante: ${lastCantoData.formatted}${lastCantoData.grade !== null ? ` (Nota: ${lastCantoData.grade.toFixed(1)}/10)` : ''}` : "Sin cantes registrados"}
+            className="flex flex-col p-2 bg-slate-50/80 rounded-xl border border-slate-100/90 items-center justify-center text-center" 
+            title={lastCantoData.hasCanto ? `Último cante: ${lastCantoData.formatted}${lastCantoData.grade !== null ? ` (Nota: ${lastCantoData.grade.toFixed(1)}/10)` : ''}` : "Sin cantes registrados"}
           >
             <span className="text-[9px] font-bold uppercase tracking-wider text-slate-400 mb-0.5">
               Cante
             </span>
             <span 
               className={cn(
-                "text-xs whitespace-nowrap tabular-nums",
+                "text-xs whitespace-nowrap font-mono tabular-nums",
                 lastCantoData.hasCanto ? "font-black text-slate-800" : "font-semibold text-slate-400 text-[11px]"
               )}
             >
@@ -801,13 +998,13 @@ const TopicCard = React.memo(function TopicCard({
           </div>
 
           {/* Next SRS Review */}
-          <div className="flex flex-col p-2 bg-slate-50 rounded-xl border border-slate-100 items-center justify-center text-center">
+          <div className="flex flex-col p-2 bg-slate-50/80 rounded-xl border border-slate-100/90 items-center justify-center text-center">
             <span className="text-[9px] font-bold uppercase tracking-wider text-slate-400 mb-0.5">
               Agenda
             </span>
             <span
               className={cn(
-                "font-black text-[11px] whitespace-nowrap tracking-tight",
+                "font-black text-[11px] whitespace-nowrap tracking-tight font-mono tabular-nums",
                 srs.isOverdue
                   ? "text-rose-600"
                   : srs.isDueToday
@@ -829,38 +1026,48 @@ const TopicCard = React.memo(function TopicCard({
         </div>
       </div>
 
-      {/* 3. Footer Vitals */}
-      <div className="mt-5 pt-3 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-500 font-semibold">
+      {/* 3. Footer Vitals & Quick Actions */}
+      <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-500 font-semibold gap-2">
         {hasStarted ? (
-          <>
-            <div className="flex items-center gap-1.5 text-slate-600 bg-slate-50 px-2 py-0.5 rounded-lg border border-slate-100">
-              <Calendar size={12} className="text-slate-400" />
-              <span>
-                {progress?.firstStudyDate
-                  ? safeParseDate(progress.firstStudyDate).toLocaleDateString("es-ES", {
-                      day: "2-digit",
-                      month: "2-digit",
-                      year: "2-digit",
-                    })
-                  : "-"}
-              </span>
-            </div>
-
-            <div 
-              className="flex items-center gap-1.5 text-indigo-700 bg-indigo-50/70 px-2.5 py-0.5 rounded-lg border border-indigo-200/50 font-black text-[11px] tabular-nums"
-              title={`Inversión total acumulada en este tema: ${formatCleanStudyHours(progress?.studyTimeHours)}`}
-            >
-              <Clock size={12} className="text-indigo-600" />
-              <span>
-                {formatCleanStudyHours(progress?.studyTimeHours)}
-              </span>
-            </div>
-          </>
+          <div 
+            className="flex items-center gap-1.5 text-indigo-700 bg-indigo-50/70 px-2 py-0.5 rounded-lg border border-indigo-200/50 font-black text-[11px] font-mono tabular-nums"
+            title={`Inversión total acumulada en este tema: ${formatCleanStudyHours(progress?.studyTimeHours)}`}
+          >
+            <Clock size={12} className="text-indigo-600" />
+            <span>
+              {formatCleanStudyHours(progress?.studyTimeHours)}
+            </span>
+          </div>
         ) : (
-          <div className="w-full text-center text-slate-400 py-0.5 text-xs">
+          <div className="text-slate-400 text-xs">
             Sin iniciar
           </div>
         )}
+
+        {/* Quick Action Buttons */}
+        <div className="flex items-center gap-1.5">
+          {onQuickReview && (
+            <button
+              type="button"
+              onClick={(e) => onQuickReview(topic, e)}
+              className="px-2.5 py-1 rounded-lg text-[10px] font-bold bg-slate-100 hover:bg-indigo-600 text-slate-700 hover:text-white border border-slate-200/80 hover:border-indigo-600 transition-all flex items-center gap-1 active:scale-95 shadow-2xs"
+              title="Registrar repaso rápido (+1 Vuelta oficial) en 1 solo clic"
+            >
+              <Zap size={11} className="text-amber-500 group-hover:text-amber-300" />
+              <span>+1 Vuelta</span>
+            </button>
+          )}
+
+          <button
+            type="button"
+            onClick={onClick}
+            className="px-2.5 py-1 rounded-lg text-[10px] font-bold text-slate-600 hover:text-slate-900 bg-slate-50 hover:bg-slate-100 border border-slate-200/60 transition-colors flex items-center gap-0.5 active:scale-95"
+            title="Abrir ficha completa del tema"
+          >
+            <span>Ficha</span>
+            <ChevronRight size={11} strokeWidth={2.5} />
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -871,6 +1078,7 @@ interface TopicTableRowProps {
   progress?: TopicProgressData;
   telemetry?: FastTopicTelemetry;
   onClick: () => void;
+  onQuickReview?: (topic: Topic, e: React.MouseEvent) => void;
 }
 
 // ULTRA-FAST ZERO-WASTE MEMOIZED TABLE ROW
@@ -879,6 +1087,7 @@ const TopicTableRow = React.memo(function TopicTableRow({
   progress,
   telemetry,
   onClick,
+  onQuickReview,
 }: TopicTableRowProps) {
   const vueltas = progress?.vueltas || 0;
   const hasStarted =
@@ -891,6 +1100,7 @@ const TopicTableRow = React.memo(function TopicTableRow({
   const cycle = telemetry?.cycle || { phase: "no_iniciado", refrescoDayLabel: "" };
   const srs = telemetry?.srs || { isDueToday: false, isOverdue: false, nextDate: null, daysDiff: null };
   const lastCantoData = telemetry?.lastCanto || { hasCanto: false, formatted: "Sin cante", mins: 0, secs: 0, grade: null };
+  const ebbinghaus = telemetry?.ebbinghaus;
 
   return (
     <tr
@@ -901,12 +1111,14 @@ const TopicTableRow = React.memo(function TopicTableRow({
       <td className="px-5 py-3.5 align-middle whitespace-nowrap">
         <span
           className={cn(
-            "font-black text-xs px-2.5 py-1 rounded-lg tracking-wider border inline-block",
-            vueltas > 0
-              ? "text-indigo-700 bg-indigo-50/80 border-indigo-200/60"
-              : hasStarted
-                ? "text-blue-700 bg-blue-50/80 border-blue-200/60"
-                : "text-slate-500 bg-slate-100/80 border-slate-200/50"
+            "font-black text-xs px-2.5 py-1 rounded-lg tracking-wider border inline-block font-mono tabular-nums",
+            vueltas >= 2
+              ? "text-indigo-800 bg-indigo-100/80 border-indigo-300/80"
+              : vueltas === 1
+                ? "text-indigo-700 bg-indigo-50/80 border-indigo-200/60"
+                : hasStarted
+                  ? "text-blue-700 bg-blue-50/80 border-blue-200/60"
+                  : "text-slate-500 bg-slate-100/80 border-slate-200/50"
           )}
         >
           {topic.number === 999 ? "EXT" : `T.${topic.number}`}
@@ -926,42 +1138,55 @@ const TopicTableRow = React.memo(function TopicTableRow({
         </div>
       </td>
 
-      {/* Status */}
+      {/* Status & Retention */}
       <td className="px-5 py-3.5 align-middle text-center whitespace-nowrap">
-        {cycle.phase === "en_refrescos" ? (
-          <span className="inline-flex items-center gap-1 text-[10px] font-black text-amber-900 bg-amber-50 border border-amber-200/80 px-2.5 py-0.5 rounded-full uppercase tracking-wider shadow-sm">
-            <Flame size={10} className="text-amber-500" />
-            {cycle.refrescoDayLabel}
-          </span>
-        ) : cycle.phase === "listo_para_cantar" ? (
-          <span className="inline-flex items-center gap-1 text-[10px] font-black text-fuchsia-800 bg-fuchsia-50 border border-fuchsia-200/80 px-2.5 py-0.5 rounded-full uppercase tracking-wider shadow-sm">
-            <Mic size={10} className="text-fuchsia-600" />
-            Listo Canto
-          </span>
-        ) : vueltas > 0 ? (
-          <span className="inline-flex items-center gap-1 text-[10px] font-black text-emerald-700 bg-emerald-50 border border-emerald-200/60 px-2.5 py-0.5 rounded-full uppercase tracking-wider shadow-sm">
-            <CheckCircle2 size={10} className="text-emerald-500" />
-            {vueltas} {vueltas === 1 ? "Vuelta" : "Vueltas"}
-          </span>
-        ) : hasStarted ? (
-          <span className="inline-flex items-center gap-1 text-[10px] font-black text-blue-700 bg-blue-50 border border-blue-200/60 px-2.5 py-0.5 rounded-full uppercase tracking-wider shadow-sm">
-            <Clock size={10} className="text-blue-500" />
-            En Proceso
-          </span>
-        ) : (
-          <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
-            Pendiente
-          </span>
-        )}
+        <div className="flex flex-col items-center gap-1">
+          {cycle.phase === "en_refrescos" ? (
+            <span className="inline-flex items-center gap-1 text-[10px] font-black text-amber-900 bg-amber-50 border border-amber-200/80 px-2.5 py-0.5 rounded-full uppercase tracking-wider shadow-2xs">
+              <Flame size={10} className="text-amber-500" />
+              {cycle.refrescoDayLabel}
+            </span>
+          ) : cycle.phase === "listo_para_cantar" ? (
+            <span className="inline-flex items-center gap-1 text-[10px] font-black text-fuchsia-800 bg-fuchsia-50 border border-fuchsia-200/80 px-2.5 py-0.5 rounded-full uppercase tracking-wider shadow-2xs">
+              <Mic size={10} className="text-fuchsia-600" />
+              Listo Canto
+            </span>
+          ) : vueltas > 0 ? (
+            <span className={cn(
+              "inline-flex items-center gap-1 text-[10px] font-black border px-2.5 py-0.5 rounded-full uppercase tracking-wider shadow-2xs",
+              vueltas >= 2
+                ? "text-indigo-800 bg-indigo-50 border-indigo-200/80"
+                : "text-emerald-700 bg-emerald-50 border-emerald-200/60"
+            )}>
+              <CheckCircle2 size={10} className={vueltas >= 2 ? "text-indigo-600" : "text-emerald-500"} />
+              {vueltas} {vueltas === 1 ? "Vuelta" : "Vueltas"}
+            </span>
+          ) : hasStarted ? (
+            <span className="inline-flex items-center gap-1 text-[10px] font-black text-blue-700 bg-blue-50 border border-blue-200/60 px-2.5 py-0.5 rounded-full uppercase tracking-wider shadow-2xs">
+              <Clock size={10} className="text-blue-500" />
+              En Proceso
+            </span>
+          ) : (
+            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+              Pendiente
+            </span>
+          )}
+
+          {hasStarted && ebbinghaus && (
+            <span className="text-[9px] font-mono tabular-nums text-slate-400 font-bold" title={`Retención estimada: ${ebbinghaus.retention}%`}>
+              {ebbinghaus.retention}% ret.
+            </span>
+          )}
+        </div>
       </td>
 
       {/* Pages & Difficulty */}
       <td className="px-5 py-3.5 align-middle text-center whitespace-nowrap text-xs">
-        <span className="font-bold text-slate-700">{pages} págs</span>
+        <span className="font-bold text-slate-700 font-mono tabular-nums">{pages} págs</span>
         <span className="text-slate-300 mx-1.5">·</span>
         <span
           className={cn(
-            "font-black",
+            "font-black font-mono tabular-nums",
             difficulty > 6
               ? "text-rose-600"
               : difficulty > 3
@@ -975,10 +1200,10 @@ const TopicTableRow = React.memo(function TopicTableRow({
 
       {/* Study Time / Cante */}
       <td className="px-5 py-3.5 align-middle text-center whitespace-nowrap text-xs">
-        <div className="font-black text-slate-800 tabular-nums">
+        <div className="font-black text-slate-800 font-mono tabular-nums">
           {formatCleanStudyHours(progress?.studyTimeHours)}
         </div>
-        <div className="text-[10px] text-slate-400 font-semibold mt-0.5 tabular-nums">
+        <div className="text-[10px] text-slate-400 font-semibold mt-0.5 font-mono tabular-nums">
           {lastCantoData.hasCanto ? `Cante: ${lastCantoData.formatted}` : "Sin cante"}
         </div>
       </td>
@@ -988,7 +1213,7 @@ const TopicTableRow = React.memo(function TopicTableRow({
         {srs.nextDate ? (
           <span
             className={cn(
-              "inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider border shadow-sm",
+              "inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider border shadow-2xs font-mono tabular-nums",
               srs.isOverdue
                 ? "bg-rose-50 text-rose-700 border-rose-200/80"
                 : srs.isDueToday
@@ -1021,6 +1246,17 @@ const TopicTableRow = React.memo(function TopicTableRow({
       {/* Actions */}
       <td className="px-5 py-3.5 align-middle text-right whitespace-nowrap">
         <div className="flex items-center justify-end gap-1.5">
+          {onQuickReview && (
+            <button
+              onClick={(e) => onQuickReview(topic, e)}
+              className="text-slate-700 hover:text-white bg-slate-100 hover:bg-indigo-600 border border-slate-200/80 hover:border-indigo-600 text-xs font-bold px-2.5 py-1.5 rounded-lg transition-all active:scale-95 inline-flex items-center gap-1 shadow-2xs"
+              title="Registrar repaso rápido (+1 Vuelta oficial)"
+            >
+              <Zap size={11} className="text-amber-500" />
+              <span>+1 Vuelta</span>
+            </button>
+          )}
+
           <button
             onClick={(e) => {
               e.stopPropagation();

@@ -8,7 +8,8 @@ import {
   isAuthorizedWebhookRequest,
   processIncomingAeroFocusPayload,
   loadWebhookEvents,
-  saveWebhookEvents
+  saveWebhookEvents,
+  getWebhookHealthOrSessions
 } from "./src/lib/webhookStorage";
 
 // NOTE: require Vite explicitly to avoid ts-node / tsx dynamic import issues
@@ -129,9 +130,9 @@ Return a JSON array of these objects. ONLY valid JSON.`;
       return res.status(204).end();
     }
 
-    // Comprobación de salud rápida (GET)
+    // Consulta de salud y sesiones pendientes (GET)
     if (req.method === 'GET') {
-      return res.status(200).json({ status: 'ok', service: 'wellsprep_aerofocus_webhook', ready: true });
+      return res.status(200).json(getWebhookHealthOrSessions());
     }
 
     if (req.method !== 'POST') {
@@ -225,16 +226,41 @@ Return a JSON array of these objects. ONLY valid JSON.`;
       }
 
       // Dynamic import to ensure clean resolution
-      const { resolveAeroFocusTopic } = await import("./src/lib/topicResolver");
+      const { resolveAeroFocusTopic, extractMinutesFromAeroItem } = await import("./src/lib/topicResolver");
       const resolvedTopics: any[] = [];
 
-      for (const t of rawTopics) {
+      // Filtrar temas que sean meras marcas de distracción o pausa
+      const filteredRawTopics = rawTopics.filter(t => {
+        const mod = String(t.modalidad || t.modality || t.type || '').toLowerCase();
+        if (mod === 'distraction' || mod === 'distraccion' || mod === 'pausa' || mod === 'break' || mod === 'descanso') {
+          return false;
+        }
+        const title = String(t.tema || t.topic || t.topicTitle || '').toLowerCase();
+        if (title.includes('distracci') || title.includes('pausa') || title.includes('descanso')) {
+          return false;
+        }
+        return true;
+      });
+
+      const topicsCount = filteredRawTopics.length || 1;
+      const distributedFallbackMins = totalMins > 0 ? Math.max(15, Math.round(totalMins / topicsCount)) : 45;
+
+      for (const t of filteredRawTopics) {
         const materia = t.materia || t.subject || t.subjectName || t.category || payload.materia || payload.subject || 'Derecho Constitucional';
         const numeroTema = t.temaNumero ?? t.topicNumber ?? null;
         const titulo = t.tema || t.topic || t.topicTitle || (numeroTema ? `Tema ${numeroTema}` : 'Tema');
         const modalidad = t.modalidad || t.modality || t.type || 'estudio';
-        const horas = Number(t.horasEfectivas ?? t.effectiveHours ?? (t.effectiveMinutes ? Number(t.effectiveMinutes) / 60 : 0)) || 0;
-        const minutos = Number(t.minutosEfectivos ?? t.effectiveMinutes ?? Math.round(horas * 60)) || 0;
+        
+        // Extracción robusta de minutos individuales del tema
+        const directMins = extractMinutesFromAeroItem(t, 0);
+        const minutos = directMins > 0 ? directMins : distributedFallbackMins;
+        const horas = Math.round((minutos / 60) * 100) / 100;
+
+        // Descartar sesiones fantasmas de 1 minuto procedentes de pings o clics accidentales
+        if (minutos <= 1 && !t.cantoGrade && !t.grade) {
+          continue;
+        }
+
         const startPage = t.startPage ?? t.pages?.pageStart ?? null;
         const endPage = t.endPage ?? t.pages?.pageEnd ?? null;
         const pagesCount = t.pagesCount ?? t.pages?.pagesCount ?? (startPage != null && endPage != null ? Math.max(0, endPage - startPage + 1) : 0);
@@ -269,8 +295,8 @@ Return a JSON array of these objects. ONLY valid JSON.`;
         const topicItem: any = resolved
           ? {
               ...resolved,
-              effectiveMinutes: minutos || resolved.effectiveMinutes,
-              effectiveHours: horas || resolved.effectiveHours,
+              effectiveMinutes: minutos,
+              effectiveHours: horas,
               startPage,
               endPage,
               pagesCount,
@@ -283,8 +309,8 @@ Return a JSON array of these objects. ONLY valid JSON.`;
               resolvedSubjectId: 'constitucional',
               resolvedTopicNumber: Number(numeroTema || 0),
               resolvedTopicTitle: titulo,
-              effectiveMinutes: minutos || 30,
-              effectiveHours: horas || 0.5,
+              effectiveMinutes: minutos,
+              effectiveHours: horas,
               modality: modalidad,
               startPage,
               endPage,
@@ -331,6 +357,16 @@ Return a JSON array of these objects. ONLY valid JSON.`;
       currentEvents.push(record);
       saveWebhookEvents(currentEvents);
 
+      // Buffer en memoria global para consulta GET de AeroFocus / Dashboard
+      const buffer = globalThis.__wellsprep_sessions || [];
+      buffer.unshift({
+        id: record.flightId || record.transactionId || record.id,
+        receivedAt: new Date().toISOString(),
+        payload
+      });
+      if (buffer.length > 50) buffer.pop();
+      globalThis.__wellsprep_sessions = buffer;
+
       // Notificar a todos los clientes web conectados en tiempo real mediante SSE
       broadcastWebhookEvent(record);
 
@@ -346,7 +382,7 @@ Return a JSON array of these objects. ONLY valid JSON.`;
         effectiveHours: calculatedEffectiveHours,
         quarantined: true,
         recordId: record.id,
-        message: payload.message || 'Cierre diario sincronizado con éxito en WellsPrep'
+        message: payload.message || `Registradas ${calculatedEffectiveHours}h netas en WellsPrep`
       });
     } catch (err: any) {
       console.error("[AeroFocus Webhook] Error processing request:", err);
@@ -376,6 +412,12 @@ Return a JSON array of these objects. ONLY valid JSON.`;
       quarantinedCount,
       pendingCount: quarantinedCount
     });
+  });
+
+  // Clear all events from quarantine and memory
+  app.post("/api/webhook/clear", (req, res) => {
+    saveWebhookEvents([]);
+    res.json({ status: "ok", message: "Todos los eventos de AeroFocus en servidor han sido eliminados." });
   });
 
   // Discard single event from quarantine
@@ -501,12 +543,39 @@ Return a JSON array of these objects. ONLY valid JSON.`;
     res.setHeader("Content-Type", "text/event-stream");
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Connection", "keep-alive");
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Headers", "*");
 
-    res.write(`data: ${JSON.stringify({ type: "connected" })}\n\n`);
+    res.write(`data: ${JSON.stringify({ type: "connected", timestamp: new Date().toISOString() })}\n\n`);
     sseClients.push(res);
 
     req.on("close", () => {
       sseClients = sseClients.filter(c => c !== res);
+    });
+  });
+
+  // Keep SSE alive with periodic heartbeat pings every 20s
+  setInterval(() => {
+    sseClients.forEach(client => {
+      try {
+        client.write(`data: ${JSON.stringify({ type: "ping", timestamp: new Date().toISOString() })}\n\n`);
+      } catch {}
+    });
+  }, 20000);
+
+  // Webhook ping / healthcheck endpoint
+  app.all(["/api/webhook/ping", "/api/webhook/health"], (req, res) => {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "*");
+    if (req.method === "OPTIONS") return res.status(204).end();
+    return res.status(200).json({
+      status: "ok",
+      service: "wellsprep_aerofocus_webhook",
+      timestamp: new Date().toISOString(),
+      activeSSEConnections: sseClients.length,
+      expectedToken: "wp_qLXi6WFkFY_live",
+      ready: true
     });
   });
 

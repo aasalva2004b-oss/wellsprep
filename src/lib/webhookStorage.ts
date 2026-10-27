@@ -1,15 +1,49 @@
 import fs from 'fs';
 import path from 'path';
 import { WebhookSyncRecord, WebhookResolvedTopic, AeroFocusWebhookPayload } from './webhookTypes';
-import { resolveAeroFocusTopic } from './topicResolver';
+import { resolveAeroFocusTopic, extractMinutesFromAeroItem } from './topicResolver';
 
 export const EXPECTED_WEBHOOK_TOKEN = 'wp_qLXi6WFkFY_live';
 
+// Buffer en memoria persistente en el entorno serverless de Vercel y local
+declare global {
+  var __wellsprep_sessions: any[] | undefined;
+}
+if (!globalThis.__wellsprep_sessions) {
+  globalThis.__wellsprep_sessions = [];
+}
+
 export const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS, PATCH',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Event, X-API-Key, X-Source, X-Test-Ping, X-Token, X-Webhook-Token',
+  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-API-Key, X-Event, X-Flight-Id, X-Transaction-Id, X-Test-Mode, X-Source, X-Test-Ping, X-Token, X-Webhook-Token',
 };
+
+/**
+ * Consulta de estado y sesiones pendientes para el Dashboard o Frontend
+ */
+export function getWebhookHealthOrSessions() {
+  let sessions = globalThis.__wellsprep_sessions || [];
+  if (sessions.length === 0) {
+    const stored = loadWebhookEvents();
+    if (stored.length > 0) {
+      sessions = stored.map(s => ({
+        id: s.flightId || s.transactionId || s.id,
+        receivedAt: s.receivedAt,
+        payload: s.rawPayload || s
+      }));
+      globalThis.__wellsprep_sessions = sessions;
+    }
+  }
+  return {
+    ok: true,
+    status: 'ok',
+    service: 'wellsprep_aerofocus_webhook',
+    sessionsCount: sessions.length,
+    latestSessions: sessions.slice(-15),
+    ready: true
+  };
+}
 
 // In-memory fallback in case of strict read-only serverless filesystems
 let memoryEvents: WebhookSyncRecord[] = [];
@@ -61,6 +95,9 @@ export function loadWebhookEvents(): WebhookSyncRecord[] {
 export function saveWebhookEvents(events: WebhookSyncRecord[]): void {
   const trimmed = events.slice(-150);
   memoryEvents = trimmed;
+  if (events.length === 0) {
+    globalThis.__wellsprep_sessions = [];
+  }
   try {
     const filePath = getWebhookEventsFilePath();
     fs.writeFileSync(filePath, JSON.stringify(trimmed, null, 2), 'utf-8');
@@ -109,11 +146,35 @@ export function processIncomingAeroFocusPayload(
     payload.fecha ||
     (payload.timestamp ? new Date(payload.timestamp).toISOString().split('T')[0] : new Date().toISOString().split('T')[0]);
 
+  const flightId = payload.flightId || payload.transactionId || `wp_${Date.now()}`;
   const transactionId = payload.transactionId || payload.flightId;
-  const totalHours = Number(payload.horasEfectivas ?? payload.dailyTotalEffectiveHours ?? payload.totalEffectiveHours ?? 0);
-  const totalMins = Number(payload.minutosEfectivos ?? payload.dailyTotalEffectiveMinutes ?? payload.totalFlightEffectiveMinutes ?? Math.round(totalHours * 60));
+  const totalHours = Number(
+    payload.horasEfectivas ??
+    payload.effectiveHours ??
+    payload.totalEffectiveHours ??
+    payload.dailyTotalEffectiveHours ??
+    0
+  );
+  const totalMins = Number(
+    payload.minutosEfectivos ??
+    payload.totalEffectiveStudyMinutes ??
+    payload.effectiveMinutes ??
+    payload.dailyTotalEffectiveMinutes ??
+    payload.totalFlightEffectiveMinutes ??
+    Math.round(totalHours * 60)
+  );
 
-  // 3. Normalizar array de temas desde cualquier variante de AeroFocus
+  // 1. Registro en buffer de memoria global (compatible con GET /api/webhook/aerofocus)
+  const buffer = globalThis.__wellsprep_sessions || [];
+  buffer.unshift({
+    id: flightId,
+    receivedAt: new Date().toISOString(),
+    payload
+  });
+  if (buffer.length > 50) buffer.pop();
+  globalThis.__wellsprep_sessions = buffer;
+
+  // 2. Normalizar array de temas desde cualquier variante de AeroFocus
   let rawTopics: any[] = [];
   if (Array.isArray(payload)) {
     rawTopics = payload;
@@ -156,13 +217,38 @@ export function processIncomingAeroFocusPayload(
   // 4. Mapeo dinámico y resolución de temas
   const resolvedTopics: WebhookResolvedTopic[] = [];
 
-  for (const t of rawTopics) {
+  // Filtrar temas que sean meras marcas de distracción o pausa
+  const filteredRawTopics = rawTopics.filter(t => {
+    const mod = String(t.modalidad || t.modality || t.type || '').toLowerCase();
+    if (mod === 'distraction' || mod === 'distraccion' || mod === 'pausa' || mod === 'break' || mod === 'descanso') {
+      return false;
+    }
+    const title = String(t.tema || t.topic || t.topicTitle || '').toLowerCase();
+    if (title.includes('distracci') || title.includes('pausa') || title.includes('descanso')) {
+      return false;
+    }
+    return true;
+  });
+
+  const topicsCount = filteredRawTopics.length || 1;
+  const distributedFallbackMins = totalMins > 0 ? Math.max(15, Math.round(totalMins / topicsCount)) : 45;
+
+  for (const t of filteredRawTopics) {
     const materia = t.materia || t.subject || t.subjectName || t.asignatura || t.category || payload.materia || payload.subject || 'Derecho Constitucional';
     const numeroTema = t.temaNumero ?? t.topicNumber ?? null;
     const titulo = t.tema || t.topic || t.topicTitle || (numeroTema ? `Tema ${numeroTema}` : 'Tema');
     const modalidad = t.modalidad || t.modality || t.type || 'repaso';
-    const horas = Number(t.horasEfectivas ?? t.effectiveHours ?? (t.effectiveMinutes ? t.effectiveMinutes / 60 : 0));
-    const minutos = Number(t.minutosEfectivos ?? t.effectiveMinutes ?? Math.round(horas * 60));
+    
+    // Extracción robusta de minutos individuales del tema
+    const directMins = extractMinutesFromAeroItem(t, 0);
+    const minutos = directMins > 0 ? directMins : distributedFallbackMins;
+    const horas = Math.round((minutos / 60) * 100) / 100;
+
+    // Descartar sesiones fantasmas de 1 minuto procedentes de pings o clics accidentales
+    if (minutos <= 1 && !t.cantoGrade && !t.grade) {
+      continue;
+    }
+
     const startPage = t.startPage ?? t.pages?.pageStart ?? null;
     const endPage = t.endPage ?? t.pages?.pageEnd ?? null;
     const pagesCount = Number(t.pagesCount ?? t.pages?.pagesCount ?? (startPage && endPage ? endPage - startPage + 1 : 0));
@@ -192,8 +278,8 @@ export function processIncomingAeroFocusPayload(
     const topicItem: WebhookResolvedTopic = resolved
       ? {
           ...resolved,
-          effectiveMinutes: minutos || resolved.effectiveMinutes,
-          effectiveHours: horas || resolved.effectiveHours,
+          effectiveMinutes: minutos,
+          effectiveHours: horas,
           startPage: startPage ?? resolved.startPage,
           endPage: endPage ?? resolved.endPage,
           pagesCount: pagesCount || resolved.pagesCount,
@@ -207,8 +293,8 @@ export function processIncomingAeroFocusPayload(
           resolvedSubjectId: 'constitucional',
           resolvedTopicNumber: Number(numeroTema || 0),
           resolvedTopicTitle: titulo,
-          effectiveMinutes: minutos || 30,
-          effectiveHours: horas || 0.5,
+          effectiveMinutes: minutos,
+          effectiveHours: horas,
           modality: 'repaso',
           startPage: startPage ?? undefined,
           endPage: endPage ?? undefined,
@@ -225,15 +311,14 @@ export function processIncomingAeroFocusPayload(
 
   const calculatedEffectiveMinutes = totalMins || resolvedTopics.reduce((acc, t) => acc + (t.effectiveMinutes || 0), 0);
   const calculatedEffectiveHours = totalHours || Math.round((calculatedEffectiveMinutes / 60) * 100) / 100;
-  const flightId = String(payload.flightId || transactionId || `vuelo_${sessionDate}`);
 
   const record: WebhookSyncRecord = {
     id: `af_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
     receivedAt: new Date().toISOString(),
     date: sessionDate,
     source: payload.source || 'aerofocus_pro',
-    flightId,
-    transactionId: transactionId || flightId,
+    flightId: String(flightId),
+    transactionId: String(transactionId || flightId),
     dailyTotalEffectiveHours: calculatedEffectiveHours,
     totalFlightEffectiveMinutes: calculatedEffectiveMinutes,
     totalFlightEffectiveHours: calculatedEffectiveHours,
@@ -267,7 +352,7 @@ export function processIncomingAeroFocusPayload(
       effectiveHours: calculatedEffectiveHours,
       quarantined: true,
       recordId: record.id,
-      message: payload.message || 'Cierre diario sincronizado con éxito en WellsPrep'
+      message: payload.message || `Registradas ${calculatedEffectiveHours}h netas en WellsPrep`
     },
     createdRecord: record
   };

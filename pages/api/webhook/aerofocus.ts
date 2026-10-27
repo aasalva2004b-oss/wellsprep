@@ -1,64 +1,58 @@
-import type { IncomingMessage, ServerResponse } from 'http';
-
-const EXPECTED_TOKEN = 'wp_qLXi6WFkFY_live';
+import { 
+  corsHeaders, 
+  isAuthorizedWebhookRequest, 
+  processIncomingAeroFocusPayload,
+  getWebhookHealthOrSessions
+} from '../../src/lib/webhookStorage';
 
 export default async function handler(req: any, res: any) {
-  // 1. Cabeceras CORS obligatorias para peticiones web y Vercel
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Event, X-API-Key, X-Source, X-Test-Ping');
+  // 1. Cabeceras CORS universales obligatorias
+  res.setHeader('Access-Control-Allow-Origin', corsHeaders['Access-Control-Allow-Origin']);
+  res.setHeader('Access-Control-Allow-Methods', corsHeaders['Access-Control-Allow-Methods']);
+  res.setHeader('Access-Control-Allow-Headers', corsHeaders['Access-Control-Allow-Headers']);
 
   if (req.method === 'OPTIONS') {
     return res.status(204).end();
   }
 
-  // Comprobación de salud rápida (GET)
+  // GET: Consultar sesiones pendientes para el Dashboard o Frontend
   if (req.method === 'GET') {
-    return res.status(200).json({ ok: true, status: 'ok', service: 'wellsprep_aerofocus_webhook', ready: true });
+    return res.status(200).json(getWebhookHealthOrSessions());
   }
 
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method Not Allowed' });
   }
 
+  // 2. Verificación de Seguridad
+  if (!isAuthorizedWebhookRequest(req.headers)) {
+    return res.status(401).json({ error: 'Token no autorizado' });
+  }
+
+  // 3. Extracción de Payload
+  let payload = req.body || {};
+  if (typeof payload === 'string') {
+    try { 
+      payload = JSON.parse(payload); 
+    } catch { 
+      payload = {}; 
+    }
+  }
+  if (typeof payload.payload === 'string') {
+    try { 
+      payload = JSON.parse(payload.payload); 
+    } catch {}
+  }
+
   try {
-    // 2. Verificación del Token de Seguridad
-    const authHeader = req.headers.authorization;
-    const apiKey = req.headers['x-api-key'];
-    const token = apiKey || (authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null);
-
-    if (token && token !== EXPECTED_TOKEN) {
-      return res.status(401).json({ error: 'Token no autorizado' });
-    }
-
-    const payload = req.body || {};
-
-    // 3. Handshake / Test de conexión de AeroFocus (NUNCA altera la base de datos)
-    if (payload.isTest || payload.event === 'test_connection') {
-      return res.status(200).json({
-        success: true,
-        message: 'Enlace operativo AeroFocus Pro <-> WellsPrep'
-      });
-    }
-
-    // 4. Procesamiento de sesiones reales enviadas por AeroFocus
-    const { date, topics, summary, dailyTotalEffectiveHours, totalEffectiveStudyMinutes, transactionId } = payload;
-    const sessionHours = dailyTotalEffectiveHours ?? (totalEffectiveStudyMinutes ? totalEffectiveStudyMinutes / 60 : 0);
-
-    console.log(`[WellsPrep Webhook] Sincronización recibida de AeroFocus para ${date}: ${sessionHours}h en ${topics?.length || 0} temas.`);
-
-    return res.status(200).json({
-      status: 'ok',
-      synced: true,
-      date: date || new Date().toISOString().split('T')[0],
-      processedTopics: topics?.length || 0,
-      effectiveHours: sessionHours
-    });
-  } catch (error: any) {
-    console.error('[WellsPrep Webhook Error]:', error);
+    const { statusCode, responseData } = processIncomingAeroFocusPayload(payload, req.headers);
+    return res.status(statusCode).json(responseData);
+  } catch (err: any) {
+    console.error('[AeroFocus Pages Webhook] Error processing request:', err);
     return res.status(500).json({
-      error: 'Error interno en webhook',
-      details: error?.message
+      error: err?.message || 'Error interno',
+      status: 'error',
+      synced: false
     });
   }
 }

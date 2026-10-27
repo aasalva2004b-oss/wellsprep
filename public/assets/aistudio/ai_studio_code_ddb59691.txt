@@ -1,0 +1,33 @@
+{
+  "source": "AeroFocus Pro",
+  "version": "2.0",
+  "event": "flight_touchdown",
+  "flightId": "flight_1719200000000",
+  "date": "2026-10-23",
+  "totalEffectiveStudyMinutes": 45,
+  "totalEffectiveHours": 0.75,
+  "focusEfficiency": 96.5,
+  "subject": "Derecho Constitucional",
+  "topics": [
+    {
+      "temaNumero": 1,
+      "topicNumber": 1,
+      "materia": "Derecho Constitucional",
+      "tema": "Tema 1: La Constitución Española de 1978. Principios y valores",
+      "modalidad": "estudio",
+      "horasEfectivas": 0.75,
+      "minutosEfectivos": 45,
+      "startPage": 1,
+      "endPage": 24,
+      "pagesCount": 24,
+      "completado": true,
+      "completed": true
+    }
+  ],
+  "flightTelemetry": {
+    "aircraft": "Cessna 172 Skyhawk",
+    "route": "LEMD -> LEBL",
+    "distractions": 1,
+    "xpEarned": 250
+  }
+}

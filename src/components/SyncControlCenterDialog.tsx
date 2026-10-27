@@ -21,7 +21,12 @@ import {
   Send,
   ExternalLink,
   HelpCircle,
-  BarChart2
+  BarChart2,
+  Copy,
+  Plane,
+  Radio,
+  Check,
+  Zap
 } from "lucide-react";
 import { useFirebase } from "../lib/FirebaseProvider";
 import { initialSubjects, initialTopics } from "../data/initialData";
@@ -29,6 +34,7 @@ import { EditSessionDialog } from "./EditSessionDialog";
 import { toast } from "sonner";
 import { cn } from "../lib/utils";
 import { WebhookSyncRecord } from "../lib/webhookTypes";
+import { simulateAeroFocusFlight } from "../hooks/useAeroFocusSync";
 
 interface SyncControlCenterDialogProps {
   onClose: () => void;
@@ -81,7 +87,10 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
   const [isPasteModalOpen, setIsPasteModalOpen] = useState(false);
   const [pasteJsonText, setPasteJsonText] = useState("");
   const [isImportingPaste, setIsImportingPaste] = useState(false);
-  const [isMigratingPenal, setIsMigratingPenal] = useState(false);
+  const [showConnectionInfo, setShowConnectionInfo] = useState(true);
+  const [isSimulatingFlight, setIsSimulatingFlight] = useState(false);
+  const [copiedUrl, setCopiedUrl] = useState(false);
+  const [copiedToken, setCopiedToken] = useState(false);
 
   // Topic Reassign state
   const [reassigningItem, setReassigningItem] = useState<{ eventId: string; topicIndex: number } | null>(null);
@@ -207,11 +216,12 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
 
   // Handle Master Reconciliation
   const handleReconcile = async () => {
-    if (!confirm("¿Deseas ejecutar la Reconciliación Maestra? Esto auditará todas las sesiones registradas y recalculará las horas exactas, vueltas y dificultad de cada tema.")) {
+    if (!confirm("¿Deseas ejecutar la Reconciliación Maestra? Esto auditará todas las sesiones registradas, eliminará sesiones fantasma de 1 minuto o duplicadas y recalculará las horas exactas de cada tema.")) {
       return;
     }
     try {
       setIsReconciling(true);
+      await deduplicateUserSessions(false);
       await reconcileAllTopicsAndSessions();
     } catch (e: any) {
       console.error(e);
@@ -220,15 +230,29 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
     }
   };
 
-  // Handle Penal sessions migration to Constitucional 5
-  const handleMigratePenal = async () => {
+  // Quick 1-click clipboard paste importer
+  const handleQuickClipboardPaste = async () => {
     try {
-      setIsMigratingPenal(true);
-      await migratePenalSessionsToConstitucional5(false);
-    } catch (e: any) {
-      toast.error("Error al migrar sesiones: " + e.message);
-    } finally {
-      setIsMigratingPenal(false);
+      let text = "";
+      if (typeof navigator !== "undefined" && navigator?.clipboard?.readText) {
+        try {
+          text = await navigator.clipboard.readText();
+        } catch {
+          // Clipboard read restricted
+        }
+      }
+      if (text && text.trim()) {
+        const success = await addQuarantineEventManually(text.trim());
+        if (success) {
+          toast.success("✅ Cierre de AeroFocus importado desde el portapapeles y depositado en cuarentena.");
+          setActiveTab("quarantine");
+          return;
+        }
+      }
+      setPasteJsonText(text || "");
+      setIsPasteModalOpen(true);
+    } catch {
+      setIsPasteModalOpen(true);
     }
   };
 
@@ -261,16 +285,35 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
     }
   };
 
-  // Handle Manual Paste JSON
+  // Simular un aterrizaje de vuelo completo para verificar la recepción reactiva
+  const handleSimulateFlight = async () => {
+    try {
+      setIsSimulatingFlight(true);
+      const res = await simulateAeroFocusFlight(1);
+      if (res.success) {
+        toast.success(res.message, {
+          description: "La sesión ha aterrizado en la Bandeja de Cuarentena en tiempo real.",
+        });
+        await fetchQuarantinedEvents();
+      } else {
+        toast.error("Fallo al simular: " + res.message);
+      }
+    } catch (e: any) {
+      toast.error("Error: " + (e?.message || e));
+    } finally {
+      setIsSimulatingFlight(false);
+    }
+  };
+
+  // Handle Manual Paste JSON / Text
   const handleImportPaste = async () => {
     if (!pasteJsonText.trim()) {
-      toast.error("Pega el JSON de la sesión primero.");
+      toast.error("Pega el JSON o reporte de texto de la sesión primero.");
       return;
     }
     try {
       setIsImportingPaste(true);
-      const parsed = JSON.parse(pasteJsonText);
-      const success = await addQuarantineEventManually(parsed);
+      const success = await addQuarantineEventManually(pasteJsonText.trim());
       if (success) {
         toast.success("¡Sesión de AeroFocus cargada con éxito en Cuarentena!");
         setPasteJsonText("");
@@ -278,7 +321,7 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
         setActiveTab("quarantine");
       }
     } catch (e: any) {
-      toast.error("JSON inválido: " + e.message);
+      toast.error("Error al procesar: " + (e?.message || e));
     } finally {
       setIsImportingPaste(false);
     }
@@ -289,92 +332,34 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
       <div className="bg-white rounded-3xl shadow-2xl border border-slate-200/90 w-full max-w-5xl h-[92vh] max-h-[850px] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-200">
         
         {/* TOP HEADER */}
-        <div className="px-6 py-5 border-b border-slate-200/70 bg-slate-50/70 flex flex-wrap items-center justify-between gap-4 shrink-0">
-          <div>
-            <div className="flex items-center gap-2.5">
-              <div className="w-9 h-9 rounded-2xl bg-slate-900 text-white flex items-center justify-center shadow-md shadow-slate-900/10">
-                <SlidersHorizontal size={18} strokeWidth={2.2} />
+        <div className="px-6 py-4 border-b border-slate-200/70 bg-slate-50/70 flex flex-wrap items-center justify-between gap-4 shrink-0">
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-2xl bg-slate-900 text-white flex items-center justify-center shadow-md shadow-slate-900/10">
+              <SlidersHorizontal size={18} strokeWidth={2.2} />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <h1 className="text-lg font-black text-slate-900 tracking-tight">
+                  Centro de Control de Estudio · AeroFocus Pro
+                </h1>
+                <span className="text-xs text-emerald-700 font-semibold flex items-center gap-1">
+                  <span>·</span>
+                  <span>Webhook Activo</span>
+                </span>
               </div>
-              <div>
-                <div className="flex items-center gap-2">
-                  <h1 className="text-xl font-black text-slate-900 font-serif tracking-tight">
-                    Centro de Control y Auditoría de Sincronización
-                  </h1>
-                  <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider border bg-emerald-50 text-emerald-700 border-emerald-200">
-                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                    AeroFocus Webhook Conectado (wp_qLXi6WFkFY_live)
-                  </span>
-                </div>
-                <p className="text-xs text-slate-500 font-medium">
-                  Auditoría completa de cuenta Google, recálculo retroactivo y motor anti-errores
-                </p>
-              </div>
+              <p className="text-xs text-slate-500 font-medium">
+                Gestión de sesiones sincronizadas y conciliación de expediente oficial
+              </p>
             </div>
           </div>
 
-          {/* Quick Header Actions */}
+          {/* Clean Header Actions */}
           <div className="flex items-center gap-2">
-            <button
-              onClick={handleMigratePenal}
-              disabled={isMigratingPenal}
-              className="px-3 py-1.5 rounded-xl text-xs font-black bg-emerald-50 hover:bg-emerald-100 text-emerald-900 border border-emerald-300 shadow-xs transition-all flex items-center gap-1.5 disabled:opacity-50"
-              title="Migra las sesiones de Derecho Penal (5 y 12) al Tema 5 de Constitucional y actualiza tu expediente"
-            >
-              <Sparkles size={13} className={cn("text-emerald-600", isMigratingPenal && "animate-spin")} />
-              <span>{isMigratingPenal ? "Migrando..." : "Migrar Penal a Const. 5"}</span>
-            </button>
-
-            <button
-              onClick={() => purgePhantomTema5Cante()}
-              className="px-3 py-1.5 rounded-xl text-xs font-bold bg-rose-50 hover:bg-rose-100 text-rose-800 border border-rose-200/80 shadow-xs transition-all flex items-center gap-1.5"
-              title="Elimina cualquier cante ficticio o no realizado en Tema 5"
-            >
-              <ShieldAlert size={13} className="text-rose-600" />
-              <span>Limpiar Cante Tema 5</span>
-            </button>
-
-            <button
-              onClick={() => deduplicateUserSessions(false)}
-              className="px-3 py-1.5 rounded-xl text-xs font-bold bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300/80 shadow-xs transition-all flex items-center gap-1.5"
-              title="Elimina cantes y sesiones duplicadas (especialmente en Temas 7 y 17) y recalcula los temas"
-            >
-              <RefreshCw size={13} className="text-amber-700" />
-              <span>Deduplicar Cantes</span>
-            </button>
-
-            <button
-              onClick={() => recoverHistoricalUserData(false)}
-              className="px-3 py-1.5 rounded-xl text-xs font-bold bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200/80 shadow-xs transition-all flex items-center gap-1.5"
-              title="Escanear y vincular todos los datos de tu cuenta de Google"
-            >
-              <Database size={13} className="text-indigo-600" />
-              <span>Vincular Google</span>
-            </button>
-
-            <button
-              onClick={handleTestWebhook}
-              disabled={isTestingWebhook}
-              className="px-3 py-1.5 rounded-xl text-xs font-bold bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 shadow-sm transition-all flex items-center gap-1.5 disabled:opacity-50"
-              title="Comprobar enlace de conexión con AeroFocus Pro (Ping sin generar datos ficticios)"
-            >
-              <ShieldCheck size={13} className="text-emerald-600" />
-              <span>{isTestingWebhook ? "Comprobando..." : "Test Enlace"}</span>
-            </button>
-
-            <button
-              onClick={purgeAllAeroFocusData}
-              className="px-3 py-1.5 rounded-xl text-xs font-bold bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200/80 shadow-sm transition-all flex items-center gap-1.5"
-              title="Eliminar todas las sesiones de prueba de AeroFocus y recalcular temas"
-            >
-              <AlertTriangle size={13} className="text-amber-600" />
-              <span>Purgar AeroFocus</span>
-            </button>
-
             <button
               onClick={handleReconcile}
               disabled={isReconciling}
-              className="px-3.5 py-1.5 rounded-xl text-xs font-black bg-slate-900 hover:bg-slate-800 text-white shadow-sm transition-all flex items-center gap-1.5 disabled:opacity-50"
-              title="Recalcula el 100% de los temas a partir de las sesiones reales"
+              className="px-4 py-2 rounded-xl text-xs font-bold bg-slate-900 hover:bg-slate-800 text-white shadow-sm transition-all flex items-center gap-1.5 disabled:opacity-50"
+              title="Audita todas las sesiones y recalcula determinísticamente horas, vueltas y temas"
             >
               <RefreshCw size={13} className={cn(isReconciling && "animate-spin")} />
               <span>{isReconciling ? "Reconciliando..." : "Reconciliar Todo"}</span>
@@ -383,6 +368,7 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
             <button
               onClick={onClose}
               className="w-8 h-8 rounded-full flex items-center justify-center text-slate-400 hover:text-slate-700 hover:bg-slate-200/60 transition-colors ml-1"
+              title="Cerrar panel"
             >
               <X size={18} />
             </button>
@@ -493,11 +479,21 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
 
               <div className="flex flex-wrap items-center gap-2 shrink-0">
                 <button
-                  onClick={() => setIsPasteModalOpen(true)}
-                  className="px-3 py-1.5 rounded-xl text-xs font-bold bg-white hover:bg-slate-100 text-indigo-700 border border-indigo-200 shadow-xs transition-all flex items-center gap-1.5"
+                  onClick={handleQuickClipboardPaste}
+                  className="px-3.5 py-1.5 rounded-xl text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white shadow-xs transition-all flex items-center gap-1.5"
+                  title="Importar automáticamente el cierre diario copiado al portapapeles"
                 >
-                  <Send size={12} className="text-indigo-600" />
-                  <span>Pegar JSON AeroFocus</span>
+                  <Send size={12} className="text-indigo-200" />
+                  <span>Pegar Cierre (Portapapeles)</span>
+                </button>
+
+                <button
+                  onClick={() => setIsPasteModalOpen(true)}
+                  className="px-3 py-1.5 rounded-xl text-xs font-bold bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 shadow-xs transition-all flex items-center gap-1.5"
+                  title="Pegar JSON o reporte de AeroFocus manualmente"
+                >
+                  <Edit2 size={12} className="text-slate-500" />
+                  <span>Pegar Manual</span>
                 </button>
 
                 <button
@@ -507,13 +503,28 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                   title="Comprobar enlace de conexión con AeroFocus Pro (Ping de test sin datos ficticios)"
                 >
                   <ShieldCheck size={12} className="text-emerald-600" />
-                  <span>{isTestingWebhook ? "Comprobando..." : "Comprobar Enlace"}</span>
+                  <span>{isTestingWebhook ? "Comprobando..." : "Test Enlace"}</span>
+                </button>
+
+                <button
+                  onClick={() => setShowConnectionInfo(!showConnectionInfo)}
+                  className={cn(
+                    "px-3 py-1.5 rounded-xl text-xs font-bold border shadow-xs transition-all flex items-center gap-1.5",
+                    showConnectionInfo
+                      ? "bg-indigo-50 text-indigo-700 border-indigo-200"
+                      : "bg-white hover:bg-slate-100 text-slate-700 border-slate-200"
+                  )}
+                  title="Ver Endpoint y Token para configurar la sincronización en AeroFocus Pro"
+                >
+                  <HelpCircle size={12} className={showConnectionInfo ? "text-indigo-600" : "text-slate-500"} />
+                  <span>{showConnectionInfo ? "Ocultar Conexión" : "Ver Datos Webhook"}</span>
                 </button>
 
                 <button
                   onClick={() => fetchQuarantinedEvents()}
                   disabled={isLoadingQuarantine}
                   className="px-3 py-1.5 rounded-xl text-xs font-bold bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 shadow-xs transition-all flex items-center gap-1.5"
+                  title="Refrescar lista de cuarentena"
                 >
                   <RefreshCw size={12} className={cn(isLoadingQuarantine && "animate-spin")} />
                   <span>Actualizar</span>
@@ -521,15 +532,160 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
 
                 {quarantinedEvents.length > 0 && (
                   <button
-                    onClick={() => clearAllQuarantine()}
+                    onClick={() => {
+                      if (confirm("¿Deseas vaciar por completo la bandeja de cuarentena? Se eliminarán todos los registros retenidos.")) {
+                        clearAllQuarantine();
+                      }
+                    }}
                     className="px-3 py-1.5 rounded-xl text-xs font-bold bg-rose-50 hover:bg-rose-100 text-rose-800 border border-rose-200/80 shadow-xs transition-all flex items-center gap-1.5"
+                    title="Vaciar todos los registros de la cuarentena"
                   >
                     <Trash2 size={12} className="text-rose-600" />
-                    <span>Vaciar Cuarentena</span>
+                    <span>Vaciar Cuarentena ({quarantinedEvents.length})</span>
                   </button>
                 )}
               </div>
             </div>
+
+            {/* AeroFocus Pro Live Link & Webhook Configuration Card */}
+            {showConnectionInfo && (
+              <div className="px-5 py-4 bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 text-white border-b border-indigo-900/50 flex flex-col gap-4 animate-in fade-in duration-200 shrink-0 shadow-inner">
+                {/* Header with live status and quick actions */}
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="flex items-center gap-2.5">
+                    <div className="relative flex items-center justify-center">
+                      <span className="w-3 h-3 rounded-full bg-emerald-500 animate-ping absolute opacity-75"></span>
+                      <span className="w-2.5 h-2.5 rounded-full bg-emerald-400"></span>
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs font-black tracking-wider uppercase text-white font-mono">
+                          Enlace en Vivo AeroFocus Pro
+                        </span>
+                        <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 flex items-center gap-1">
+                          <Zap size={10} className="text-emerald-400" />
+                          SSE 0ms · Automático
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-slate-300 mt-0.5">
+                        Al aterrizar un vuelo en AeroFocus Pro, los minutos y temas entran solos aquí sin tocar nada.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={handleSimulateFlight}
+                      disabled={isSimulatingFlight}
+                      className="px-3 py-1.5 rounded-xl text-xs font-bold bg-emerald-500 hover:bg-emerald-400 text-slate-950 shadow-sm transition-all flex items-center gap-1.5 disabled:opacity-50"
+                      title="Genera un vuelo de prueba para verificar que la recepción automática en tiempo real funciona perfectamente"
+                    >
+                      <Plane size={13} className={cn("text-slate-950", isSimulatingFlight && "animate-bounce")} />
+                      <span>{isSimulatingFlight ? "Aterrizando..." : "Simular Aterrizaje en Vivo"}</span>
+                    </button>
+
+                    <button
+                      onClick={() => setShowConnectionInfo(false)}
+                      className="text-xs text-slate-400 hover:text-white px-2 py-1 rounded-lg transition-colors"
+                    >
+                      Ocultar
+                    </button>
+                  </div>
+                </div>
+
+                {/* Webhook Parameters (URL + Token) */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+                  {/* Webhook URL Card */}
+                  <div className="bg-slate-800/80 p-3.5 rounded-2xl border border-indigo-500/20 shadow-sm flex flex-col justify-between backdrop-blur-xs">
+                    <div>
+                      <div className="flex items-center justify-between mb-1.5">
+                        <span className="text-[10px] font-black uppercase text-indigo-300 tracking-wider">
+                          1. URL del Webhook (POST)
+                        </span>
+                        <span className="text-[10px] text-slate-400 font-sans">
+                          AeroFocus &gt; Ajustes &gt; Webhook URL
+                        </span>
+                      </div>
+                      <div className="font-mono text-emerald-300 select-all text-[11px] bg-slate-950/70 p-2.5 rounded-xl border border-slate-700/60 break-all">
+                        {typeof window !== "undefined" ? `${window.location.origin}/api/webhook/aerofocus` : "/api/webhook/aerofocus"}
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => {
+                        const url = typeof window !== "undefined" ? `${window.location.origin}/api/webhook/aerofocus` : "/api/webhook/aerofocus";
+                        navigator.clipboard.writeText(url);
+                        setCopiedUrl(true);
+                        setTimeout(() => setCopiedUrl(false), 2500);
+                        toast.success("URL del Webhook copiada al portapapeles.");
+                      }}
+                      className={cn(
+                        "mt-2.5 px-3 py-1.5 rounded-lg text-[11px] font-bold flex items-center gap-1.5 self-start transition-all",
+                        copiedUrl
+                          ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
+                          : "bg-indigo-600/50 hover:bg-indigo-600 text-indigo-100 border border-indigo-400/30"
+                      )}
+                    >
+                      {copiedUrl ? <Check size={12} className="text-emerald-400" /> : <Copy size={12} />}
+                      <span>{copiedUrl ? "¡URL Copiada!" : "Copiar URL del Webhook"}</span>
+                    </button>
+                  </div>
+
+                  {/* Token Card */}
+                  <div className="bg-slate-800/80 p-3.5 rounded-2xl border border-indigo-500/20 shadow-sm flex flex-col justify-between backdrop-blur-xs">
+                    <div>
+                      <div className="flex items-center justify-between mb-1.5">
+                        <span className="text-[10px] font-black uppercase text-indigo-300 tracking-wider">
+                          2. Token de Autorización
+                        </span>
+                        <span className="text-[10px] text-slate-400 font-sans">
+                          AeroFocus &gt; Ajustes &gt; Token / API Key
+                        </span>
+                      </div>
+                      <div className="font-mono text-emerald-300 select-all text-[11px] bg-slate-950/70 p-2.5 rounded-xl border border-slate-700/60 break-all">
+                        {webhookToken || "wp_qLXi6WFkFY_live"}
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => {
+                        const tok = webhookToken || "wp_qLXi6WFkFY_live";
+                        navigator.clipboard.writeText(tok);
+                        setCopiedToken(true);
+                        setTimeout(() => setCopiedToken(false), 2500);
+                        toast.success("Token copiado al portapapeles.");
+                      }}
+                      className={cn(
+                        "mt-2.5 px-3 py-1.5 rounded-lg text-[11px] font-bold flex items-center gap-1.5 self-start transition-all",
+                        copiedToken
+                          ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
+                          : "bg-indigo-600/50 hover:bg-indigo-600 text-indigo-100 border border-indigo-400/30"
+                      )}
+                    >
+                      {copiedToken ? <Check size={12} className="text-emerald-400" /> : <Copy size={12} />}
+                      <span>{copiedToken ? "¡Token Copiado!" : "Copiar Token"}</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* 3-Step Setup Quick Note */}
+                <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-slate-800/80 text-[11px] text-slate-300">
+                  <div className="flex items-center gap-3">
+                    <span className="text-indigo-300 font-bold">Guía en 3 pasos:</span>
+                    <span>1. En AeroFocus Pro ve a Ajustes</span>
+                    <span>&rarr;</span>
+                    <span>2. Pega la URL y el Token</span>
+                    <span>&rarr;</span>
+                    <span>3. ¡Al aterrizar, la sesión aparece sola aquí!</span>
+                  </div>
+                  <button
+                    onClick={handleTestWebhook}
+                    disabled={isTestingWebhook}
+                    className="text-xs text-indigo-300 hover:text-white underline font-semibold transition-colors"
+                  >
+                    {isTestingWebhook ? "Verificando..." : "Comprobar Enlace (Ping)"}
+                  </button>
+                </div>
+              </div>
+            )}
 
             {/* Quarantine List */}
             <div className="flex-1 p-6 overflow-y-auto min-h-0">
@@ -539,25 +695,33 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                     <ShieldCheck size={28} />
                   </div>
                   <h3 className="text-base font-black text-slate-800 font-serif">
-                    Bandeja de Cuarentena Limpia y Protegida
+                    Bandeja de Cuarentena Limpia y Lista
                   </h3>
                   <p className="text-xs text-slate-500 max-w-md mt-1 leading-relaxed">
-                    No hay ningún evento pendiente de revisión. Todas las sesiones que envíe AeroFocus aparecerán aquí de inmediato para que las califiques y apruebes.
+                    No hay sesiones retenidas pendientes. Puedes recibir transmisiones automáticas vía Webhook o pulsar abajo para pegar tu cierre diario de AeroFocus.
                   </p>
-                  <div className="mt-6 flex flex-wrap items-center justify-center gap-2">
+                  <div className="mt-6 flex flex-wrap items-center justify-center gap-2.5">
                     <button
-                      onClick={handleTestWebhook}
-                      className="px-4 py-2 rounded-xl text-xs font-black text-white bg-slate-900 hover:bg-slate-800 shadow-sm transition-all flex items-center gap-1.5"
+                      onClick={handleSimulateFlight}
+                      disabled={isSimulatingFlight}
+                      className="px-4 py-2 rounded-xl text-xs font-bold text-slate-950 bg-emerald-400 hover:bg-emerald-300 shadow-sm transition-all flex items-center gap-1.5 disabled:opacity-50"
                     >
-                      <ShieldCheck size={13} className="text-emerald-400" />
-                      <span>Comprobar Enlace de Conexión</span>
+                      <Plane size={13} className={cn("text-slate-950", isSimulatingFlight && "animate-bounce")} />
+                      <span>{isSimulatingFlight ? "Aterrizando vuelo..." : "Simular Aterrizaje en Vivo"}</span>
+                    </button>
+                    <button
+                      onClick={handleQuickClipboardPaste}
+                      className="px-4 py-2 rounded-xl text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 shadow-sm transition-all flex items-center gap-1.5"
+                    >
+                      <Send size={13} className="text-indigo-200" />
+                      <span>Pegar Cierre (Portapapeles)</span>
                     </button>
                     <button
                       onClick={() => setIsPasteModalOpen(true)}
                       className="px-4 py-2 rounded-xl text-xs font-bold text-slate-700 bg-white hover:bg-slate-100 border border-slate-200 transition-all flex items-center gap-1.5"
                     >
-                      <Send size={13} className="text-indigo-600" />
-                      <span>Pegar JSON Manualmente</span>
+                      <Edit2 size={13} className="text-slate-500" />
+                      <span>Pegar JSON Manual</span>
                     </button>
                   </div>
                 </div>
@@ -1170,8 +1334,8 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                   <Send size={16} />
                 </div>
                 <div>
-                  <h3 className="text-sm font-black text-slate-900">Pegar Transmisión de AeroFocus</h3>
-                  <p className="text-[11px] text-slate-500">Pega el payload JSON recibido de AeroFocus Pro</p>
+                  <h3 className="text-sm font-black text-slate-900">Pegar Transmisión de AeroFocus Pro</h3>
+                  <p className="text-[11px] text-slate-500">Acepta JSON, bloques Markdown o reporte de texto</p>
                 </div>
               </div>
               <button
@@ -1183,15 +1347,31 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
             </div>
 
             <div>
-              <label className="text-[10px] font-black uppercase tracking-wider text-slate-400 block mb-1">
-                JSON de la sesión
-              </label>
+              <div className="flex items-center justify-between mb-1">
+                <label className="text-[10px] font-black uppercase tracking-wider text-slate-400 block">
+                  Contenido de la sesión o reporte
+                </label>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    try {
+                      if (navigator?.clipboard?.readText) {
+                        const clip = await navigator.clipboard.readText();
+                        if (clip) setPasteJsonText(clip);
+                      }
+                    } catch {}
+                  }}
+                  className="text-[10px] font-bold text-indigo-600 hover:text-indigo-800 flex items-center gap-1"
+                >
+                  <Copy size={10} /> Pegar del portapapeles
+                </button>
+              </div>
               <textarea
-                rows={8}
+                rows={9}
                 value={pasteJsonText}
                 onChange={(e) => setPasteJsonText(e.target.value)}
-                placeholder='{"date": "2026-10-21", "topics": [{"topicTitle": "Constitucional 1", "effectiveMinutes": 90, "modality": "repaso"}]}'
-                className="w-full p-3 bg-slate-50 border border-slate-200 rounded-2xl text-xs font-mono text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500"
+                placeholder={'// Pega aquí el JSON o reporte copiado de AeroFocus:\n{\n  "date": "2026-10-23",\n  "topics": [\n    {\n      "materia": "Constitucional",\n      "tema": "Tema 5",\n      "effectiveMinutes": 90,\n      "modality": "repaso"\n    }\n  ]\n}\n\n// O también texto:\nConstitucional Tema 5 - 90 min - Repaso'}
+                className="w-full p-3 bg-slate-50 border border-slate-200 rounded-2xl text-xs font-mono text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 placeholder:text-slate-400/80"
               />
             </div>
 
@@ -1207,10 +1387,10 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                 type="button"
                 onClick={handleImportPaste}
                 disabled={isImportingPaste}
-                className="px-4 py-2 rounded-xl text-xs font-black text-white bg-indigo-600 hover:bg-indigo-700 shadow-sm transition-all flex items-center gap-1.5"
+                className="px-4 py-2 rounded-xl text-xs font-black text-white bg-indigo-600 hover:bg-indigo-700 shadow-sm transition-all flex items-center gap-1.5 disabled:opacity-50"
               >
                 {isImportingPaste ? <RefreshCw size={12} className="animate-spin" /> : <CheckCircle2 size={13} />}
-                <span>Cargar en Cuarentena</span>
+                <span>Interpretar y Cargar en Cuarentena</span>
               </button>
             </div>
           </div>

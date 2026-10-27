@@ -1,6 +1,6 @@
 {
-  "summary":  "Plan de implementación del nuevo motor matemático de Ebbinghaus para la Sección de Preparador:\n- Modelo multiplicativo continuo de retención con curva de olvido exponencial R(t) = exp(-t_eff / S).\n- Ponderación de frescura neuronal: cante frena al 100% el olvido y repaso de estudio al 50%.\n- Doble calificación en la tarjeta de tema: Nota Proyectada Real en grande y Nota Máxima Histórica al lado.\n- Diagnóstico inteligente con alertas de caducidad, estabilidad de memoria (S) y plan de rescate del tema.",
-  "updatedAt":  "2026-10-22T08:11:38.020717622Z",
+  "summary":  "Implementación completa y verificada de las mejoras en el Temario y seguimiento de vueltas con acabados estilo Apple, microinteracciones táctiles, indicador de retención Ebbinghaus, selector físico de materias y registro rápido de repasos en 1 clic.",
+  "updatedAt":  "2026-10-26T17:57:37.763502549Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

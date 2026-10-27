@@ -5,6 +5,7 @@ import { calculateNextSRSState } from "./srs";
 import { safeParseDate, getLocalDateString } from "./utils";
 import { calculateEstimatedReviewTime, RepasoPredictionResult } from "./repasoPredictor";
 import { getLatestCantoForTopic, sessionMatchesTopic } from "./cantoUtils";
+import { calculateEbbinghausCurve, TopicMemoryStatus } from "./ebbinghaus";
 
 export interface FastTopicTelemetry {
   sessions: any[];
@@ -25,6 +26,12 @@ export interface FastTopicTelemetry {
     daysDiff: number | null;
   };
   reviewEstimate: RepasoPredictionResult;
+  ebbinghaus: {
+    retention: number;
+    status: TopicMemoryStatus;
+    statusTitle: string;
+    isDue: boolean;
+  };
 }
 
 /**
@@ -151,6 +158,15 @@ export function buildSubjectTelemetryIndex(
       recentSessions
     );
 
+    // Ebbinghaus memory retention calculation
+    const ebbAnalysis = calculateEbbinghausCurve(
+      topicId,
+      progress?.pages || topic.pages || 15,
+      progress?.difficulty || topic.difficulty || 5,
+      progress,
+      topicSessions
+    );
+
     index.set(topicId, {
       sessions: topicSessions,
       lastCanto,
@@ -162,6 +178,12 @@ export function buildSubjectTelemetryIndex(
         daysDiff,
       },
       reviewEstimate,
+      ebbinghaus: {
+        retention: Math.round(ebbAnalysis.currentRetention),
+        status: ebbAnalysis.status,
+        statusTitle: ebbAnalysis.statusTitle,
+        isDue: ebbAnalysis.isBelowCritical80 || isDueToday || isOverdue,
+      },
     });
   }
 

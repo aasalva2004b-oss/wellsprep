@@ -212,12 +212,21 @@ export function extractTopicNumber(idOrTitle?: string | number): number | null {
   if (!idOrTitle) return null;
   const str = String(idOrTitle).trim();
 
+  // Descartar si es una línea de métricas, tiempo, distracción o vuelo y no un tema
+  if (/\b(?:minutos?|mins?|m\b|segundos?|segs?|horas?|hrs?|h\b|distracci[oó]n(?:es)?|distractions?|pausa|descanso|break|checklist|touchdown|landing|takeoff|vuelo|flight|callsign|aircraft|efectiv[oa]|bloque)\b/i.test(str)) {
+    // Solo permitir si explícitamente dice "tema" o "t-" o "#"
+    if (!/(?:tema|t\b|t-|\b#)\s*\d+/i.test(str)) {
+      return null;
+    }
+  }
+
   // Tema 12, T12, T-12, #12
   const matchExplicit = str.match(/(?:tema|t|n[ºo°]|#)\s*[-_:]*\s*(\d+)/i);
   if (matchExplicit) return parseInt(matchExplicit[1], 10);
 
   // Comienzo con número: "12. Las fuentes", "12 - Las fuentes", "12 Las fuentes"
-  const matchStart = str.match(/^(\d+)[.\s\-_:]/);
+  // Pero asegurando que no le siga una unidad de tiempo ("1 min", "1 h")
+  const matchStart = str.match(/^(\d+)[.\s\-_:]+(?!(?:min|hora|h\b|m\b|s\b|seg|distrac|paus|desc))/i);
   if (matchStart) return parseInt(matchStart[1], 10);
 
   // Número aislado puro: "12"
@@ -229,6 +238,53 @@ export function extractTopicNumber(idOrTitle?: string | number): number | null {
   if (matchParen) return parseInt(matchParen[1], 10);
 
   return null;
+}
+
+/**
+ * Extrae minutos netos de estudio desde cualquier objeto de tema o sesión de AeroFocus Pro
+ */
+export function extractMinutesFromAeroItem(item: any, fallbackMinutes: number = 45): number {
+  if (!item || typeof item !== 'object') return fallbackMinutes;
+
+  // 1. Minutos explícitos directos
+  const directMins = item.minutosEfectivos ?? item.effectiveMinutes ?? item.effectiveStudyMinutes ??
+    item.studyMinutes ?? item.durationMinutes ?? item.duration_minutes ?? item.minutes ?? item.minutos ??
+    item.netMinutes ?? item.minutosNetos ?? item.grossMinutes ?? item.minutosBrutos ??
+    item.totalMinutes ?? item.minutosTotales;
+  if (directMins !== undefined && directMins !== null && !isNaN(Number(directMins)) && Number(directMins) > 0) {
+    return Math.round(Number(directMins));
+  }
+
+  // 2. Horas explícitas directas
+  const directHours = item.horasEfectivas ?? item.effectiveHours ?? item.hours ?? item.horas ?? item.studyHours ?? item.horasEstudio;
+  if (directHours !== undefined && directHours !== null && !isNaN(Number(directHours)) && Number(directHours) > 0) {
+    return Math.round(Number(directHours) * 60);
+  }
+
+  // 3. Cadena de tiempo o duración (ej. "45m", "1h 30m", "01:30:00", "90")
+  const timeRaw = item.duration ?? item.time ?? item.tiempo ?? item.timeFormatted ?? item.tiempoFormateado;
+  if (typeof timeRaw === 'number' && timeRaw > 0) {
+    return Math.round(timeRaw);
+  }
+  if (typeof timeRaw === 'string' && timeRaw.trim()) {
+    const str = timeRaw.trim().toLowerCase();
+    const colonMatch = str.match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/);
+    if (colonMatch) {
+      return parseInt(colonMatch[1], 10) * 60 + parseInt(colonMatch[2], 10);
+    }
+    const hMatch = str.match(/(\d+(?:[.,]\d+)?)\s*(?:h|horas?)/);
+    const mMatch = str.match(/(\d+)\s*(?:m|mins?|minutos?)/);
+    if (hMatch || mMatch) {
+      let parsed = 0;
+      if (hMatch) parsed += Math.round(parseFloat(hMatch[1].replace(',', '.')) * 60);
+      if (mMatch) parsed += parseInt(mMatch[1], 10);
+      if (parsed > 0) return parsed;
+    }
+    const pureNum = parseInt(str, 10);
+    if (!isNaN(pureNum) && pureNum > 0) return pureNum;
+  }
+
+  return fallbackMinutes;
 }
 
 /**
@@ -366,9 +422,8 @@ function buildResolvedTopic(
   item: AeroFocusTopicItem | any
 ): WebhookResolvedTopic {
   const rawAny = item as any;
-  const effectiveHours = Number(rawAny.horasEfectivas ?? rawAny.effectiveHours) || 
-    (Number(rawAny.minutosEfectivos ?? rawAny.effectiveMinutes) ? Number(rawAny.minutosEfectivos ?? rawAny.effectiveMinutes) / 60 : 0);
-  const effectiveMinutes = Number(rawAny.minutosEfectivos ?? rawAny.effectiveMinutes) || Math.round(effectiveHours * 60) || 60;
+  const effectiveMinutes = extractMinutesFromAeroItem(rawAny, 45);
+  const effectiveHours = Math.round((effectiveMinutes / 60) * 100) / 100;
 
   const grade = typeof rawAny.cantoGrade === 'number' ? rawAny.cantoGrade :
                 typeof rawAny.grade === 'number' ? rawAny.grade :
