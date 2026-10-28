@@ -1,16 +1,36 @@
-import { corsHeaders, loadWebhookEvents } from '../../src/lib/webhookStorage';
+import fs from 'fs';
+import path from 'path';
+
+function getStoragePath(): string {
+  const isServerless = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME || process.env.NOW_REGION);
+  if (isServerless) {
+    return path.join('/tmp', 'aerofocus_events.json');
+  }
+  return path.join(process.cwd(), 'uploads', 'aerofocus_events.json');
+}
+
+function loadEvents(): any[] {
+  try {
+    const file = getStoragePath();
+    if (fs.existsSync(file)) {
+      const data = JSON.parse(fs.readFileSync(file, 'utf-8'));
+      if (Array.isArray(data)) return data;
+    }
+  } catch {}
+  return (globalThis as any).__wellsprep_sessions || [];
+}
 
 export default async function handler(req: any, res: any) {
-  res.setHeader('Access-Control-Allow-Origin', corsHeaders['Access-Control-Allow-Origin']);
+  res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', corsHeaders['Access-Control-Allow-Headers']);
+  res.setHeader('Access-Control-Allow-Headers', '*');
 
   if (req.method === 'OPTIONS') {
     return res.status(204).end();
   }
 
   try {
-    const events = loadWebhookEvents();
+    const events = loadEvents();
     const statusFilter = req.query?.status;
     const limit = parseInt(req.query?.limit || '50', 10);
 

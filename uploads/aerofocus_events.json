@@ -1,1 +1,48 @@
-[]
+[
+  {
+    "id": "af_1793188720865_gi6uo",
+    "receivedAt": "2026-10-28T11:58:40.865Z",
+    "date": "2026-10-28",
+    "source": "aerofocus_pro",
+    "flightId": "FLIGHT-999",
+    "transactionId": "FLIGHT-999",
+    "dailyTotalEffectiveHours": 1,
+    "totalFlightEffectiveMinutes": 60,
+    "totalFlightEffectiveHours": 1,
+    "status": "quarantined",
+    "topics": [
+      {
+        "resolvedTopicId": "constitucional-1",
+        "resolvedSubjectId": "constitucional",
+        "resolvedTopicNumber": 1,
+        "resolvedTopicTitle": "Tema 1 Principios Constitucionales",
+        "effectiveMinutes": 60,
+        "effectiveHours": 1,
+        "modality": "repaso",
+        "isTopicCompleted": false,
+        "completesVuelta": false,
+        "notes": "Sincronizado vía AeroFocus Webhook",
+        "original": {
+          "tema": "Tema 1 Principios Constitucionales",
+          "subject": "Derecho Constitucional",
+          "topicNumber": 1,
+          "effectiveMinutes": 60
+        }
+      }
+    ],
+    "rawPayload": {
+      "date": "2026-10-28",
+      "flightId": "FLIGHT-999",
+      "topics": [
+        {
+          "tema": "Tema 1 Principios Constitucionales",
+          "subject": "Derecho Constitucional",
+          "topicNumber": 1,
+          "effectiveMinutes": 60
+        }
+      ]
+    },
+    "pilotCallsign": "Piloto AeroFocus",
+    "focusScore": 100
+  }
+]
