@@ -220,22 +220,36 @@ export function extractTopicNumber(idOrTitle?: string | number): number | null {
     }
   }
 
-  // Tema 12, T12, T-12, #12
+  // 1. Explicit subject + number (e.g. Civil 14, Penal 3, Consti 5, DPC 8, Procesal Civil 12)
+  const subjNum = str.match(/(?:civil|penal|consti(?:tucional)?|procesal(?:[-_\s]*(?:civil|penal))?|dpc|dpp|dce|dc|dp|merc(?:antil)?|admin(?:istrativo)?|laboral)\s*[-_:#T]*\s*(\d+)/i);
+  if (subjNum) return parseInt(subjNum[1], 10);
+
+  // 2. Tema 12, T12, T-12, #12
   const matchExplicit = str.match(/(?:tema|t|n[ºo°]|#)\s*[-_:]*\s*(\d+)/i);
   if (matchExplicit) return parseInt(matchExplicit[1], 10);
 
-  // Comienzo con número: "12. Las fuentes", "12 - Las fuentes", "12 Las fuentes"
-  // Pero asegurando que no le siga una unidad de tiempo ("1 min", "1 h")
+  // 3. Comienzo con número: "12. Las fuentes", "12 - Las fuentes", "12 Las fuentes"
   const matchStart = str.match(/^(\d+)[.\s\-_:]+(?!(?:min|hora|h\b|m\b|s\b|seg|distrac|paus|desc))/i);
   if (matchStart) return parseInt(matchStart[1], 10);
 
-  // Número aislado puro: "12"
+  // 4. Número aislado puro: "12"
   const matchPure = str.match(/^(\d+)$/);
   if (matchPure) return parseInt(matchPure[1], 10);
 
-  // Número al final entre paréntesis: "Las personas jurídicas (12)"
+  // 5. Número al final entre paréntesis: "Las personas jurídicas (12)"
   const matchParen = str.match(/\((\d+)\)$/);
   if (matchParen) return parseInt(matchParen[1], 10);
+
+  // 6. Generic word + number (e.g. Repaso 14, Fuentes 12)
+  const matchWordNum = str.match(/(?:[a-zA-Záéíóúñ]+)\s*[-_:]+\s*(\d+)(?!\s*(?:min|h|seg|s\b|m\b|p[áa]g))/i);
+  if (matchWordNum) return parseInt(matchWordNum[1], 10);
+
+  // 7. Any standalone number in the string (not preceded/followed by units of time)
+  const matchAnyNum = str.match(/(?<!\d)(?<!\b(?:p[áa]gs?\.?|p\.?)\s*)(\d{1,3})(?!\d)(?!\s*(?:min|mins|hora|horas|h\b|m\b|s\b|seg))/i);
+  if (matchAnyNum) {
+    const n = parseInt(matchAnyNum[1], 10);
+    if (n >= 1 && n <= 150) return n;
+  }
 
   return null;
 }
@@ -406,15 +420,38 @@ export function resolveAeroFocusTopic(
   }
 
   // 6. Intento por número puro si coincide de forma inequívoca en la asignatura seleccionada
-  if (subjectIdFromCategory && topicNum) {
-    const subjectMatches = topicsList.filter(t => t.subjectId === subjectIdFromCategory);
+  if ((subjectIdFromCategory || subjectIdFromTitle) && topicNum) {
+    const activeSub = subjectIdFromCategory || subjectIdFromTitle;
+    const subjectMatches = topicsList.filter(t => t.subjectId === activeSub);
     const match = subjectMatches.find(t => t.number === topicNum);
     if (match) {
       return buildResolvedTopic(match, item);
     }
   }
 
-  return null;
+  // 7. Si hay número pero la asignatura no vino explícita, buscar en Constitucional
+  if (topicNum) {
+    const defaultConst = topicsList.find(t => t.subjectId === 'constitucional' && t.number === topicNum);
+    if (defaultConst) {
+      return buildResolvedTopic(defaultConst, item);
+    }
+  }
+
+  // 8. Fallback amigable: NUNCA devolver null para evitar topic-unknown
+  const finalNum = topicNum || 1;
+  const finalSubId = subjectIdFromCategory || subjectIdFromTitle || 'constitucional';
+  const effectiveMins = extractMinutesFromAeroItem(item, 45);
+
+  return {
+    resolvedTopicId: `${finalSubId}-${finalNum}`,
+    resolvedSubjectId: finalSubId,
+    resolvedTopicNumber: finalNum,
+    resolvedTopicTitle: titleText ? `Tema ${finalNum} - ${titleText}` : `Tema ${finalNum}`,
+    modality: normalizeModality((item as any).modalidad || (item as any).modality || (item as any).type),
+    effectiveHours: Math.round((effectiveMins / 60) * 100) / 100,
+    effectiveMinutes: effectiveMins,
+    original: item
+  };
 }
 
 function buildResolvedTopic(

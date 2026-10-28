@@ -130,24 +130,19 @@ export function useAeroFocusSync(onNewSession?: (session: any) => void) {
 
     connectSSE();
 
-    // 3. Polling de respaldo cada 6 segundos
+    // 3. Heartbeat de conectividad (comprueba estado sin reinyectar sesiones históricas)
     const checkServer = async () => {
       if (!isMounted) return;
       try {
-        const res = await fetch('/api/webhook/aerofocus');
+        const res = await fetch('/api/webhook/ping');
         if (res.ok) {
-          const data = await res.json();
-          const sessions = data.latestSessions || [];
-          for (const item of sessions) {
-            const payload = item.payload || item;
-            handleIncomingPayload(payload);
-          }
+          setSyncState(prev => ({ ...prev, isConnected: true }));
         }
       } catch {}
     };
 
-    const initialTimer = setTimeout(checkServer, 1500);
-    pollInterval = setInterval(checkServer, 6000);
+    const initialTimer = setTimeout(checkServer, 2000);
+    pollInterval = setInterval(checkServer, 15000);
 
     return () => {
       isMounted = false;

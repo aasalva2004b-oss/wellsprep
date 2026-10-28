@@ -98,7 +98,46 @@ function normalizeCategoryToSubjectId(category?: string): string | null {
     return 'administrativo-laboral';
   }
 
-  return 'constitucional';
+  return null;
+}
+
+function extractTopicNumber(idOrTitle?: string | number): number | null {
+  if (typeof idOrTitle === 'number') return idOrTitle > 0 ? idOrTitle : null;
+  if (!idOrTitle) return null;
+  const str = String(idOrTitle).trim();
+
+  // 1. Explicit subject + number (e.g. Civil 14, Penal 3, Consti 5, DPC 8, Procesal Civil 12)
+  const subjNum = str.match(/(?:civil|penal|consti(?:tucional)?|procesal(?:[-_\s]*(?:civil|penal))?|dpc|dpp|dce|dc|dp|merc(?:antil)?|admin(?:istrativo)?|laboral)\s*[-_:#T]*\s*(\d+)/i);
+  if (subjNum) return parseInt(subjNum[1], 10);
+
+  // 2. Tema 12, T12, T-12, #12
+  const matchExplicit = str.match(/(?:tema|t|n[ºo°]|#)\s*[-_:]*\s*(\d+)/i);
+  if (matchExplicit) return parseInt(matchExplicit[1], 10);
+
+  // 3. Comienzo con número: "12. Las fuentes", "12 - Las fuentes"
+  const matchStart = str.match(/^(\d+)[.\s\-_:]+(?!(?:min|hora|h\b|m\b|s\b|seg|distrac|paus|desc))/i);
+  if (matchStart) return parseInt(matchStart[1], 10);
+
+  // 4. Número puro
+  const matchPure = str.match(/^(\d+)$/);
+  if (matchPure) return parseInt(matchPure[1], 10);
+
+  // 5. Número al final entre paréntesis
+  const matchParen = str.match(/\((\d+)\)$/);
+  if (matchParen) return parseInt(matchParen[1], 10);
+
+  // 6. Generic word + number
+  const matchWordNum = str.match(/(?:[a-zA-Záéíóúñ]+)\s*[-_:]+\s*(\d+)(?!\s*(?:min|h|seg|s\b|m\b|p[áa]g))/i);
+  if (matchWordNum) return parseInt(matchWordNum[1], 10);
+
+  // 7. Standalone number
+  const matchAnyNum = str.match(/(?<!\d)(?<!\b(?:p[áa]gs?\.?|p\.?)\s*)(\d{1,3})(?!\d)(?!\s*(?:min|mins|hora|horas|h\b|m\b|s\b|seg))/i);
+  if (matchAnyNum) {
+    const n = parseInt(matchAnyNum[1], 10);
+    if (n >= 1 && n <= 150) return n;
+  }
+
+  return null;
 }
 
 function parseAeroFocusTopicId(rawId?: string): { subjectId: string; number: number } | null {
@@ -137,6 +176,12 @@ function parseAeroFocusTopicId(rawId?: string): { subjectId: string; number: num
   if (upper.startsWith('CONST_') || upper.startsWith('DCE_') || upper.startsWith('CON_')) {
     const n = parseInt(upper.replace(/^.*_(\d+)$/, '$1'), 10);
     return { subjectId: 'constitucional', number: isNaN(n) ? 1 : n };
+  }
+
+  const sId = normalizeCategoryToSubjectId(str);
+  const num = extractTopicNumber(str);
+  if (sId && num) {
+    return { subjectId: sId, number: num };
   }
 
   return null;
@@ -306,12 +351,13 @@ export default async function handler(req: any, res: any) {
     const fallbackMinsPerTopic = totalMins > 0 ? Math.max(15, Math.round(totalMins / count)) : 45;
 
     for (const t of filteredRaw) {
+      const titleCandidate = t.tema || t.topicTitle || t.topic || t.title || '';
       const rawMateria = t.materia || t.subject || t.subjectName || t.category || payload.materia || payload.subject;
-      const parsedPrefix = parseAeroFocusTopicId(t.topicId || t.temaId || t.id);
+      const parsedPrefix = parseAeroFocusTopicId(t.topicId || t.temaId || t.id) || parseAeroFocusTopicId(titleCandidate);
       
-      const subjectId = parsedPrefix?.subjectId || normalizeCategoryToSubjectId(rawMateria) || 'constitucional';
-      const topicNumber = parsedPrefix?.number || Number(t.temaNumero ?? t.topicNumber ?? 1);
-      const title = t.tema || t.topicTitle || t.topic || t.title || `Tema ${topicNumber}`;
+      const subjectId = parsedPrefix?.subjectId || normalizeCategoryToSubjectId(rawMateria) || normalizeCategoryToSubjectId(titleCandidate) || 'constitucional';
+      const topicNumber = parsedPrefix?.number || extractTopicNumber(t.temaNumero) || extractTopicNumber(t.topicNumber) || extractTopicNumber(titleCandidate) || 1;
+      const title = titleCandidate || `Tema ${topicNumber}`;
       
       const mins = Number(t.minutosEfectivos ?? t.effectiveMinutes ?? t.durationMinutes ?? fallbackMinsPerTopic);
       const hrs = Number(t.horasEfectivas ?? t.effectiveHours ?? (mins / 60));

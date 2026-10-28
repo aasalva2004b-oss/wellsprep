@@ -32,8 +32,9 @@ import { Topic } from "../types";
 import { TopicProgressData } from "./prediction";
 import { WebhookSyncRecord, WebhookResolvedTopic } from "./webhookTypes";
 import { isCantoSession, getCantoDuration, sessionMatchesTopic } from "./cantoUtils";
-import { resolveAeroFocusTopic, extractMinutesFromAeroItem } from "./topicResolver";
+import { resolveAeroFocusTopic, extractMinutesFromAeroItem, extractTopicNumber, normalizeCategoryToSubjectId } from "./topicResolver";
 import { parseAeroFocusInput } from "./aeroFocusParser";
+import { initialTopics } from "../data/initialData";
 
 export function cleanForFirestore<T>(data: T): T {
   if (data === null || data === undefined) {
@@ -167,6 +168,7 @@ interface FirebaseContextType {
   isLoadingQuarantine: boolean;
   fetchQuarantinedEvents: () => Promise<WebhookSyncRecord[]>;
   approveQuarantineEvent: (eventId: string) => Promise<boolean>;
+  approveAllQuarantineEvents: () => Promise<{ approvedCount: number }>;
   discardQuarantineEvent: (eventId: string) => Promise<boolean>;
   clearAllQuarantine: () => Promise<boolean>;
   addQuarantineEventManually: (rawPayload: any) => Promise<boolean>;
@@ -2236,11 +2238,16 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
             completesVuelta: isCompleted || resolved.completesVuelta
           });
         } else {
+          const rawTitleStr = t.topicTitle || t.tema || t.topic || t.title || "";
+          const subId = normalizeCategoryToSubjectId(materia) || normalizeCategoryToSubjectId(rawTitleStr) || "constitucional";
+          const num = extractTopicNumber(t.topicNumber) || extractTopicNumber(t.temaNumero) || extractTopicNumber(rawTitleStr) || extractTopicNumber(t.id) || 1;
+          const matchedOfficial = initialTopics.find(it => it.subjectId === subId && it.number === num);
+
           const fallbackTopic: WebhookResolvedTopic = {
-            resolvedTopicId: String(t.topicId || t.topicNumber || t.id || "topic-unknown"),
-            resolvedSubjectId: "general",
-            resolvedTopicNumber: Number(t.topicNumber || t.temaNumero || 0),
-            resolvedTopicTitle: t.topicTitle || t.tema || t.topic || t.title || `Tema ${t.topicNumber || ""}`,
+            resolvedTopicId: matchedOfficial ? matchedOfficial.id : `${subId}-${num}`,
+            resolvedSubjectId: matchedOfficial ? matchedOfficial.subjectId : subId,
+            resolvedTopicNumber: matchedOfficial ? matchedOfficial.number : num,
+            resolvedTopicTitle: matchedOfficial ? `Tema ${matchedOfficial.number} - ${matchedOfficial.title}` : (rawTitleStr || `Tema ${num}`),
             effectiveMinutes: minutos,
             effectiveHours: horas,
             modality: (modalidad as any) || "repaso",
@@ -2412,6 +2419,88 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
       toast.dismiss(toastId);
       toast.error("Error al aprobar evento: " + err.message);
       return false;
+    }
+  }, [user, quarantinedEvents]);
+
+  // Aprobar todas las sesiones retenidas en cuarentena en un solo clic
+  const approveAllQuarantineEvents = useCallback(async (): Promise<{ approvedCount: number }> => {
+    if (quarantinedEvents.length === 0) return { approvedCount: 0 };
+    if (!user) {
+      toast.error("Debes iniciar sesión para incorporar eventos.");
+      return { approvedCount: 0 };
+    }
+
+    const toastId = toast.loading(`Aprobando e integrando ${quarantinedEvents.length} sesiones en lote...`);
+    try {
+      const affectedTopicIds = new Set<string>();
+      const ackIds: string[] = [];
+
+      for (const event of quarantinedEvents) {
+        ackIds.push(event.id);
+        const topics = event.topics || [];
+        for (const topic of topics) {
+          const topicId = topic.resolvedTopicId;
+          if (!topicId) continue;
+
+          const durationMins = topic.effectiveMinutes || Math.round((topic.effectiveHours || 0) * 60) || 45;
+          const modalityType = topic.modality || "repaso";
+          const completesVuelta = topic.completesVuelta !== undefined ? topic.completesVuelta : (topic.modality === 'repaso' || topic.modality === 'canto');
+
+          const sessionRef = doc(collection(db, `users/${user.uid}/sessions`));
+          const sessionDoc = cleanForFirestore({
+            userId: user.uid,
+            topicId,
+            topicTitle: topic.resolvedTopicTitle,
+            date: event.date || getLocalDateString(),
+            durationMinutes: durationMins,
+            durationReal: durationMins,
+            difficulty: topic.difficulty !== undefined ? topic.difficulty : (topic.dificultadReal !== undefined ? topic.dificultadReal : 5),
+            dificultadReal: topic.difficulty !== undefined ? topic.difficulty : (topic.dificultadReal !== undefined ? topic.dificultadReal : 5),
+            type: modalityType,
+            modality: topic.modality,
+            notes: topic.notes || `Aprobado en lote desde Cuarentena AeroFocus (Vuelo #${event.flightId || 'N/A'})`,
+            source: 'aerofocus_approved',
+            flightId: String(event.flightId || ''),
+            effectiveHours: topic.effectiveHours || (durationMins / 60),
+            cantoGrade: topic.cantoGrade,
+            cantoSeconds: topic.cantoSeconds,
+            cantoType: topic.cantoType,
+            mistakes: topic.mistakes,
+            completesVuelta,
+            startPage: topic.startPage !== undefined ? topic.startPage : topic.pageInfo?.startPage,
+            endPage: topic.endPage !== undefined ? topic.endPage : topic.pageInfo?.endPage,
+            pagesCount: topic.pagesCount !== undefined ? topic.pagesCount : topic.pageInfo?.pagesRead,
+            pagesText: topic.pagesText || (topic.startPage && topic.endPage ? `Págs. ${topic.startPage}-${topic.endPage}` : undefined),
+            distractionSeconds: topic.distractionSeconds,
+            summaryLine: topic.summaryLine,
+            createdAt: serverTimestamp(),
+          });
+          await setDoc(sessionRef, sessionDoc);
+          affectedTopicIds.add(topicId);
+        }
+
+        deleteDoc(doc(db, `users/${user.uid}/quarantine`, event.id)).catch(() => {});
+      }
+
+      for (const tid of affectedTopicIds) {
+        await recalculateTopicFromSessions(tid);
+      }
+
+      await fetch("/api/webhook/ack", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ eventIds: ackIds }),
+      }).catch(() => {});
+
+      const totalCount = quarantinedEvents.length;
+      setQuarantinedEvents([]);
+      toast.dismiss(toastId);
+      toast.success(`✅ ${totalCount} sesiones integradas en el expediente con éxito.`);
+      return { approvedCount: totalCount };
+    } catch (err: any) {
+      toast.dismiss(toastId);
+      toast.error("Error en aprobación masiva: " + (err?.message || err));
+      return { approvedCount: 0 };
     }
   }, [user, quarantinedEvents]);
 
@@ -2629,6 +2718,7 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
         isLoadingQuarantine,
         fetchQuarantinedEvents,
         approveQuarantineEvent,
+        approveAllQuarantineEvents,
         discardQuarantineEvent,
         clearAllQuarantine,
         addQuarantineEventManually,

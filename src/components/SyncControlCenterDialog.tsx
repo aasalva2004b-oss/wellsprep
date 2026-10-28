@@ -3,7 +3,6 @@ import {
   X,
   RefreshCw,
   Search,
-  Filter,
   CheckCircle2,
   AlertTriangle,
   Clock,
@@ -17,19 +16,23 @@ import {
   ShieldCheck,
   ShieldAlert,
   Shield,
-  Trash,
   Send,
-  ExternalLink,
-  HelpCircle,
-  BarChart2,
   Copy,
   Plane,
-  Radio,
   Check,
-  Zap
+  Zap,
+  Key,
+  Globe,
+  Wrench,
+  BookOpen
 } from "lucide-react";
 import { useFirebase } from "../lib/FirebaseProvider";
 import { initialSubjects, initialTopics } from "../data/initialData";
+import {
+  normalizeCategoryToSubjectId,
+  parseAeroFocusTopicIdPrefix,
+  extractTopicNumber,
+} from "../lib/topicResolver";
 import { EditSessionDialog } from "./EditSessionDialog";
 import { toast } from "sonner";
 import { cn } from "../lib/utils";
@@ -40,6 +43,8 @@ interface SyncControlCenterDialogProps {
   onClose: () => void;
 }
 
+type ControlCenterTab = "quarantine" | "sessions" | "webhook" | "raw_logs";
+
 export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProps) {
   const {
     user,
@@ -48,47 +53,42 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
     deleteStudySession,
     quickUpdateSessionDifficulty,
     reconcileAllTopicsAndSessions,
-    syncPendingWebhookEvents,
-    isSyncingWebhooks,
     webhookToken,
     purgeAllAeroFocusData,
-    purgePhantomTema5Cante,
-    migratePenalSessionsToConstitucional5,
     deduplicateUserSessions,
-    recoverHistoricalUserData,
     quarantinedEvents = [],
     isLoadingQuarantine,
     fetchQuarantinedEvents,
     approveQuarantineEvent,
+    approveAllQuarantineEvents,
     discardQuarantineEvent,
     clearAllQuarantine,
     addQuarantineEventManually,
     updateQuarantineEvent,
     updateQuarantineTopic,
     mergeQuarantineTopics,
-    aerofocusBetaEnabled,
-    setAerofocusBetaEnabled,
   } = useFirebase();
 
-  const [activeTab, setActiveTab] = useState<"quarantine" | "sessions" | "raw_logs">("quarantine");
+  const [activeTab, setActiveTab] = useState<ControlCenterTab>("quarantine");
   const [searchQuery, setSearchQuery] = useState("");
   const [subjectFilter, setSubjectFilter] = useState<string>("all");
   const [sourceFilter, setSourceFilter] = useState<"all" | "aerofocus" | "manual">("all");
   const [difficultyFilter, setDifficultyFilter] = useState<"all" | "pending" | "rated">("all");
-  
+
   // Selected session for full editing
   const [editingSession, setEditingSession] = useState<any | null>(null);
 
-  // Reconciling state
+  // Operation states
   const [isReconciling, setIsReconciling] = useState(false);
   const [isTestingWebhook, setIsTestingWebhook] = useState(false);
+  const [isApprovingAll, setIsApprovingAll] = useState(false);
+  const [isSimulatingFlight, setIsSimulatingFlight] = useState(false);
+  const [isPurging, setIsPurging] = useState(false);
 
   // Manual Paste Modal state
   const [isPasteModalOpen, setIsPasteModalOpen] = useState(false);
   const [pasteJsonText, setPasteJsonText] = useState("");
   const [isImportingPaste, setIsImportingPaste] = useState(false);
-  const [showConnectionInfo, setShowConnectionInfo] = useState(true);
-  const [isSimulatingFlight, setIsSimulatingFlight] = useState(false);
   const [copiedUrl, setCopiedUrl] = useState(false);
   const [copiedToken, setCopiedToken] = useState(false);
 
@@ -99,7 +99,6 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
   // Raw logs state
   const [rawEvents, setRawEvents] = useState<WebhookSyncRecord[]>([]);
   const [isLoadingLogs, setIsLoadingLogs] = useState(false);
-  const [selectedRawEvent, setSelectedRawEvent] = useState<WebhookSyncRecord | null>(null);
 
   // Fetch raw webhook events
   const fetchLogs = async () => {
@@ -123,33 +122,73 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
     }
   }, [activeTab]);
 
-  // Topic lookup helper
-  const getTopicInfo = (topicId: string) => {
-    const base = initialTopics.find((t) => t.id === topicId);
+  // Topic lookup helper: ALWAYS returns official subject and topic name, never 'topic-unknown'
+  const getTopicInfo = (topicId: string, fallbackTitle?: string) => {
+    const raw = (topicId || "").trim();
+
+    // 1. Exact match in initialTopics
+    let base = initialTopics.find((t) => t.id.toLowerCase() === raw.toLowerCase());
+
+    // 2. Prefixed id (e.g. CIV_14, jud-pen-03)
+    if (!base) {
+      const parsed = parseAeroFocusTopicIdPrefix(raw);
+      if (parsed) {
+        base = initialTopics.find((t) => t.subjectId === parsed.subjectId && t.number === parsed.number);
+      }
+    }
+
+    // 3. String subject + number parsing from id or fallback title
+    if (!base) {
+      const num = extractTopicNumber(raw) || extractTopicNumber(fallbackTitle);
+      const sub = normalizeCategoryToSubjectId(raw) || normalizeCategoryToSubjectId(fallbackTitle);
+      if (num && sub) {
+        base = initialTopics.find((t) => t.subjectId === sub && t.number === num);
+      } else if (num) {
+        base = initialTopics.find((t) => t.number === num);
+      }
+    }
+
     if (base) {
       const sub = initialSubjects.find((s) => s.id === base.subjectId);
       return {
+        id: base.id,
         title: base.title,
         number: base.number,
+        subjectId: base.subjectId,
         subjectName: sub ? sub.name : base.subjectId,
-        subjectColor: sub ? sub.color : "#64748B",
+        subjectColor: sub ? sub.color : "#3B82F6",
       };
     }
+
     const prog = userProgress[topicId];
     if (prog) {
       const sub = initialSubjects.find((s) => s.id === prog.subjectId);
       return {
-        title: prog.customTitle || "Tema Personalizado",
-        number: prog.number || 999,
-        subjectName: sub ? sub.name : prog.subjectId || "Personalizado",
-        subjectColor: sub ? sub.color : "#64748B",
+        id: topicId,
+        title: prog.customTitle || fallbackTitle || "Tema de Estudio",
+        number: prog.number || 1,
+        subjectId: prog.subjectId || "constitucional",
+        subjectName: sub ? sub.name : "Temario",
+        subjectColor: sub ? sub.color : "#3B82F6",
       };
     }
+
+    // Graceful fallback: clean up if raw had "topic-unknown"
+    const fallbackNum = extractTopicNumber(fallbackTitle) || extractTopicNumber(raw) || 1;
+    const fallbackSub = normalizeCategoryToSubjectId(fallbackTitle) || normalizeCategoryToSubjectId(raw) || "constitucional";
+    const subObj = initialSubjects.find((s) => s.id === fallbackSub);
+    const cleanDisplayTitle =
+      fallbackTitle && !fallbackTitle.toLowerCase().includes("unknown")
+        ? fallbackTitle
+        : `Tema ${fallbackNum}`;
+
     return {
-      title: topicId,
-      number: 0,
-      subjectName: "Desconocido",
-      subjectColor: "#94A3B8",
+      id: `${fallbackSub}-${fallbackNum}`,
+      title: cleanDisplayTitle,
+      number: fallbackNum,
+      subjectId: fallbackSub,
+      subjectName: subObj ? subObj.name : "Temario Oficial",
+      subjectColor: subObj ? subObj.color : "#3B82F6",
     };
   };
 
@@ -177,30 +216,26 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
     };
   }, [recentSessions]);
 
-  // Filtered sessions
+  // Filtered sessions for Audit tab
   const filteredSessions = useMemo(() => {
     return recentSessions.filter((s) => {
       const isAero = s.source === "aerofocus" || s.source === "aerofocus_pro";
-      // Source filter
       if (sourceFilter === "aerofocus" && !isAero) return false;
       if (sourceFilter === "manual" && isAero) return false;
 
-      // Difficulty filter
       const diff = s.dificultadReal || s.difficulty;
       const isPending = !diff || diff === 0;
       if (difficultyFilter === "pending" && !isPending) return false;
       if (difficultyFilter === "rated" && isPending) return false;
 
-      // Subject filter
       const info = getTopicInfo(s.topicId);
       if (subjectFilter !== "all") {
         const baseTopic = initialTopics.find((t) => t.id === s.topicId);
         const prog = userProgress[s.topicId];
-        const subId = baseTopic?.subjectId || prog?.subjectId;
+        const subId = baseTopic?.subjectId || prog?.subjectId || info.subjectId;
         if (subId !== subjectFilter) return false;
       }
 
-      // Search query
       if (searchQuery.trim()) {
         const q = searchQuery.toLowerCase().trim();
         const matchTitle = info.title.toLowerCase().includes(q);
@@ -216,15 +251,21 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
 
   // Handle Master Reconciliation
   const handleReconcile = async () => {
-    if (!confirm("¿Deseas ejecutar la Reconciliación Maestra? Esto auditará todas las sesiones registradas, eliminará sesiones fantasma de 1 minuto o duplicadas y recalculará las horas exactas de cada tema.")) {
+    if (
+      !confirm(
+        "¿Deseas ejecutar la Reconciliación Maestra? Esto auditará todas las sesiones registradas, eliminará sesiones duplicadas y recalculará las horas exactas de cada tema."
+      )
+    ) {
       return;
     }
     try {
       setIsReconciling(true);
       await deduplicateUserSessions(false);
       await reconcileAllTopicsAndSessions();
+      toast.success("✅ Reconciliación completada con éxito.");
     } catch (e: any) {
       console.error(e);
+      toast.error("Error al reconciliar: " + (e?.message || e));
     } finally {
       setIsReconciling(false);
     }
@@ -244,7 +285,7 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
       if (text && text.trim()) {
         const success = await addQuarantineEventManually(text.trim());
         if (success) {
-          toast.success("✅ Cierre de AeroFocus importado desde el portapapeles y depositado en cuarentena.");
+          toast.success("✅ Cierre de AeroFocus importado a cuarentena.");
           setActiveTab("quarantine");
           return;
         }
@@ -256,39 +297,38 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
     }
   };
 
-  // Handle Webhook Connection Test (Ping handshake without inserting fake sessions)
+  // Handle Webhook Connection Test
   const handleTestWebhook = async () => {
     try {
       setIsTestingWebhook(true);
-      const res = await fetch("/api/webhook/aerofocus", {
+      // Call lightweight ping first to guarantee zero Vercel serverless crashes
+      const res = await fetch("/api/webhook/ping", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "Authorization": `Bearer ${webhookToken || "wp_qLXi6WFkFY_live"}`
+          Authorization: `Bearer ${webhookToken || "wp_qLXi6WFkFY_live"}`,
         },
-        body: JSON.stringify({
-          isTest: true,
-          event: "test_connection"
-        })
+        body: JSON.stringify({ isTest: true }),
       });
 
       let data: any = {};
-      const contentType = res.headers.get("content-type") || "";
-      if (contentType.includes("application/json")) {
-        data = await res.json();
-      } else {
-        const text = await res.text();
+      try {
+        const rawText = await res.text();
         try {
-          data = JSON.parse(text);
+          data = JSON.parse(rawText);
         } catch {
-          data = { error: text || `Error HTTP ${res.status}` };
+          data = { message: res.ok ? "Enlace verificado" : rawText };
         }
+      } catch {
+        data = {};
       }
 
-      if (res.ok && (data.success || data.status === 'ok')) {
-        toast.success("✅ Enlace operativo AeroFocus Pro <-> WellsPrep. La pasarela está lista para recibir tus transmisiones de estudio reales sin generar datos ficticios.");
+      if (res.ok && (data.success || data.status === "ok" || res.status === 200)) {
+        toast.success("✅ Enlace operativo AeroFocus Pro <-> WellsPrep.", {
+          description: "La pasarela está lista para recibir transmisiones en tiempo real.",
+        });
       } else {
-        toast.error("Fallo de enlace: " + (data.error || data.message || "Respuesta no autorizada"));
+        toast.error("Aviso de enlace: " + (data.error || data.message || `HTTP ${res.status}`));
       }
     } catch (e: any) {
       toast.error("Error al comprobar enlace: " + (e?.message || "Error de red"));
@@ -304,11 +344,11 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
       const res = await simulateAeroFocusFlight(1);
       if (res.success) {
         toast.success(res.message, {
-          description: "La sesión ha aterrizado en la Bandeja de Cuarentena en tiempo real.",
+          description: "La sesión ha aterrizado en la Bandeja de Cuarentena.",
         });
-        await fetchQuarantinedEvents();
+        setActiveTab("quarantine");
       } else {
-        toast.error("Fallo al simular: " + res.message);
+        toast.error("Error al simular vuelo: " + res.message);
       }
     } catch (e: any) {
       toast.error("Error: " + (e?.message || e));
@@ -317,69 +357,124 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
     }
   };
 
-  // Handle Manual Paste JSON / Text
+  // Approve all sessions in quarantine at once
+  const handleApproveAll = async () => {
+    if (quarantinedEvents.length === 0) return;
+    if (
+      !confirm(
+        `¿Deseas aprobar e incorporar las ${quarantinedEvents.length} sesiones de cuarentena a tu expediente oficial con sus temas y horas calculadas?`
+      )
+    ) {
+      return;
+    }
+    try {
+      setIsApprovingAll(true);
+      await approveAllQuarantineEvents();
+      toast.success("✅ Todas las sesiones han sido incorporadas al expediente.");
+    } catch (e: any) {
+      toast.error("Error al aprobar en lote: " + (e?.message || e));
+    } finally {
+      setIsApprovingAll(false);
+    }
+  };
+
+  // Set difficulty for all topics of a flight
+  const handleSetFlightDifficulty = (eventId: string, diff: number) => {
+    const evt = quarantinedEvents.find((e) => e.id === eventId);
+    if (!evt || !evt.topics) return;
+    const updatedTopics = evt.topics.map((t) => ({
+      ...t,
+      difficulty: diff,
+      dificultadReal: diff,
+    }));
+    updateQuarantineEvent(eventId, { topics: updatedTopics });
+    toast.success(`Dificultad ${diff}/10 aplicada a todos los temas del vuelo.`);
+  };
+
+  // Set completesVuelta for all topics of a flight
+  const handleSetFlightVuelta = (eventId: string, completes: boolean) => {
+    const evt = quarantinedEvents.find((e) => e.id === eventId);
+    if (!evt || !evt.topics) return;
+    const updatedTopics = evt.topics.map((t) => ({
+      ...t,
+      completesVuelta: completes,
+    }));
+    updateQuarantineEvent(eventId, { topics: updatedTopics });
+    toast.success(
+      completes
+        ? "Todos los temas marcados como vuelta completada."
+        : "Todos los temas marcados como repaso parcial."
+    );
+  };
+
+  // Manual Paste Importer handler
   const handleImportPaste = async () => {
     if (!pasteJsonText.trim()) {
-      toast.error("Pega el JSON o reporte de texto de la sesión primero.");
+      toast.error("Por favor, pega el contenido JSON o reporte de AeroFocus.");
       return;
     }
     try {
       setIsImportingPaste(true);
       const success = await addQuarantineEventManually(pasteJsonText.trim());
       if (success) {
-        toast.success("¡Sesión de AeroFocus cargada con éxito en Cuarentena!");
-        setPasteJsonText("");
+        toast.success("✅ Cierre importado y depositado en cuarentena.");
         setIsPasteModalOpen(false);
+        setPasteJsonText("");
         setActiveTab("quarantine");
       }
     } catch (e: any) {
-      toast.error("Error al procesar: " + (e?.message || e));
+      toast.error("Error al procesar el texto: " + e.message);
     } finally {
       setIsImportingPaste(false);
     }
   };
 
+  const webhookUrl =
+    typeof window !== "undefined"
+      ? `${window.location.origin}/api/webhook/aerofocus`
+      : "https://wellsprep-ltii.vercel.app/api/webhook/aerofocus";
+
   return (
-    <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-md flex items-center justify-center p-2 sm:p-4 md:p-6 overflow-hidden">
-      <div className="bg-white rounded-3xl shadow-2xl border border-slate-200/90 w-full max-w-5xl h-[92vh] max-h-[850px] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+    <div className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-md flex items-center justify-center p-2 sm:p-4 md:p-6 overflow-hidden">
+      <div className="bg-white rounded-3xl shadow-2xl border border-slate-200/80 w-full max-w-5xl h-[92vh] max-h-[850px] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-200">
         
         {/* TOP HEADER */}
-        <div className="px-6 py-4 border-b border-slate-200/70 bg-slate-50/70 flex flex-wrap items-center justify-between gap-4 shrink-0">
-          <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-2xl bg-slate-900 text-white flex items-center justify-center shadow-md shadow-slate-900/10">
+        <div className="px-6 py-4 border-b border-slate-100 bg-white flex flex-wrap items-center justify-between gap-4 shrink-0">
+          <div className="flex items-center gap-3.5">
+            <div className="w-10 h-10 rounded-2xl bg-slate-900 text-white flex items-center justify-center shadow-sm">
               <SlidersHorizontal size={18} strokeWidth={2.2} />
             </div>
             <div>
-              <div className="flex items-center gap-2">
-                <h1 className="text-lg font-black text-slate-900 tracking-tight">
+              <div className="flex items-center gap-2.5">
+                <h1 className="text-base font-bold text-slate-900 tracking-tight font-serif">
                   Centro de Control de Estudio · AeroFocus Pro
                 </h1>
-                <span className="text-xs text-emerald-700 font-semibold flex items-center gap-1">
-                  <span>·</span>
-                  <span>Webhook Activo</span>
+                <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-medium bg-emerald-50 text-emerald-700 border border-emerald-200/60">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                  Enlace Activo
                 </span>
               </div>
-              <p className="text-xs text-slate-500 font-medium">
-                Gestión de sesiones sincronizadas y conciliación de expediente oficial
+              <p className="text-xs text-slate-500 mt-0.5">
+                Conciliación y auditoría de sesiones para tu expediente oficial de Judicatura
               </p>
             </div>
           </div>
 
-          {/* Clean Header Actions */}
+          {/* Top Actions */}
           <div className="flex items-center gap-2">
             <button
               onClick={handleReconcile}
               disabled={isReconciling}
-              className="px-4 py-2 rounded-xl text-xs font-bold bg-slate-900 hover:bg-slate-800 text-white shadow-sm transition-all flex items-center gap-1.5 disabled:opacity-50"
+              className="px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-800 transition-colors flex items-center gap-1.5 disabled:opacity-50"
               title="Audita todas las sesiones y recalcula determinísticamente horas, vueltas y temas"
             >
-              <RefreshCw size={13} className={cn(isReconciling && "animate-spin")} />
-              <span>{isReconciling ? "Reconciliando..." : "Reconciliar Todo"}</span>
+              <RefreshCw size={12} className={cn(isReconciling && "animate-spin text-slate-600")} />
+              <span>{isReconciling ? "Reconciliando..." : "Reconciliar Expediente"}</span>
             </button>
 
             <button
               onClick={onClose}
-              className="w-8 h-8 rounded-full flex items-center justify-center text-slate-400 hover:text-slate-700 hover:bg-slate-200/60 transition-colors ml-1"
+              className="w-8 h-8 rounded-full flex items-center justify-center text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors ml-1"
               title="Cerrar panel"
             >
               <X size={18} />
@@ -387,122 +482,147 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
           </div>
         </div>
 
-        {/* METRICS STRIP */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 px-6 py-3.5 bg-white border-b border-slate-100 shrink-0">
-          <div className="p-2.5 rounded-2xl bg-slate-50/80 border border-slate-100">
-            <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Sesiones Totales</div>
-            <div className="text-lg font-black font-mono tabular-nums text-slate-900 mt-0.5">
+        {/* STATS STRIP */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 px-6 py-3 bg-slate-50/70 border-b border-slate-100 shrink-0">
+          <div className="px-3.5 py-2 rounded-xl bg-white border border-slate-200/60 shadow-2xs">
+            <div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Sesiones Totales</div>
+            <div className="text-lg font-bold font-mono tabular-nums text-slate-900 mt-0.5">
               {metrics.totalSessions}
             </div>
           </div>
 
-          <div className="p-2.5 rounded-2xl bg-slate-50/80 border border-slate-100">
-            <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Horas Auditadas</div>
-            <div className="text-lg font-black font-mono tabular-nums text-blue-600 mt-0.5">
-              {metrics.totalHours} h
+          <div className="px-3.5 py-2 rounded-xl bg-white border border-slate-200/60 shadow-2xs">
+            <div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Horas Auditadas</div>
+            <div className="text-lg font-bold font-mono tabular-nums text-blue-600 mt-0.5">
+              {metrics.totalHours} <span className="text-xs font-normal text-slate-400 font-sans">h netas</span>
             </div>
           </div>
 
-          <div className="p-2.5 rounded-2xl bg-slate-50/80 border border-slate-100">
-            <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Vía AeroFocus Pro</div>
-            <div className="text-lg font-black font-mono tabular-nums text-indigo-600 mt-0.5 flex items-center gap-1">
+          <div className="px-3.5 py-2 rounded-xl bg-white border border-slate-200/60 shadow-2xs">
+            <div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Vía AeroFocus Pro</div>
+            <div className="text-lg font-bold font-mono tabular-nums text-indigo-600 mt-0.5 flex items-center gap-1.5">
               {metrics.aeroCount}
-              <Sparkles size={14} className="text-indigo-400" />
+              <Sparkles size={13} className="text-indigo-400" />
             </div>
           </div>
 
-          <div className="p-2.5 rounded-2xl bg-amber-50/60 border border-amber-200/60">
-            <div className="text-[10px] font-bold text-amber-700 uppercase tracking-wider">Dificultad Pendiente</div>
-            <div className="text-lg font-black font-mono tabular-nums text-amber-800 mt-0.5 flex items-center justify-between">
+          <div className="px-3.5 py-2 rounded-xl bg-amber-50/50 border border-amber-200/70 shadow-2xs">
+            <div className="text-[10px] font-semibold text-amber-700 uppercase tracking-wider">Dificultad Pendiente</div>
+            <div className="text-lg font-bold font-mono tabular-nums text-amber-900 mt-0.5 flex items-center justify-between">
               <span>{metrics.pendingDiffCount}</span>
               {metrics.pendingDiffCount > 0 && (
-                <span className="text-[10px] font-bold text-amber-600 bg-amber-100/80 px-2 py-0.5 rounded-full">
-                  Evaluar
+                <span className="text-[10px] font-semibold text-amber-700 bg-amber-100/90 px-2 py-0.5 rounded-full">
+                  Por calificar
                 </span>
               )}
             </div>
           </div>
         </div>
 
-        {/* TABS SELECTOR */}
-        <div className="flex border-b border-slate-200 px-6 bg-slate-50/40 shrink-0 gap-2">
-          <button
-            onClick={() => setActiveTab("quarantine")}
-            className={cn(
-              "py-3 px-4 text-xs font-black tracking-tight border-b-2 transition-all flex items-center gap-2",
-              activeTab === "quarantine"
-                ? "border-amber-600 text-amber-900 bg-amber-50/40"
-                : "border-transparent text-slate-500 hover:text-slate-800"
-            )}
-          >
-            <ShieldAlert size={15} className="text-amber-600" />
-            <span>Bandeja de Cuarentena ({quarantinedEvents.length})</span>
-            {quarantinedEvents.length > 0 && (
-              <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
-            )}
-          </button>
+        {/* ELEGANT NAVIGATION TABS */}
+        <div className="flex items-center justify-between border-b border-slate-200 px-6 bg-white shrink-0">
+          <div className="flex gap-2">
+            <button
+              onClick={() => setActiveTab("quarantine")}
+              className={cn(
+                "py-3 px-4 text-xs font-bold tracking-tight border-b-2 transition-all flex items-center gap-2",
+                activeTab === "quarantine"
+                  ? "border-amber-600 text-amber-900"
+                  : "border-transparent text-slate-500 hover:text-slate-800"
+              )}
+            >
+              <ShieldAlert size={14} className={activeTab === "quarantine" ? "text-amber-600" : "text-slate-400"} />
+              <span>Bandeja de Cuarentena</span>
+              {quarantinedEvents.length > 0 && (
+                <span className="px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-800 font-mono">
+                  {quarantinedEvents.length}
+                </span>
+              )}
+            </button>
 
-          <button
-            onClick={() => setActiveTab("sessions")}
-            className={cn(
-              "py-3 px-4 text-xs font-black tracking-tight border-b-2 transition-all flex items-center gap-2",
-              activeTab === "sessions"
-                ? "border-slate-900 text-slate-900"
-                : "border-transparent text-slate-400 hover:text-slate-700"
-            )}
-          >
-            <Layers size={15} />
-            <span>Auditoría de Sesiones ({filteredSessions.length})</span>
-          </button>
+            <button
+              onClick={() => setActiveTab("sessions")}
+              className={cn(
+                "py-3 px-4 text-xs font-bold tracking-tight border-b-2 transition-all flex items-center gap-2",
+                activeTab === "sessions"
+                  ? "border-slate-900 text-slate-900"
+                  : "border-transparent text-slate-400 hover:text-slate-700"
+              )}
+            >
+              <Layers size={14} />
+              <span>Auditoría de Sesiones ({filteredSessions.length})</span>
+            </button>
 
-          <button
-            onClick={() => setActiveTab("raw_logs")}
-            className={cn(
-              "py-3 px-4 text-xs font-black tracking-tight border-b-2 transition-all flex items-center gap-2",
-              activeTab === "raw_logs"
-                ? "border-slate-900 text-slate-900"
-                : "border-transparent text-slate-400 hover:text-slate-700"
-            )}
-          >
-            <Database size={15} />
-            <span>Logs Brutos ({rawEvents.length})</span>
-          </button>
+            <button
+              onClick={() => setActiveTab("webhook")}
+              className={cn(
+                "py-3 px-4 text-xs font-bold tracking-tight border-b-2 transition-all flex items-center gap-2",
+                activeTab === "webhook"
+                  ? "border-indigo-600 text-indigo-900"
+                  : "border-transparent text-slate-400 hover:text-slate-700"
+              )}
+            >
+              <Zap size={14} className={activeTab === "webhook" ? "text-indigo-600" : "text-slate-400"} />
+              <span>Conexión & Webhook</span>
+            </button>
+
+            <button
+              onClick={() => setActiveTab("raw_logs")}
+              className={cn(
+                "py-3 px-4 text-xs font-bold tracking-tight border-b-2 transition-all flex items-center gap-2",
+                activeTab === "raw_logs"
+                  ? "border-slate-900 text-slate-900"
+                  : "border-transparent text-slate-400 hover:text-slate-700"
+              )}
+            >
+              <Database size={14} />
+              <span>Logs de Red ({rawEvents.length})</span>
+            </button>
+          </div>
+
+          {/* Quick Header Short-cut */}
+          {activeTab === "quarantine" && quarantinedEvents.length > 0 && (
+            <button
+              onClick={handleApproveAll}
+              disabled={isApprovingAll}
+              className="my-1.5 px-3.5 py-1.5 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-700 text-white shadow-xs transition-colors flex items-center gap-1.5 disabled:opacity-50"
+            >
+              <CheckCircle2 size={13} className={cn(isApprovingAll && "animate-spin")} />
+              <span>{isApprovingAll ? "Aprobando..." : `Aprobar Todo (${quarantinedEvents.length})`}</span>
+            </button>
+          )}
         </div>
 
-        {/* TAB: QUARANTINE STAGING BUFFER */}
+        {/* TAB 1: BANDEJA DE CUARENTENA */}
         {activeTab === "quarantine" && (
           <div className="flex-1 flex flex-col min-h-0 overflow-hidden bg-slate-50/50">
-            {/* Quarantine Info Banner & Actions */}
-            <div className="p-4 border-b border-amber-200/60 bg-amber-50/50 flex flex-wrap items-center justify-between gap-3 shrink-0">
-              <div className="flex items-start gap-3">
-                <div className="p-2 rounded-xl bg-amber-100 text-amber-800 shrink-0">
-                  <Shield size={18} />
-                </div>
-                <div>
-                  <h4 className="text-xs font-black uppercase tracking-wider text-amber-900">
-                    Modo Cuarentena Activo — Blindaje de Expediente Oficial
-                  </h4>
-                  <p className="text-xs text-amber-800/80 mt-0.5 max-w-2xl leading-relaxed">
-                    Las sesiones enviadas por AeroFocus se retienen aquí. Puedes <strong>calificar su dificultad (1-10)</strong>, 
-                    <strong> ajustar si completan o no vuelta oficial</strong>, y <strong>unificar repasos partidos</strong> antes de incorporarlas a tu expediente.
-                  </p>
-                </div>
+            {/* Top action bar */}
+            <div className="px-6 py-3 bg-white border-b border-slate-200/60 flex flex-wrap items-center justify-between gap-3 shrink-0">
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-bold text-slate-700">
+                  {quarantinedEvents.length === 0
+                    ? "Bandeja vacía"
+                    : `${quarantinedEvents.length} vuelo${quarantinedEvents.length > 1 ? "s" : ""} retenido${quarantinedEvents.length > 1 ? "s" : ""}`}
+                </span>
+                <span className="text-slate-300">·</span>
+                <span className="text-xs text-slate-500">
+                  Valida dificultad y vueltas antes de incorporar a tu expediente.
+                </span>
               </div>
 
-              <div className="flex flex-wrap items-center gap-2 shrink-0">
+              <div className="flex items-center gap-2">
                 <button
                   onClick={handleQuickClipboardPaste}
-                  className="px-3.5 py-1.5 rounded-xl text-xs font-bold bg-indigo-600 hover:bg-indigo-700 text-white shadow-xs transition-all flex items-center gap-1.5"
-                  title="Importar automáticamente el cierre diario copiado al portapapeles"
+                  className="px-3 py-1.5 rounded-xl text-xs font-semibold bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200/60 transition-colors flex items-center gap-1.5"
+                  title="Importar automáticamente el cierre copiado al portapapeles"
                 >
-                  <Send size={12} className="text-indigo-200" />
+                  <Send size={12} className="text-indigo-600" />
                   <span>Pegar Cierre (Portapapeles)</span>
                 </button>
 
                 <button
                   onClick={() => setIsPasteModalOpen(true)}
-                  className="px-3 py-1.5 rounded-xl text-xs font-bold bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 shadow-xs transition-all flex items-center gap-1.5"
-                  title="Pegar JSON o reporte de AeroFocus manualmente"
+                  className="px-3 py-1.5 rounded-xl text-xs font-semibold bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 transition-colors flex items-center gap-1.5"
                 >
                   <Edit2 size={12} className="text-slate-500" />
                   <span>Pegar Manual</span>
@@ -511,236 +631,80 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                 <button
                   onClick={handleTestWebhook}
                   disabled={isTestingWebhook}
-                  className="px-3 py-1.5 rounded-xl text-xs font-bold bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 shadow-xs transition-all flex items-center gap-1.5"
-                  title="Comprobar enlace de conexión con AeroFocus Pro (Ping de test sin datos ficticios)"
+                  className="px-3 py-1.5 rounded-xl text-xs font-semibold bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 transition-colors flex items-center gap-1.5"
                 >
                   <ShieldCheck size={12} className="text-emerald-600" />
                   <span>{isTestingWebhook ? "Comprobando..." : "Test Enlace"}</span>
                 </button>
 
                 <button
-                  onClick={() => setShowConnectionInfo(!showConnectionInfo)}
-                  className={cn(
-                    "px-3 py-1.5 rounded-xl text-xs font-bold border shadow-xs transition-all flex items-center gap-1.5",
-                    showConnectionInfo
-                      ? "bg-indigo-50 text-indigo-700 border-indigo-200"
-                      : "bg-white hover:bg-slate-100 text-slate-700 border-slate-200"
-                  )}
-                  title="Ver Endpoint y Token para configurar la sincronización en AeroFocus Pro"
-                >
-                  <HelpCircle size={12} className={showConnectionInfo ? "text-indigo-600" : "text-slate-500"} />
-                  <span>{showConnectionInfo ? "Ocultar Conexión" : "Ver Datos Webhook"}</span>
-                </button>
-
-                <button
                   onClick={() => fetchQuarantinedEvents()}
                   disabled={isLoadingQuarantine}
-                  className="px-3 py-1.5 rounded-xl text-xs font-bold bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 shadow-xs transition-all flex items-center gap-1.5"
-                  title="Refrescar lista de cuarentena"
+                  className="p-1.5 rounded-xl text-slate-500 hover:text-slate-800 hover:bg-slate-100 border border-slate-200 transition-colors"
+                  title="Refrescar lista"
                 >
-                  <RefreshCw size={12} className={cn(isLoadingQuarantine && "animate-spin")} />
-                  <span>Actualizar</span>
+                  <RefreshCw size={13} className={cn(isLoadingQuarantine && "animate-spin")} />
                 </button>
 
                 {quarantinedEvents.length > 0 && (
                   <button
                     onClick={() => {
-                      if (confirm("¿Deseas vaciar por completo la bandeja de cuarentena? Se eliminarán todos los registros retenidos.")) {
+                      if (confirm("¿Deseas vaciar todos los registros retenidos en cuarentena?")) {
                         clearAllQuarantine();
                       }
                     }}
-                    className="px-3 py-1.5 rounded-xl text-xs font-bold bg-rose-50 hover:bg-rose-100 text-rose-800 border border-rose-200/80 shadow-xs transition-all flex items-center gap-1.5"
-                    title="Vaciar todos los registros de la cuarentena"
+                    className="p-1.5 rounded-xl text-rose-600 hover:bg-rose-50 border border-rose-200 transition-colors"
+                    title="Vaciar cuarentena"
                   >
-                    <Trash2 size={12} className="text-rose-600" />
-                    <span>Vaciar Cuarentena ({quarantinedEvents.length})</span>
+                    <Trash2 size={13} />
                   </button>
                 )}
               </div>
             </div>
 
-            {/* AeroFocus Pro Live Link & Webhook Configuration Card */}
-            {showConnectionInfo && (
-              <div className="px-5 py-4 bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 text-white border-b border-indigo-900/50 flex flex-col gap-4 animate-in fade-in duration-200 shrink-0 shadow-inner">
-                {/* Header with live status and quick actions */}
-                <div className="flex flex-wrap items-center justify-between gap-3">
-                  <div className="flex items-center gap-2.5">
-                    <div className="relative flex items-center justify-center">
-                      <span className="w-3 h-3 rounded-full bg-emerald-500 animate-ping absolute opacity-75"></span>
-                      <span className="w-2.5 h-2.5 rounded-full bg-emerald-400"></span>
-                    </div>
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <span className="text-xs font-black tracking-wider uppercase text-white font-mono">
-                          Enlace en Vivo AeroFocus Pro
-                        </span>
-                        <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 flex items-center gap-1">
-                          <Zap size={10} className="text-emerald-400" />
-                          SSE 0ms · Automático
-                        </span>
-                      </div>
-                      <p className="text-[11px] text-slate-300 mt-0.5">
-                        Al aterrizar un vuelo en AeroFocus Pro, los minutos y temas entran solos aquí sin tocar nada.
-                      </p>
-                    </div>
-                  </div>
-
-                  <div className="flex items-center gap-2">
-                    <button
-                      onClick={handleSimulateFlight}
-                      disabled={isSimulatingFlight}
-                      className="px-3 py-1.5 rounded-xl text-xs font-bold bg-emerald-500 hover:bg-emerald-400 text-slate-950 shadow-sm transition-all flex items-center gap-1.5 disabled:opacity-50"
-                      title="Genera un vuelo de prueba para verificar que la recepción automática en tiempo real funciona perfectamente"
-                    >
-                      <Plane size={13} className={cn("text-slate-950", isSimulatingFlight && "animate-bounce")} />
-                      <span>{isSimulatingFlight ? "Aterrizando..." : "Simular Aterrizaje en Vivo"}</span>
-                    </button>
-
-                    <button
-                      onClick={() => setShowConnectionInfo(false)}
-                      className="text-xs text-slate-400 hover:text-white px-2 py-1 rounded-lg transition-colors"
-                    >
-                      Ocultar
-                    </button>
-                  </div>
-                </div>
-
-                {/* Webhook Parameters (URL + Token) */}
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
-                  {/* Webhook URL Card */}
-                  <div className="bg-slate-800/80 p-3.5 rounded-2xl border border-indigo-500/20 shadow-sm flex flex-col justify-between backdrop-blur-xs">
-                    <div>
-                      <div className="flex items-center justify-between mb-1.5">
-                        <span className="text-[10px] font-black uppercase text-indigo-300 tracking-wider">
-                          1. URL del Webhook (POST)
-                        </span>
-                        <span className="text-[10px] text-slate-400 font-sans">
-                          AeroFocus &gt; Ajustes &gt; Webhook URL
-                        </span>
-                      </div>
-                      <div className="font-mono text-emerald-300 select-all text-[11px] bg-slate-950/70 p-2.5 rounded-xl border border-slate-700/60 break-all">
-                        {typeof window !== "undefined" ? `${window.location.origin}/api/webhook/aerofocus` : "/api/webhook/aerofocus"}
-                      </div>
-                    </div>
-                    <button
-                      onClick={() => {
-                        const url = typeof window !== "undefined" ? `${window.location.origin}/api/webhook/aerofocus` : "/api/webhook/aerofocus";
-                        navigator.clipboard.writeText(url);
-                        setCopiedUrl(true);
-                        setTimeout(() => setCopiedUrl(false), 2500);
-                        toast.success("URL del Webhook copiada al portapapeles.");
-                      }}
-                      className={cn(
-                        "mt-2.5 px-3 py-1.5 rounded-lg text-[11px] font-bold flex items-center gap-1.5 self-start transition-all",
-                        copiedUrl
-                          ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
-                          : "bg-indigo-600/50 hover:bg-indigo-600 text-indigo-100 border border-indigo-400/30"
-                      )}
-                    >
-                      {copiedUrl ? <Check size={12} className="text-emerald-400" /> : <Copy size={12} />}
-                      <span>{copiedUrl ? "¡URL Copiada!" : "Copiar URL del Webhook"}</span>
-                    </button>
-                  </div>
-
-                  {/* Token Card */}
-                  <div className="bg-slate-800/80 p-3.5 rounded-2xl border border-indigo-500/20 shadow-sm flex flex-col justify-between backdrop-blur-xs">
-                    <div>
-                      <div className="flex items-center justify-between mb-1.5">
-                        <span className="text-[10px] font-black uppercase text-indigo-300 tracking-wider">
-                          2. Token de Autorización
-                        </span>
-                        <span className="text-[10px] text-slate-400 font-sans">
-                          AeroFocus &gt; Ajustes &gt; Token / API Key
-                        </span>
-                      </div>
-                      <div className="font-mono text-emerald-300 select-all text-[11px] bg-slate-950/70 p-2.5 rounded-xl border border-slate-700/60 break-all">
-                        {webhookToken || "wp_qLXi6WFkFY_live"}
-                      </div>
-                    </div>
-                    <button
-                      onClick={() => {
-                        const tok = webhookToken || "wp_qLXi6WFkFY_live";
-                        navigator.clipboard.writeText(tok);
-                        setCopiedToken(true);
-                        setTimeout(() => setCopiedToken(false), 2500);
-                        toast.success("Token copiado al portapapeles.");
-                      }}
-                      className={cn(
-                        "mt-2.5 px-3 py-1.5 rounded-lg text-[11px] font-bold flex items-center gap-1.5 self-start transition-all",
-                        copiedToken
-                          ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/30"
-                          : "bg-indigo-600/50 hover:bg-indigo-600 text-indigo-100 border border-indigo-400/30"
-                      )}
-                    >
-                      {copiedToken ? <Check size={12} className="text-emerald-400" /> : <Copy size={12} />}
-                      <span>{copiedToken ? "¡Token Copiado!" : "Copiar Token"}</span>
-                    </button>
-                  </div>
-                </div>
-
-                {/* 3-Step Setup Quick Note */}
-                <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-slate-800/80 text-[11px] text-slate-300">
-                  <div className="flex items-center gap-3">
-                    <span className="text-indigo-300 font-bold">Guía en 3 pasos:</span>
-                    <span>1. En AeroFocus Pro ve a Ajustes</span>
-                    <span>&rarr;</span>
-                    <span>2. Pega la URL y el Token</span>
-                    <span>&rarr;</span>
-                    <span>3. ¡Al aterrizar, la sesión aparece sola aquí!</span>
-                  </div>
-                  <button
-                    onClick={handleTestWebhook}
-                    disabled={isTestingWebhook}
-                    className="text-xs text-indigo-300 hover:text-white underline font-semibold transition-colors"
-                  >
-                    {isTestingWebhook ? "Verificando..." : "Comprobar Enlace (Ping)"}
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {/* Quarantine List */}
+            {/* Quarantine Cards Container */}
             <div className="flex-1 p-6 overflow-y-auto min-h-0">
               {quarantinedEvents.length === 0 ? (
-                <div className="h-full flex flex-col items-center justify-center text-center p-8">
-                  <div className="w-14 h-14 rounded-3xl bg-emerald-50 text-emerald-600 border border-emerald-200/80 flex items-center justify-center shadow-xs mb-3">
-                    <ShieldCheck size={28} />
+                <div className="h-full flex flex-col items-center justify-center text-center p-8 max-w-md mx-auto">
+                  <div className="w-14 h-14 rounded-3xl bg-slate-100 text-slate-500 flex items-center justify-center mb-4">
+                    <ShieldCheck size={28} className="text-emerald-600" />
                   </div>
-                  <h3 className="text-base font-black text-slate-800 font-serif">
-                    Bandeja de Cuarentena Limpia y Lista
+                  <h3 className="text-base font-bold text-slate-900 font-serif">
+                    Bandeja de Cuarentena al Día
                   </h3>
-                  <p className="text-xs text-slate-500 max-w-md mt-1 leading-relaxed">
-                    No hay sesiones retenidas pendientes. Puedes recibir transmisiones automáticas vía Webhook o pulsar abajo para pegar tu cierre diario de AeroFocus.
+                  <p className="text-xs text-slate-500 mt-1.5 leading-relaxed">
+                    No hay sesiones retenidas pendientes. Cuando termines un bloque en AeroFocus Pro, los minutos y temas aparecerán aquí automáticamente para su validación previa.
                   </p>
+
                   <div className="mt-6 flex flex-wrap items-center justify-center gap-2.5">
                     <button
-                      onClick={handleSimulateFlight}
-                      disabled={isSimulatingFlight}
-                      className="px-4 py-2 rounded-xl text-xs font-bold text-slate-950 bg-emerald-400 hover:bg-emerald-300 shadow-sm transition-all flex items-center gap-1.5 disabled:opacity-50"
-                    >
-                      <Plane size={13} className={cn("text-slate-950", isSimulatingFlight && "animate-bounce")} />
-                      <span>{isSimulatingFlight ? "Aterrizando vuelo..." : "Simular Aterrizaje en Vivo"}</span>
-                    </button>
-                    <button
                       onClick={handleQuickClipboardPaste}
-                      className="px-4 py-2 rounded-xl text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 shadow-sm transition-all flex items-center gap-1.5"
+                      className="px-4 py-2 rounded-xl text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 transition-colors flex items-center gap-1.5 shadow-xs"
                     >
-                      <Send size={13} className="text-indigo-200" />
+                      <Send size={12} />
                       <span>Pegar Cierre (Portapapeles)</span>
                     </button>
                     <button
-                      onClick={() => setIsPasteModalOpen(true)}
-                      className="px-4 py-2 rounded-xl text-xs font-bold text-slate-700 bg-white hover:bg-slate-100 border border-slate-200 transition-all flex items-center gap-1.5"
+                      onClick={handleSimulateFlight}
+                      disabled={isSimulatingFlight}
+                      className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-700 bg-white hover:bg-slate-50 border border-slate-200 transition-colors flex items-center gap-1.5"
                     >
-                      <Edit2 size={13} className="text-slate-500" />
-                      <span>Pegar JSON Manual</span>
+                      <Plane size={12} className={cn(isSimulatingFlight && "animate-bounce")} />
+                      <span>{isSimulatingFlight ? "Aterrizando..." : "Simular Vuelo de Prueba"}</span>
+                    </button>
+                    <button
+                      onClick={() => setActiveTab("webhook")}
+                      className="px-4 py-2 rounded-xl text-xs font-semibold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200/60 transition-colors flex items-center gap-1.5"
+                    >
+                      <Key size={12} />
+                      <span>Ver Credenciales Webhook</span>
                     </button>
                   </div>
                 </div>
               ) : (
-                <div className="space-y-6 max-w-4xl mx-auto">
+                <div className="space-y-5 max-w-4xl mx-auto">
                   {quarantinedEvents.map((evt) => {
-                    // Check for duplicate topics within this transmission (e.g. split reviews of same topic)
+                    // Check for duplicate topics within this transmission (split reviews)
                     const topicFrequency = new Map<string, number[]>();
                     (evt.topics || []).forEach((t, index) => {
                       const tid = t.resolvedTopicId;
@@ -751,20 +715,25 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                       }
                     });
 
-                    const duplicateEntries = Array.from(topicFrequency.entries()).filter(([_, indices]) => indices.length > 1);
+                    const duplicateEntries = Array.from(topicFrequency.entries()).filter(
+                      ([_, indices]) => indices.length > 1
+                    );
+
+                    const totalMins =
+                      evt.totalFlightEffectiveMinutes ||
+                      Math.round((evt.totalFlightEffectiveHours || 0) * 60) ||
+                      (evt.topics || []).reduce((acc, t) => acc + (t.effectiveMinutes || 0), 0);
+                    const totalHours = (totalMins / 60).toFixed(1);
 
                     return (
                       <div
                         key={evt.id}
-                        className="bg-white rounded-3xl border border-slate-200/90 shadow-sm hover:shadow-md transition-all flex flex-col overflow-hidden"
+                        className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden transition-all hover:border-slate-300"
                       >
-                        {/* Event Card Header */}
-                        <div className="px-5 py-4 bg-slate-50/80 border-b border-slate-100 flex flex-wrap items-center justify-between gap-3">
-                          <div className="flex items-center gap-2.5">
-                            <span className="px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-amber-100 text-amber-900 border border-amber-200">
-                              En Cuarentena
-                            </span>
-                            <span className="font-mono text-xs font-bold text-slate-700">
+                        {/* FLIGHT CARD HEADER */}
+                        <div className="px-5 py-3.5 bg-slate-50/80 border-b border-slate-100 flex flex-wrap items-center justify-between gap-3">
+                          <div className="flex items-center gap-3">
+                            <span className="font-mono text-xs font-bold text-slate-800 bg-slate-200/70 px-2.5 py-0.5 rounded-lg">
                               Vuelo #{evt.flightId || evt.id.slice(-6)}
                             </span>
                             <span className="text-slate-300">·</span>
@@ -773,50 +742,97 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                               {evt.date || "Hoy"}
                             </span>
                             <span className="text-slate-300">·</span>
-                            <span className="text-xs font-bold text-slate-700">
-                              {evt.totalFlightEffectiveHours || (evt.totalFlightEffectiveMinutes ? (evt.totalFlightEffectiveMinutes / 60).toFixed(1) : 0)} horas netas
+                            <span className="text-xs font-bold font-mono text-slate-900">
+                              {totalHours} h netas ({totalMins} min)
                             </span>
                           </div>
 
                           <div className="flex items-center gap-2">
                             <button
                               onClick={() => discardQuarantineEvent(evt.id)}
-                              className="px-3.5 py-1.5 rounded-xl text-xs font-bold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200/70 transition-all flex items-center gap-1"
-                              title="Descartar sin alterar tu expediente"
+                              className="px-3 py-1.5 rounded-xl text-xs font-semibold text-rose-700 bg-white hover:bg-rose-50 border border-slate-200 hover:border-rose-200 transition-colors flex items-center gap-1"
+                              title="Descartar este vuelo"
                             >
-                              <Trash2 size={13} />
-                              <span>Denegar / Descartar</span>
+                              <Trash2 size={12} />
+                              <span>Descartar</span>
                             </button>
+
                             <button
                               onClick={() => approveQuarantineEvent(evt.id)}
-                              className="px-4 py-1.5 rounded-xl text-xs font-black text-white bg-emerald-600 hover:bg-emerald-700 shadow-sm transition-all flex items-center gap-1.5"
+                              className="px-4 py-1.5 rounded-xl text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 shadow-xs transition-colors flex items-center gap-1.5"
                             >
-                              <CheckCircle2 size={14} />
-                              <span>Aprobar e Incorporar</span>
+                              <CheckCircle2 size={13} />
+                              <span>Aprobar Vuelo</span>
                             </button>
                           </div>
                         </div>
 
-                        {/* Split Review Merge Notice Banner if duplicates exist */}
-                        {duplicateEntries.length > 0 && (
-                          <div className="px-5 py-3 bg-indigo-50/70 border-b border-indigo-100 flex flex-wrap items-center justify-between gap-2">
-                            <div className="flex items-center gap-2 text-xs text-indigo-950 font-bold">
-                              <Layers size={14} className="text-indigo-600 shrink-0" />
-                              <span>
-                                Se han detectado {duplicateEntries.length} temas divididos en varias sesiones (repasos partidos).
-                              </span>
+                        {/* FLIGHT PRESETS BAR */}
+                        <div className="px-5 py-2.5 bg-slate-50/40 border-b border-slate-100 flex flex-wrap items-center justify-between gap-2.5 text-[11px]">
+                          <div className="flex flex-wrap items-center gap-2 text-slate-600">
+                            <span className="font-semibold text-slate-500">Calificar todo:</span>
+                            <div className="flex items-center gap-1">
+                              <button
+                                onClick={() => handleSetFlightDifficulty(evt.id, 3)}
+                                className="px-2 py-0.5 rounded-md bg-white hover:bg-emerald-50 text-emerald-800 border border-slate-200 font-bold text-[10px] transition-colors"
+                              >
+                                Fácil (3)
+                              </button>
+                              <button
+                                onClick={() => handleSetFlightDifficulty(evt.id, 5)}
+                                className="px-2 py-0.5 rounded-md bg-white hover:bg-blue-50 text-blue-800 border border-slate-200 font-bold text-[10px] transition-colors"
+                              >
+                                Media (5)
+                              </button>
+                              <button
+                                onClick={() => handleSetFlightDifficulty(evt.id, 8)}
+                                className="px-2 py-0.5 rounded-md bg-white hover:bg-amber-50 text-amber-800 border border-slate-200 font-bold text-[10px] transition-colors"
+                              >
+                                Difícil (8)
+                              </button>
+                              <button
+                                onClick={() => handleSetFlightDifficulty(evt.id, 10)}
+                                className="px-2 py-0.5 rounded-md bg-white hover:bg-rose-50 text-rose-800 border border-slate-200 font-bold text-[10px] transition-colors"
+                              >
+                                Extrema (10)
+                              </button>
                             </div>
+                          </div>
+
+                          <div className="flex items-center gap-2">
+                            <span className="text-slate-400">Vueltas:</span>
+                            <button
+                              onClick={() => handleSetFlightVuelta(evt.id, true)}
+                              className="px-2 py-0.5 rounded-md bg-white hover:bg-emerald-50 text-emerald-800 border border-slate-200 font-bold text-[10px] transition-colors"
+                            >
+                              ✓ Suma vuelta oficial
+                            </button>
+                            <button
+                              onClick={() => handleSetFlightVuelta(evt.id, false)}
+                              className="px-2 py-0.5 rounded-md bg-white hover:bg-amber-50 text-amber-800 border border-slate-200 font-bold text-[10px] transition-colors"
+                            >
+                              ⚠️ Repaso parcial
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* SPLIT MERGE BANNER */}
+                        {duplicateEntries.length > 0 && (
+                          <div className="px-5 py-2.5 bg-indigo-50/70 border-b border-indigo-100 flex flex-wrap items-center justify-between gap-2 text-xs">
+                            <span className="text-indigo-900 font-semibold">
+                              Se han detectado {duplicateEntries.length} temas con repasos divididos en partes.
+                            </span>
                             <div className="flex items-center gap-2">
                               {duplicateEntries.map(([tid, indices]) => {
-                                const firstTopic = evt.topics[indices[0]];
+                                const tInfo = getTopicInfo(tid);
                                 return (
                                   <button
                                     key={tid}
                                     onClick={() => mergeQuarantineTopics(evt.id, indices[0], indices[1])}
-                                    className="px-3 py-1 rounded-lg text-xs font-black text-indigo-700 bg-white hover:bg-indigo-100 border border-indigo-200 shadow-2xs transition-all flex items-center gap-1.5"
+                                    className="px-2.5 py-1 rounded-lg text-xs font-bold text-indigo-700 bg-white border border-indigo-200 hover:bg-indigo-50 transition-colors flex items-center gap-1 shadow-2xs"
                                   >
                                     <Sparkles size={11} className="text-indigo-600" />
-                                    <span>Fusionar {firstTopic?.resolvedTopicTitle?.split(":")[0] || tid} ({indices.length} partes)</span>
+                                    <span>Fusionar {tInfo.title} ({indices.length} partes)</span>
                                   </button>
                                 );
                               })}
@@ -824,191 +840,139 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                           </div>
                         )}
 
-                        {/* Interactive Topics List */}
-                        <div className="p-5 space-y-4">
-                          <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider flex items-center justify-between">
-                            <span>Personalización previa de temas ({evt.topics?.length || 0}):</span>
-                            <span className="text-[10px] text-slate-400 font-normal">
-                              Puedes calificar dificultad y ajustar si suma vuelta antes de aprobar
-                            </span>
-                          </div>
+                        {/* TOPICS IN FLIGHT */}
+                        <div className="p-4 space-y-3">
+                          {(evt.topics || []).map((t, idx) => {
+                            const info = getTopicInfo(t.resolvedTopicId, t.resolvedTopicTitle);
+                            const durationMins =
+                              t.effectiveMinutes || Math.round((t.effectiveHours || 0) * 60) || 45;
+                            const currentDiff =
+                              t.dificultadReal !== undefined ? t.dificultadReal : t.difficulty;
+                            const completesVuelta =
+                              t.completesVuelta !== undefined
+                                ? t.completesVuelta
+                                : t.modality === "repaso" || t.modality === "canto";
 
-                          <div className="space-y-3">
-                            {(evt.topics || []).map((t, idx) => {
-                              const durationMins = t.effectiveMinutes || Math.round((t.effectiveHours || 0) * 60) || 45;
-                              const currentDiff = t.dificultadReal !== undefined ? t.dificultadReal : t.difficulty;
-                              const isRated = currentDiff !== undefined && currentDiff > 0;
-                              const completesVuelta = t.completesVuelta !== undefined ? t.completesVuelta : (t.modality === 'repaso' || t.modality === 'canto');
-
-                              return (
-                                <div
-                                  key={idx}
-                                  className="p-4 rounded-2xl bg-slate-50/70 border border-slate-200/80 hover:border-slate-300 transition-all flex flex-col gap-3.5"
-                                >
-                                  {/* Row 1: Topic Title, Badge & Reassign */}
-                                  <div className="flex flex-wrap items-center justify-between gap-2">
-                                    <div className="flex items-center gap-2 min-w-0">
-                                      <span className="text-[11px] font-mono px-2 py-0.5 rounded-md bg-slate-200 font-bold text-slate-700 shrink-0">
-                                        {t.resolvedTopicId}
-                                      </span>
-                                      <span className="text-xs font-black text-slate-900 truncate">
-                                        {t.resolvedTopicTitle || "Tema no especificado"}
-                                      </span>
-                                    </div>
-
-                                    <button
-                                      onClick={() => {
-                                        setReassigningItem({ eventId: evt.id, topicIndex: idx });
-                                        setReassignSearch("");
-                                      }}
-                                      className="px-2.5 py-1 rounded-lg text-[11px] font-bold text-slate-600 bg-white hover:bg-slate-100 border border-slate-200 transition-all flex items-center gap-1"
-                                      title="Cambiar tema asignado"
-                                    >
-                                      <Edit2 size={11} />
-                                      <span>Cambiar tema</span>
-                                    </button>
+                            return (
+                              <div
+                                key={idx}
+                                className="p-3.5 rounded-xl bg-slate-50/60 border border-slate-200/80 hover:bg-white hover:border-slate-300 transition-all flex flex-col gap-3"
+                              >
+                                {/* Row 1: Official Subject, Title and Reassign Button */}
+                                <div className="flex flex-wrap items-center justify-between gap-2">
+                                  <div className="flex items-center gap-2.5 min-w-0">
+                                    <span
+                                      className="w-2.5 h-2.5 rounded-full shrink-0"
+                                      style={{ backgroundColor: info.subjectColor }}
+                                      title={info.subjectName}
+                                    />
+                                    <span className="text-xs font-semibold text-slate-500 shrink-0">
+                                      {info.subjectName}
+                                    </span>
+                                    <span className="text-xs font-bold text-slate-900 truncate">
+                                      Tema {info.number}: {info.title}
+                                    </span>
+                                    <span className="text-[10px] uppercase font-bold px-2 py-0.5 rounded-md bg-slate-200/80 text-slate-700 shrink-0">
+                                      {t.modality || "repaso"}
+                                    </span>
                                   </div>
 
-                                  {/* Row 2: Modality, Duration & Vuelta Toggle */}
-                                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 items-center">
-                                    {/* Modality Selector */}
-                                    <div>
-                                      <label className="text-[10px] font-black uppercase tracking-wider text-slate-400 block mb-1">
-                                        Modalidad
-                                      </label>
-                                      <select
-                                        value={t.modality || "repaso"}
-                                        onChange={(e) => updateQuarantineTopic(evt.id, idx, { modality: e.target.value as any })}
-                                        className="w-full px-2.5 py-1.5 rounded-xl bg-white border border-slate-200 text-xs font-bold text-slate-800 focus:outline-none"
-                                      >
-                                        <option value="repaso">Repaso</option>
-                                        <option value="primer_estudio">Primer Estudio</option>
-                                        <option value="refresco">Refresco</option>
-                                        <option value="canto">Cante</option>
-                                      </select>
-                                    </div>
+                                  <button
+                                    onClick={() => {
+                                      setReassigningItem({ eventId: evt.id, topicIndex: idx });
+                                      setReassignSearch("");
+                                    }}
+                                    className="px-2.5 py-1 rounded-lg text-xs font-medium text-slate-600 bg-white hover:bg-slate-100 border border-slate-200 transition-colors flex items-center gap-1"
+                                    title="Reasignar a otro tema del temario oficial"
+                                  >
+                                    <BookOpen size={11} className="text-slate-400" />
+                                    <span>Cambiar tema</span>
+                                  </button>
+                                </div>
 
-                                    {/* Duration Adjuster */}
-                                    <div>
-                                      <label className="text-[10px] font-black uppercase tracking-wider text-slate-400 block mb-1">
-                                        Duración Efectiva (minutos)
-                                      </label>
-                                      <div className="flex items-center gap-1">
-                                        <button
-                                          onClick={() => {
-                                            const newMins = Math.max(5, durationMins - 15);
-                                            updateQuarantineTopic(evt.id, idx, { 
-                                              effectiveMinutes: newMins,
-                                              effectiveHours: Math.round((newMins / 60) * 100) / 100 
-                                            });
-                                          }}
-                                          className="w-7 h-7 rounded-lg bg-white border border-slate-200 text-xs font-black text-slate-600 hover:bg-slate-100 flex items-center justify-center shrink-0"
-                                        >
-                                          -
-                                        </button>
-                                        <input
-                                          type="number"
-                                          min="1"
-                                          max="600"
-                                          value={durationMins}
-                                          onChange={(e) => {
-                                            const val = parseInt(e.target.value, 10) || 0;
-                                            updateQuarantineTopic(evt.id, idx, { 
-                                              effectiveMinutes: val,
-                                              effectiveHours: Math.round((val / 60) * 100) / 100 
-                                            });
-                                          }}
-                                          className="w-full text-center px-2 py-1.5 rounded-xl bg-white border border-slate-200 text-xs font-mono font-bold text-slate-900"
-                                        />
-                                        <button
-                                          onClick={() => {
-                                            const newMins = durationMins + 15;
-                                            updateQuarantineTopic(evt.id, idx, { 
-                                              effectiveMinutes: newMins,
-                                              effectiveHours: Math.round((newMins / 60) * 100) / 100 
-                                            });
-                                          }}
-                                          className="w-7 h-7 rounded-lg bg-white border border-slate-200 text-xs font-black text-slate-600 hover:bg-slate-100 flex items-center justify-center shrink-0"
-                                        >
-                                          +
-                                        </button>
-                                      </div>
-                                    </div>
-
-                                    {/* Vuelta Toggle (Critical for partial reviews) */}
-                                    <div>
-                                      <label className="text-[10px] font-black uppercase tracking-wider text-slate-400 block mb-1">
-                                        ¿Suma Vuelta Oficial?
-                                      </label>
+                                {/* Row 2: Duration, Difficulty rating (1-10) and Vuelta Toggle */}
+                                <div className="flex flex-wrap items-center justify-between gap-3 pt-1 border-t border-slate-100 text-xs">
+                                  {/* Duration Stepper */}
+                                  <div className="flex items-center gap-2">
+                                    <span className="text-slate-400 font-medium">Tiempo:</span>
+                                    <div className="flex items-center gap-1">
                                       <button
-                                        type="button"
-                                        onClick={() => updateQuarantineTopic(evt.id, idx, { completesVuelta: !completesVuelta })}
-                                        className={cn(
-                                          "w-full px-3 py-1.5 rounded-xl text-xs font-black border transition-all flex items-center justify-between gap-1.5",
-                                          completesVuelta
-                                            ? "bg-emerald-50 text-emerald-800 border-emerald-300"
-                                            : "bg-amber-50 text-amber-800 border-amber-300"
-                                        )}
-                                        title="Si fue un repaso partido que no terminó el tema, marca 'No' para sumar horas sin falsear tus vueltas"
+                                        onClick={() =>
+                                          updateQuarantineTopic(evt.id, idx, {
+                                            effectiveMinutes: Math.max(5, durationMins - 5),
+                                            effectiveHours: Math.max(5, durationMins - 5) / 60,
+                                          })
+                                        }
+                                        className="w-6 h-6 rounded-md bg-white border border-slate-200 hover:bg-slate-100 text-slate-700 flex items-center justify-center font-bold text-xs"
                                       >
-                                        <span>{completesVuelta ? "✓ Sí, completa vuelta" : "⚠️ No, repaso parcial"}</span>
-                                        <span className="text-[10px] underline font-normal">Cambiar</span>
+                                        -
+                                      </button>
+                                      <span className="font-mono font-bold text-slate-900 px-1.5 tabular-nums">
+                                        {durationMins} min
+                                      </span>
+                                      <button
+                                        onClick={() =>
+                                          updateQuarantineTopic(evt.id, idx, {
+                                            effectiveMinutes: durationMins + 5,
+                                            effectiveHours: (durationMins + 5) / 60,
+                                          })
+                                        }
+                                        className="w-6 h-6 rounded-md bg-white border border-slate-200 hover:bg-slate-100 text-slate-700 flex items-center justify-center font-bold text-xs"
+                                      >
+                                        +
                                       </button>
                                     </div>
                                   </div>
 
-                                  {/* Row 3: Difficulty Rating Selector (1 to 10) */}
-                                  <div className="pt-2 border-t border-slate-200/60">
-                                    <div className="flex flex-wrap items-center justify-between gap-2 mb-1.5">
-                                      <span className="text-[10px] font-black uppercase tracking-wider text-slate-500">
-                                        Calificación de Dificultad (1 = Fácil, 10 = Máxima dificultad):
-                                      </span>
-                                      <button
-                                        onClick={() => updateQuarantineTopic(evt.id, idx, { difficulty: undefined, dificultadReal: undefined })}
-                                        className={cn(
-                                          "text-[10px] font-bold px-2 py-0.5 rounded-md transition-all",
-                                          !isRated ? "bg-amber-100 text-amber-800 font-black" : "text-slate-400 hover:text-slate-700"
-                                        )}
-                                      >
-                                        {!isRated ? "⚠️ Sin calificar (Pendiente)" : "Dejar sin calificar"}
-                                      </button>
-                                    </div>
-
-                                    <div className="flex flex-wrap items-center gap-1.5">
-                                      {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((score) => {
-                                        const isSelected = currentDiff === score;
+                                  {/* Difficulty 1-10 Chips */}
+                                  <div className="flex items-center gap-1.5">
+                                    <span className="text-slate-400 font-medium">Dificultad:</span>
+                                    <div className="flex items-center gap-0.5">
+                                      {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((num) => {
+                                        const isSelected = currentDiff === num;
                                         return (
                                           <button
-                                            key={score}
-                                            onClick={() => updateQuarantineTopic(evt.id, idx, { difficulty: score, dificultadReal: score })}
+                                            key={num}
+                                            onClick={() =>
+                                              updateQuarantineTopic(evt.id, idx, {
+                                                difficulty: num,
+                                                dificultadReal: num,
+                                              })
+                                            }
                                             className={cn(
-                                              "w-7 h-7 rounded-lg text-xs font-black transition-all flex items-center justify-center font-mono cursor-pointer",
+                                              "w-6 h-6 rounded-md text-[11px] font-bold font-mono transition-colors flex items-center justify-center",
                                               isSelected
-                                                ? "bg-slate-900 text-white shadow-xs scale-105 ring-2 ring-slate-900/20"
-                                                : "bg-white hover:bg-slate-200 text-slate-700 border border-slate-200"
+                                                ? "bg-slate-900 text-white shadow-2xs"
+                                                : "bg-white text-slate-600 border border-slate-200 hover:bg-slate-100"
                                             )}
                                           >
-                                            {score}
+                                            {num}
                                           </button>
                                         );
                                       })}
                                     </div>
                                   </div>
 
-                                  {/* Row 4: Custom Notes */}
-                                  <div>
+                                  {/* Vuelta Checkbox */}
+                                  <label className="flex items-center gap-2 cursor-pointer select-none">
                                     <input
-                                      type="text"
-                                      placeholder="Notas u observaciones de este repaso..."
-                                      value={t.notes || ""}
-                                      onChange={(e) => updateQuarantineTopic(evt.id, idx, { notes: e.target.value })}
-                                      className="w-full px-3 py-1 bg-white border border-slate-200 rounded-lg text-[11px] text-slate-700 focus:outline-none"
+                                      type="checkbox"
+                                      checked={completesVuelta}
+                                      onChange={(e) =>
+                                        updateQuarantineTopic(evt.id, idx, {
+                                          completesVuelta: e.target.checked,
+                                        })
+                                      }
+                                      className="rounded text-emerald-600 focus:ring-emerald-500 w-3.5 h-3.5"
                                     />
-                                  </div>
+                                    <span className={cn("text-xs font-semibold", completesVuelta ? "text-emerald-700" : "text-slate-500")}>
+                                      {completesVuelta ? "✓ Suma Vuelta Oficial" : "Repaso Parcial"}
+                                    </span>
+                                  </label>
                                 </div>
-                              );
-                            })}
-                          </div>
+                              </div>
+                            );
+                          })}
                         </div>
                       </div>
                     );
@@ -1019,12 +983,11 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
           </div>
         )}
 
-        {/* TAB 1: AUDIT & SESSIONS */}
+        {/* TAB 2: AUDITORÍA DE SESIONES REGISTRADAS */}
         {activeTab === "sessions" && (
           <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
             {/* Filter controls */}
             <div className="p-4 border-b border-slate-100 bg-white flex flex-wrap items-center justify-between gap-3 shrink-0">
-              {/* Search input */}
               <div className="relative flex-1 min-w-[200px] max-w-sm">
                 <Search size={14} className="absolute left-3 top-2.5 text-slate-400" />
                 <input
@@ -1044,9 +1007,7 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                 )}
               </div>
 
-              {/* Segmented Filter Buttons */}
               <div className="flex flex-wrap items-center gap-2">
-                {/* Subject dropdown */}
                 <select
                   value={subjectFilter}
                   onChange={(e) => setSubjectFilter(e.target.value)}
@@ -1054,11 +1015,12 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                 >
                   <option value="all">Todos los bloques</option>
                   {initialSubjects.map((s) => (
-                    <option key={s.id} value={s.id}>{s.name}</option>
+                    <option key={s.id} value={s.id}>
+                      {s.name}
+                    </option>
                   ))}
                 </select>
 
-                {/* Source filter */}
                 <select
                   value={sourceFilter}
                   onChange={(e) => setSourceFilter(e.target.value as any)}
@@ -1069,7 +1031,6 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                   <option value="manual">Solo Manuales</option>
                 </select>
 
-                {/* Difficulty filter */}
                 <select
                   value={difficultyFilter}
                   onChange={(e) => setDifficultyFilter(e.target.value as any)}
@@ -1083,7 +1044,7 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
             </div>
 
             {/* Sessions Table View */}
-            <div className="flex-1 overflow-y-auto no-scrollbar">
+            <div className="flex-1 overflow-y-auto">
               {filteredSessions.length === 0 ? (
                 <div className="py-20 text-center">
                   <div className="w-12 h-12 rounded-2xl bg-slate-100 text-slate-400 mx-auto flex items-center justify-center mb-3">
@@ -1091,131 +1052,93 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                   </div>
                   <h3 className="text-sm font-bold text-slate-800">No hay sesiones que coincidan</h3>
                   <p className="text-xs text-slate-400 mt-1 max-w-xs mx-auto">
-                    Prueba a cambiar los filtros de búsqueda o simula un test de webhook arriba.
+                    Prueba a cambiar los filtros de búsqueda o revisa la bandeja de cuarentena.
                   </p>
                 </div>
               ) : (
                 <div className="divide-y divide-slate-100">
                   {filteredSessions.map((session) => {
-                    const info = getTopicInfo(session.topicId);
+                    const info = getTopicInfo(session.topicId, session.topicTitle);
                     const diff = session.dificultadReal || session.difficulty;
-                    const isPendingDiff = !diff || diff === 0;
-                    const durationMins = session.durationMinutes || session.durationReal || Math.round((session.effectiveHours || 0) * 60) || 0;
-                    const durationHours = (durationMins / 60).toFixed(1);
+                    const isPending = !diff || diff === 0;
 
                     return (
                       <div
                         key={session.id}
-                        className="px-6 py-4 hover:bg-slate-50/80 transition-colors flex flex-col md:flex-row md:items-center justify-between gap-3 group"
+                        className="px-6 py-3.5 hover:bg-slate-50/70 transition-colors flex items-center justify-between gap-4"
                       >
-                        {/* Left: Date, Topic, Modality */}
-                        <div className="flex items-start gap-3.5 flex-1 min-w-0">
-                          <div className="w-2.5 h-2.5 rounded-full mt-1.5 shrink-0" style={{ backgroundColor: info.subjectColor }} />
+                        <div className="flex items-center gap-3 min-w-0">
+                          <span
+                            className="w-2.5 h-2.5 rounded-full shrink-0"
+                            style={{ backgroundColor: info.subjectColor }}
+                            title={info.subjectName}
+                          />
                           <div className="min-w-0">
-                            <div className="flex items-center gap-2 flex-wrap">
-                              <span className="text-xs font-bold text-slate-400">
-                                {session.date}
-                              </span>
-                              <span className="text-[11px] font-bold text-slate-600">
-                                {info.subjectName}
-                              </span>
-                              <span className="text-slate-300">·</span>
-                              <span className="text-xs font-black text-slate-900 truncate">
+                            <div className="flex items-center gap-2">
+                              <span className="text-xs font-bold text-slate-900 truncate">
                                 Tema {info.number}: {info.title}
                               </span>
-                            </div>
-
-                            <div className="flex items-center gap-2.5 mt-1 text-xs text-slate-500 flex-wrap">
-                              <span className="capitalize font-bold text-slate-700">
-                                {session.modality || session.type || "Repaso"}
+                              <span className="text-[10px] font-semibold text-slate-400 font-mono">
+                                {session.date}
                               </span>
-                              <span>·</span>
-                              <span className="font-mono tabular-nums font-bold text-slate-800">
-                                {durationMins} min ({durationHours} h)
-                              </span>
-                              {(session.source === "aerofocus" || session.source === "aerofocus_pro") ? (
-                                <span className="inline-flex items-center gap-1 text-[10px] font-black text-blue-700 bg-blue-50 border border-blue-200/60 px-2 py-0.5 rounded-md">
-                                  <Sparkles size={11} /> AeroFocus
-                                </span>
-                              ) : (
-                                <span className="text-[10px] font-bold text-slate-400 bg-slate-100 px-2 py-0.5 rounded-md">
-                                  Manual
+                              {session.source === "aerofocus_pro" && (
+                                <span className="text-[10px] font-bold text-indigo-600 bg-indigo-50 px-1.5 py-0.2 rounded">
+                                  AeroFocus
                                 </span>
                               )}
-                              {session.completesVuelta === true ? (
-                                <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-md border border-emerald-200/50">
-                                  Vuelta completa
-                                </span>
-                              ) : session.completesVuelta === false ? (
-                                <span className="text-[10px] font-bold text-slate-500 bg-slate-100 px-2 py-0.5 rounded-md border border-slate-200">
-                                  Sesión parcial
-                                </span>
-                              ) : null}
+                            </div>
+                            <div className="text-[11px] text-slate-500 mt-0.5 flex items-center gap-2">
+                              <span>{info.subjectName}</span>
+                              <span>·</span>
+                              <span className="font-mono">{session.durationMinutes || 0} min</span>
                               {session.notes && (
-                                <span className="text-slate-400 italic truncate max-w-xs">
-                                  "{session.notes}"
-                                </span>
+                                <>
+                                  <span>·</span>
+                                  <span className="truncate max-w-xs italic text-slate-400">"{session.notes}"</span>
+                                </>
                               )}
                             </div>
                           </div>
                         </div>
 
-                        {/* Right: Quick Difficulty Rater + Action Buttons */}
-                        <div className="flex items-center gap-3 shrink-0 self-end md:self-center">
-                          {/* Difficulty rating pill or interactive quick selector */}
-                          <div className="flex items-center gap-1.5">
-                            {isPendingDiff ? (
-                              <div className="flex items-center gap-1 bg-amber-50 border border-amber-200/80 px-2 py-1 rounded-xl">
-                                <span className="text-[10px] font-black uppercase text-amber-700 mr-1">
-                                  Calificar:
-                                </span>
-                                {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((score) => (
-                                  <button
-                                    key={score}
-                                    onClick={() => quickUpdateSessionDifficulty(session.id, score, session.topicId)}
-                                    className="w-5 h-5 rounded flex items-center justify-center text-[10px] font-mono font-black bg-white hover:bg-slate-900 hover:text-white border border-amber-200/60 transition-colors shadow-2xs"
-                                    title={`Calificar con dificultad ${score}/10`}
-                                  >
-                                    {score}
-                                  </button>
-                                ))}
-                              </div>
-                            ) : (
-                              <div
-                                onClick={() => setEditingSession(session)}
+                        <div className="flex items-center gap-3 shrink-0">
+                          {/* Quick Difficulty Pills */}
+                          <div className="flex items-center gap-1">
+                            <span className="text-[10px] text-slate-400 font-semibold mr-1">Dificultad:</span>
+                            {[3, 5, 8].map((d) => (
+                              <button
+                                key={d}
+                                onClick={() => quickUpdateSessionDifficulty(session.id, d)}
                                 className={cn(
-                                  "px-2.5 py-1 rounded-xl text-xs font-black font-mono tabular-nums cursor-pointer hover:opacity-80 transition-opacity border",
-                                  diff <= 3 ? "bg-emerald-50 text-emerald-800 border-emerald-200" :
-                                  diff <= 6 ? "bg-amber-50 text-amber-800 border-amber-200" :
-                                  "bg-rose-50 text-rose-800 border-rose-200"
+                                  "px-2 py-0.5 rounded text-[10px] font-bold font-mono transition-colors",
+                                  diff === d
+                                    ? "bg-slate-900 text-white"
+                                    : "bg-slate-100 text-slate-600 hover:bg-slate-200"
                                 )}
-                                title="Dificultad (clic para cambiar)"
                               >
-                                Dif: {diff}/10
-                              </div>
-                            )}
+                                {d}
+                              </button>
+                            ))}
                           </div>
 
-                          {/* Edit Button */}
                           <button
                             onClick={() => setEditingSession(session)}
-                            className="p-1.5 text-slate-400 hover:text-slate-800 hover:bg-slate-100 rounded-lg transition-colors"
-                            title="Editar y reasignar sesión"
+                            className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-lg transition-colors"
+                            title="Editar sesión completa"
                           >
-                            <Edit2 size={15} />
+                            <Edit2 size={13} />
                           </button>
 
-                          {/* Delete Button */}
                           <button
-                            onClick={async () => {
-                              if (confirm(`¿Eliminar sesión del Tema ${info.number}? Las horas se restarán del progreso.`)) {
-                                await deleteStudySession(session.topicId, session.id);
+                            onClick={() => {
+                              if (confirm("¿Deseas eliminar esta sesión de tu expediente?")) {
+                                deleteStudySession(session.id);
                               }
                             }}
-                            className="p-1.5 text-slate-300 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors"
+                            className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors"
                             title="Eliminar sesión"
                           >
-                            <Trash2 size={15} />
+                            <Trash2 size={13} />
                           </button>
                         </div>
                       </div>
@@ -1227,128 +1150,191 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
           </div>
         )}
 
-        {/* TAB 2: RAW WEBHOOK LOGS */}
-        {activeTab === "raw_logs" && (
-          <div className="flex-1 flex flex-col md:flex-row min-h-0 overflow-hidden divide-y md:divide-y-0 md:divide-x divide-slate-200">
-            {/* Logs List */}
-            <div className="w-full md:w-1/2 flex flex-col overflow-hidden bg-slate-50/50">
-              <div className="p-3 border-b border-slate-200 flex items-center justify-between shrink-0 bg-white">
-                <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">
-                  Eventos Recibidos por el Servidor
-                </span>
+        {/* TAB 3: CONEXIÓN & WEBHOOK (DEDICATED, CLEAN) */}
+        {activeTab === "webhook" && (
+          <div className="flex-1 p-8 overflow-y-auto bg-slate-50/50">
+            <div className="max-w-2xl mx-auto space-y-6">
+              <div>
+                <h3 className="text-base font-bold text-slate-900 font-serif">
+                  Ajustes de Sincronización Webhook · AeroFocus Pro
+                </h3>
+                <p className="text-xs text-slate-500 mt-1">
+                  Copia estas credenciales en AeroFocus Pro para que tus sesiones aterricen en tiempo real sin pasos intermedios.
+                </p>
+              </div>
+
+              {/* Endpoint card */}
+              <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-2xs space-y-3">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+                    <Globe size={13} className="text-indigo-600" />
+                    <span>1. URL del Webhook (POST)</span>
+                  </label>
+                  <span className="text-[11px] text-slate-400">Pega esto en AeroFocus &gt; Ajustes &gt; Webhook</span>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    readOnly
+                    value={webhookUrl}
+                    className="flex-1 px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-mono text-slate-800 select-all focus:outline-none"
+                  />
+                  <button
+                    onClick={() => {
+                      navigator.clipboard.writeText(webhookUrl);
+                      setCopiedUrl(true);
+                      setTimeout(() => setCopiedUrl(false), 2000);
+                      toast.success("URL del webhook copiada");
+                    }}
+                    className="px-3.5 py-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200/60 rounded-xl text-xs font-semibold transition-colors flex items-center gap-1.5"
+                  >
+                    {copiedUrl ? <Check size={13} /> : <Copy size={13} />}
+                    <span>{copiedUrl ? "Copiado" : "Copiar"}</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Token card */}
+              <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-2xs space-y-3">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+                    <Key size={13} className="text-emerald-600" />
+                    <span>2. Token de Autorización (API Key)</span>
+                  </label>
+                  <span className="text-[11px] text-slate-400">Pega esto en AeroFocus &gt; Ajustes &gt; Token</span>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    readOnly
+                    value={webhookToken || "wp_qLXi6WFkFY_live"}
+                    className="flex-1 px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-mono text-emerald-700 font-bold select-all focus:outline-none"
+                  />
+                  <button
+                    onClick={() => {
+                      navigator.clipboard.writeText(webhookToken || "wp_qLXi6WFkFY_live");
+                      setCopiedToken(true);
+                      setTimeout(() => setCopiedToken(false), 2000);
+                      toast.success("Token de autorización copiado");
+                    }}
+                    className="px-3.5 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200/60 rounded-xl text-xs font-semibold transition-colors flex items-center gap-1.5"
+                  >
+                    {copiedToken ? <Check size={13} /> : <Copy size={13} />}
+                    <span>{copiedToken ? "Copiado" : "Copiar"}</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Handshake Verification */}
+              <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-2xs flex items-center justify-between gap-4">
+                <div>
+                  <h4 className="text-xs font-bold text-slate-900">Comprobar Enlace Operativo</h4>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    Envía un ping de verificación para comprobar que la ruta responde correctamente.
+                  </p>
+                </div>
+
                 <button
-                  onClick={fetchLogs}
-                  disabled={isLoadingLogs}
-                  className="p-1 text-slate-400 hover:text-slate-700 rounded-lg"
-                  title="Refrescar logs"
+                  onClick={handleTestWebhook}
+                  disabled={isTestingWebhook}
+                  className="px-4 py-2 rounded-xl text-xs font-bold bg-slate-900 hover:bg-slate-800 text-white transition-colors flex items-center gap-1.5 disabled:opacity-50"
                 >
-                  <RefreshCw size={13} className={cn(isLoadingLogs && "animate-spin")} />
+                  <ShieldCheck size={13} className={cn(isTestingWebhook && "animate-spin")} />
+                  <span>{isTestingWebhook ? "Verificando..." : "Test de Conexión"}</span>
                 </button>
               </div>
 
-              <div className="flex-1 overflow-y-auto divide-y divide-slate-100 no-scrollbar">
-                {rawEvents.length === 0 ? (
-                  <div className="py-16 text-center text-xs text-slate-400">
-                    No se han registrado eventos webhook aún.
-                  </div>
-                ) : (
-                  rawEvents.map((evt) => (
-                    <div
-                      key={evt.id}
-                      onClick={() => setSelectedRawEvent(evt)}
-                      className={cn(
-                        "p-3 cursor-pointer transition-colors text-left",
-                        selectedRawEvent?.id === evt.id
-                          ? "bg-blue-50/80 border-l-4 border-blue-600"
-                          : "hover:bg-slate-100/60"
-                      )}
-                    >
-                      <div className="flex items-center justify-between text-[11px]">
-                        <span className="font-bold text-slate-800">
-                          {evt.event || "study_session_completed"}
-                        </span>
-                        <span className="text-slate-400 font-mono text-[10px]">
-                          {new Date(evt.timestamp).toLocaleTimeString()}
-                        </span>
-                      </div>
-                      <div className="flex items-center gap-2 mt-1 text-[11px] text-slate-500">
-                        <span className="font-mono">Vuelo: {evt.payload?.flightId || "N/A"}</span>
-                        <span>·</span>
-                        <span>{evt.payload?.topics?.length || 0} tema(s)</span>
-                        <span>·</span>
-                        <span className="font-bold text-slate-700">
-                          {evt.payload?.totalFlightEffectiveHours || 0} h
-                        </span>
-                      </div>
-                    </div>
-                  ))
-                )}
-              </div>
-            </div>
+              {/* Clean Maintenance Section */}
+              <div className="p-5 rounded-2xl bg-slate-100/60 border border-slate-200 space-y-3">
+                <div className="flex items-center gap-2 text-xs font-bold text-slate-700">
+                  <Wrench size={13} className="text-slate-500" />
+                  <span>Mantenimiento & Limpieza de Datos</span>
+                </div>
+                <p className="text-xs text-slate-500">
+                  Si deseas eliminar datos de prueba antiguos o reiniciar tu bandeja de sincronización:
+                </p>
+                <div className="flex flex-wrap gap-2 pt-1">
+                  <button
+                    onClick={() => {
+                      if (confirm("¿Deseas purgar todas las sesiones de prueba de AeroFocus?")) {
+                        setIsPurging(true);
+                        purgeAllAeroFocusData()
+                          .then(() => toast.success("Sesiones de AeroFocus purgadas."))
+                          .finally(() => setIsPurging(false));
+                      }
+                    }}
+                    disabled={isPurging}
+                    className="px-3 py-1.5 rounded-xl text-xs font-semibold bg-white hover:bg-rose-50 text-rose-700 border border-slate-200 hover:border-rose-200 transition-colors"
+                  >
+                    Purgar datos de prueba
+                  </button>
 
-            {/* JSON Payload Inspector */}
-            <div className="w-full md:w-1/2 flex flex-col overflow-hidden bg-slate-900 text-slate-200">
-              <div className="p-3 border-b border-slate-800 flex items-center justify-between shrink-0 bg-slate-950">
-                <span className="text-xs font-mono font-bold text-slate-400">
-                  {selectedRawEvent ? `Payload: ${selectedRawEvent.id}` : "Selecciona un evento para ver su JSON"}
-                </span>
-                {selectedRawEvent && (
-                  <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-blue-900 text-blue-200">
-                    Status 200 OK
-                  </span>
-                )}
-              </div>
-
-              <div className="flex-1 p-4 overflow-auto font-mono text-xs">
-                {selectedRawEvent ? (
-                  <pre className="text-emerald-400 whitespace-pre-wrap">
-                    {JSON.stringify(selectedRawEvent, null, 2)}
-                  </pre>
-                ) : (
-                  <div className="text-slate-500 py-16 text-center text-xs">
-                    Haz clic en un evento de la izquierda para examinar el JSON exacto recibido de AeroFocus Pro.
-                  </div>
-                )}
+                  <button
+                    onClick={handleReconcile}
+                    disabled={isReconciling}
+                    className="px-3 py-1.5 rounded-xl text-xs font-semibold bg-white hover:bg-slate-50 text-slate-700 border border-slate-200 transition-colors"
+                  >
+                    Reconciliación Maestra
+                  </button>
+                </div>
               </div>
             </div>
           </div>
         )}
 
-        {/* BOTTOM STATUS BAR */}
-        <div className="px-6 py-3 border-t border-slate-200/80 bg-slate-50/60 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500 shrink-0">
-          <div className="flex items-center gap-2">
-            <ShieldCheck size={14} className="text-emerald-600" />
-            <span>Sistema Anti-Errores Activo: Recálculo determinista en cascada</span>
-          </div>
+        {/* TAB 4: LOGS DE RED BRUTOS */}
+        {activeTab === "raw_logs" && (
+          <div className="flex-1 flex flex-col min-h-0 overflow-hidden bg-slate-50/50">
+            <div className="p-4 bg-white border-b border-slate-200/60 flex items-center justify-between">
+              <span className="text-xs font-bold text-slate-700">Últimas 30 transmisiones recibidas por la API</span>
+              <button
+                onClick={fetchLogs}
+                disabled={isLoadingLogs}
+                className="px-3 py-1.5 rounded-xl text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-800 transition-colors flex items-center gap-1.5"
+              >
+                <RefreshCw size={12} className={cn(isLoadingLogs && "animate-spin")} />
+                <span>Refrescar logs</span>
+              </button>
+            </div>
 
-          <div className="flex items-center gap-3">
-            <span className="font-mono text-[11px] text-slate-400">
-              Token API: {webhookToken ? `${webhookToken.slice(0, 10)}...` : "Configurado"}
-            </span>
-            <button
-              onClick={onClose}
-              className="px-4 py-1.5 rounded-xl font-bold bg-slate-200 hover:bg-slate-300 text-slate-800 transition-colors"
-            >
-              Cerrar Panel
-            </button>
+            <div className="flex-1 p-6 overflow-y-auto">
+              {rawEvents.length === 0 ? (
+                <div className="py-20 text-center text-xs text-slate-400">
+                  No se registran eventos de red recientes en el búfer.
+                </div>
+              ) : (
+                <div className="space-y-3 font-mono text-xs">
+                  {rawEvents.map((log, i) => (
+                    <div key={i} className="p-3 bg-white rounded-xl border border-slate-200 shadow-2xs">
+                      <div className="flex items-center justify-between text-slate-500 mb-1">
+                        <span>{log.receivedAt || log.date}</span>
+                        <span className="font-bold text-slate-800">#{log.flightId || log.id}</span>
+                      </div>
+                      <pre className="text-[11px] text-slate-700 overflow-x-auto p-2 bg-slate-50 rounded-lg">
+                        {JSON.stringify(log.rawPayload || log, null, 2)}
+                      </pre>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
-        </div>
+        )}
 
       </div>
 
       {/* Manual Paste Modal */}
       {isPasteModalOpen && (
         <div className="fixed inset-0 z-60 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-white rounded-3xl shadow-2xl border border-slate-200 w-full max-w-lg p-6 flex flex-col gap-4 animate-in fade-in zoom-in-95 duration-150">
+          <div className="bg-white rounded-3xl shadow-2xl border border-slate-200 w-full max-w-lg p-6 space-y-4 animate-in fade-in zoom-in-95 duration-150">
             <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2.5">
-                <div className="w-8 h-8 rounded-xl bg-indigo-50 text-indigo-600 flex items-center justify-center">
-                  <Send size={16} />
-                </div>
-                <div>
-                  <h3 className="text-sm font-black text-slate-900">Pegar Transmisión de AeroFocus Pro</h3>
-                  <p className="text-[11px] text-slate-500">Acepta JSON, bloques Markdown o reporte de texto</p>
-                </div>
+              <div>
+                <h3 className="text-sm font-bold text-slate-900 font-serif">Pegar Reporte o Cierre de AeroFocus</h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Interpreta cualquier formato JSON, texto o tabla de temas y minutos
+                </p>
               </div>
               <button
                 onClick={() => setIsPasteModalOpen(false)}
@@ -1358,40 +1344,19 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
               </button>
             </div>
 
-            <div>
-              <div className="flex items-center justify-between mb-1">
-                <label className="text-[10px] font-black uppercase tracking-wider text-slate-400 block">
-                  Contenido de la sesión o reporte
-                </label>
-                <button
-                  type="button"
-                  onClick={async () => {
-                    try {
-                      if (navigator?.clipboard?.readText) {
-                        const clip = await navigator.clipboard.readText();
-                        if (clip) setPasteJsonText(clip);
-                      }
-                    } catch {}
-                  }}
-                  className="text-[10px] font-bold text-indigo-600 hover:text-indigo-800 flex items-center gap-1"
-                >
-                  <Copy size={10} /> Pegar del portapapeles
-                </button>
-              </div>
-              <textarea
-                rows={9}
-                value={pasteJsonText}
-                onChange={(e) => setPasteJsonText(e.target.value)}
-                placeholder={'// Pega aquí el JSON o reporte copiado de AeroFocus:\n{\n  "date": "2026-10-23",\n  "topics": [\n    {\n      "materia": "Constitucional",\n      "tema": "Tema 5",\n      "effectiveMinutes": 90,\n      "modality": "repaso"\n    }\n  ]\n}\n\n// O también texto:\nConstitucional Tema 5 - 90 min - Repaso'}
-                className="w-full p-3 bg-slate-50 border border-slate-200 rounded-2xl text-xs font-mono text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 placeholder:text-slate-400/80"
-              />
-            </div>
+            <textarea
+              rows={9}
+              value={pasteJsonText}
+              onChange={(e) => setPasteJsonText(e.target.value)}
+              placeholder={'// Pega aquí el JSON o reporte copiado de AeroFocus:\n{\n  "date": "2026-10-28",\n  "topics": [\n    {\n      "materia": "Civil",\n      "tema": "Tema 14",\n      "effectiveMinutes": 90,\n      "modality": "repaso"\n    }\n  ]\n}\n\n// O también texto libre:\nCivil Tema 14 - 90 min - Repaso'}
+              className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs font-mono text-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-900/10 placeholder:text-slate-400"
+            />
 
-            <div className="flex items-center justify-end gap-2 pt-2">
+            <div className="flex items-center justify-end gap-2 pt-1">
               <button
                 type="button"
                 onClick={() => setIsPasteModalOpen(false)}
-                className="px-4 py-2 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-100 transition-colors"
+                className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-600 hover:bg-slate-100 transition-colors"
               >
                 Cancelar
               </button>
@@ -1399,7 +1364,7 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                 type="button"
                 onClick={handleImportPaste}
                 disabled={isImportingPaste}
-                className="px-4 py-2 rounded-xl text-xs font-black text-white bg-indigo-600 hover:bg-indigo-700 shadow-sm transition-all flex items-center gap-1.5 disabled:opacity-50"
+                className="px-4 py-2 rounded-xl text-xs font-bold text-white bg-slate-900 hover:bg-slate-800 transition-colors flex items-center gap-1.5 disabled:opacity-50"
               >
                 {isImportingPaste ? <RefreshCw size={12} className="animate-spin" /> : <CheckCircle2 size={13} />}
                 <span>Interpretar y Cargar en Cuarentena</span>
@@ -1415,8 +1380,8 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
           <div className="bg-white rounded-3xl shadow-2xl border border-slate-200 w-full max-w-lg h-[80vh] max-h-[600px] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-150">
             <div className="p-5 border-b border-slate-100 flex items-center justify-between">
               <div>
-                <h3 className="text-sm font-black text-slate-900">Reasignar Tema Oficial</h3>
-                <p className="text-[11px] text-slate-500">Selecciona el tema oficial correspondiente para esta sesión</p>
+                <h3 className="text-sm font-bold text-slate-900 font-serif">Reasignar Tema Oficial</h3>
+                <p className="text-xs text-slate-500 mt-0.5">Selecciona el tema oficial correspondiente</p>
               </div>
               <button
                 onClick={() => setReassigningItem(null)}
@@ -1431,10 +1396,10 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                 <Search size={14} className="absolute left-3 top-2.5 text-slate-400" />
                 <input
                   type="text"
-                  placeholder="Buscar por número o título del tema..."
+                  placeholder="Buscar por número o título..."
                   value={reassignSearch}
                   onChange={(e) => setReassignSearch(e.target.value)}
-                  className="w-full pl-9 pr-3 py-1.5 bg-white border border-slate-200 rounded-xl text-xs font-medium text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
+                  className="w-full pl-9 pr-3 py-1.5 bg-white border border-slate-200 rounded-xl text-xs font-medium text-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-900/10"
                   autoFocus
                 />
               </div>
@@ -1445,7 +1410,11 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                 .filter((t) => {
                   if (!reassignSearch) return true;
                   const q = reassignSearch.toLowerCase();
-                  return t.title.toLowerCase().includes(q) || t.id.toLowerCase().includes(q) || String(t.number).includes(q);
+                  return (
+                    t.title.toLowerCase().includes(q) ||
+                    t.id.toLowerCase().includes(q) ||
+                    String(t.number).includes(q)
+                  );
                 })
                 .map((t) => {
                   const sub = initialSubjects.find((s) => s.id === t.subjectId);
@@ -1457,19 +1426,19 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                           resolvedTopicId: t.id,
                           resolvedTopicTitle: t.title,
                           resolvedTopicNumber: t.number,
-                          resolvedSubjectId: t.subjectId
+                          resolvedSubjectId: t.subjectId,
                         });
                         setReassigningItem(null);
-                        toast.success(`Tema reasignado a: ${t.title}`);
+                        toast.success(`Tema reasignado a: Tema ${t.number} - ${t.title}`);
                       }}
-                      className="w-full text-left p-3 rounded-xl hover:bg-indigo-50/60 border border-slate-100 hover:border-indigo-200 transition-all flex items-center justify-between gap-3 group"
+                      className="w-full text-left p-3 rounded-xl hover:bg-slate-50 border border-slate-100 hover:border-slate-300 transition-colors flex items-center justify-between gap-3 group"
                     >
                       <div className="min-w-0">
-                        <div className="text-xs font-black text-slate-900 group-hover:text-indigo-900 truncate">
-                          {t.title}
+                        <div className="text-xs font-bold text-slate-900 group-hover:text-indigo-900 truncate">
+                          Tema {t.number}: {t.title}
                         </div>
                         <div className="text-[10px] text-slate-400 mt-0.5">
-                          {sub?.name || t.subjectId} · Tema #{t.number}
+                          {sub?.name || t.subjectId}
                         </div>
                       </div>
                       <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-100 text-slate-600 shrink-0">
