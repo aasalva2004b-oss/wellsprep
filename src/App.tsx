@@ -63,7 +63,7 @@ export default function App() {
   };
 
   return (
-    <div className="flex h-[100dvh] bg-[#F5F5F7] text-slate-900 font-sans overflow-hidden select-none">
+    <div className="flex h-[100dvh] bg-[#F5F5F7] text-slate-900 font-sans overflow-hidden">
       {/* Premium Desktop Sidebar */}
       <aside
         className={cn(
@@ -224,7 +224,7 @@ export default function App() {
           </div>
         )}
 
-        <div className="flex-1 overflow-hidden flex flex-col relative w-full h-full bg-transparent">
+        <div className="flex-1 min-h-0 overflow-hidden flex flex-col relative w-full h-full bg-transparent">
           <AnimatePresence mode="wait">
             {activeTab === "dashboard" && (
               <motion.div

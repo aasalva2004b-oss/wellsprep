@@ -105,11 +105,66 @@ export function normalizeCategoryToSubjectId(category?: string): string | null {
 }
 
 /**
+ * Mapeo canónico oficial de AeroFocus Pro Judicatura (jud-1 a jud-328)
+ * 328 temas divididos en 7 bloques deterministas:
+ * - Constitucional: jud-1 a jud-27 (Temas 1..27)
+ * - Civil: jud-28 a jud-121 (Temas 1..94)
+ * - Penal: jud-122 a jud-185 (Temas 1..64)
+ * - Procesal Civil: jud-186 a jud-243 (Temas 1..58)
+ * - Procesal Penal: jud-244 a jud-283 (Temas 1..40)
+ * - Mercantil: jud-284 a jud-299 (Temas 1..16)
+ * - Administrativo y Laboral: jud-300 a jud-328 (Temas 1..29)
+ */
+export function resolveCanonicalJudicaturaId(rawId?: string): { subjectId: string; number: number; topicId: string } | null {
+  if (!rawId) return null;
+  const clean = rawId.toLowerCase().trim();
+  const match = clean.match(/^jud[-_]?(\d+)$/);
+  if (!match) return null;
+  const n = parseInt(match[1], 10);
+  if (isNaN(n) || n < 1 || n > 328) return null;
+
+  if (n >= 1 && n <= 27) {
+    return { subjectId: 'constitucional', number: n, topicId: `constitucional-${n}` };
+  }
+  if (n >= 28 && n <= 121) {
+    const topicNum = n - 27;
+    return { subjectId: 'civil', number: topicNum, topicId: `civil-${topicNum}` };
+  }
+  if (n >= 122 && n <= 185) {
+    const topicNum = n - 121;
+    return { subjectId: 'penal', number: topicNum, topicId: `penal-${topicNum}` };
+  }
+  if (n >= 186 && n <= 243) {
+    const topicNum = n - 185;
+    return { subjectId: 'procesal-civil', number: topicNum, topicId: `procesal-civil-${topicNum}` };
+  }
+  if (n >= 244 && n <= 283) {
+    const topicNum = n - 243;
+    return { subjectId: 'procesal-penal', number: topicNum, topicId: `procesal-penal-${topicNum}` };
+  }
+  if (n >= 284 && n <= 299) {
+    const topicNum = n - 283;
+    return { subjectId: 'mercantil', number: topicNum, topicId: `mercantil-${topicNum}` };
+  }
+  if (n >= 300 && n <= 328) {
+    const topicNum = n - 299;
+    return { subjectId: 'administrativo-laboral', number: topicNum, topicId: `administrativo-laboral-${topicNum}` };
+  }
+  return null;
+}
+
+/**
  * Mapeo de prefijos e identificadores estándar de AeroFocus Pro (ej. CIV_T12 -> civil-12)
  */
 export function parseAeroFocusTopicIdPrefix(rawId?: string): { subjectId: string; number: number } | null {
   if (!rawId) return null;
   const str = rawId.trim();
+
+  // Caso jud-1 .. jud-328 canónico
+  const judCanonical = resolveCanonicalJudicaturaId(str);
+  if (judCanonical) {
+    return { subjectId: judCanonical.subjectId, number: judCanonical.number };
+  }
 
   // Caso directo exacto de Wellsprep: "civil-12", "constitucional-3", etc.
   const directMatch = str.toLowerCase().match(/^([a-z\-]+)[-_](\d+)$/);
@@ -303,6 +358,11 @@ export function extractMinutesFromAeroItem(item: any, fallbackMinutes: number = 
 
 /**
  * Resuelve de forma unívoca y rigurosa un tema de AeroFocus Pro contra el temario de Wellsprep
+ * Jerarquía estricta:
+ * 1. Coincidencia directa por topicId canónico (jud-1..jud-328)
+ * 2. Coincidencia por ID de Wellsprep o prefijo estándar (ej. civil-12, CIV_T12, etc.)
+ * 3. Coincidencia compuesta: normalizeCategoryToSubjectId(materia) + topicNumber
+ * 4. Coincidencia por título oficial normalizado
  */
 export function resolveAeroFocusTopic(
   item: AeroFocusTopicItem,
@@ -310,32 +370,17 @@ export function resolveAeroFocusTopic(
 ): WebhookResolvedTopic | null {
   const topicsList = customTopics || initialTopics;
 
-  // 0. Regla de resolución para sesiones de Penal (5 y 12) correspondientes a Constitucional 5
-  const rawIdClean = String(item.topicId || '').trim().toLowerCase();
-  const rawTitleClean = String(item.topicTitle || (item as any).title || '').toLowerCase();
-  const rawCatClean = String(item.category || '').toLowerCase();
-  const isPenalConst5 =
-    rawIdClean === 'penal-5' ||
-    rawIdClean === 'penal-12' ||
-    rawIdClean === 'penal_5' ||
-    rawIdClean === 'penal_12' ||
-    rawIdClean === 'jud-pen-05' ||
-    rawIdClean === 'jud-pen-12' ||
-    rawTitleClean.includes('penal 5') ||
-    rawTitleClean.includes('penal 12') ||
-    rawTitleClean.includes('delito imprudente') ||
-    rawTitleClean.includes('circunstancias agravantes') ||
-    (rawCatClean.includes('penal') && (rawIdClean.includes('5') || rawIdClean.includes('12') || Number(item.topicNumber) === 5 || Number(item.topicNumber) === 12));
-
-  if (isPenalConst5) {
-    const const5 = topicsList.find(t => t.id === 'constitucional-5');
-    if (const5) {
-      return buildResolvedTopic(const5, item);
-    }
-  }
-
-  // 1. Intento por topicId directo en Wellsprep (ej. "civil-12", "constitucional-1")
+  // 1. Intento por topicId canónico oficial AeroFocus jud-1..jud-328
   if (item.topicId) {
+    const canonical = resolveCanonicalJudicaturaId(item.topicId);
+    if (canonical) {
+      const match = topicsList.find(t => t.id === canonical.topicId || (t.subjectId === canonical.subjectId && t.number === canonical.number));
+      if (match) {
+        return buildResolvedTopic(match, item);
+      }
+    }
+
+    // Intento por topicId directo en Wellsprep (ej. "civil-12", "constitucional-1")
     const cleanId = item.topicId.trim().toLowerCase();
     const exact = topicsList.find(t => t.id.toLowerCase() === cleanId);
     if (exact) {
@@ -381,17 +426,17 @@ export function resolveAeroFocusTopic(
     }
   }
 
-  // 4. Intento por similitud de texto del título dentro de la asignatura
-  if (subjectIdFromCategory && titleText) {
+  // 4. Intento por similitud de texto del título dentro de la asignatura conocida
+  const activeSubject = subjectIdFromCategory || subjectIdFromTitle;
+  if (activeSubject && titleText) {
     const cleanTitle = titleText.toLowerCase()
       .replace(/tema\s*\d+\s*[-:.]*/i, '')
       .replace(/^\d+[.:\- ]*/, '')
       .trim();
 
     if (cleanTitle.length >= 4) {
-      // Coincidencia exacta o contenida
       const match = topicsList.find(t => {
-        if (t.subjectId !== subjectIdFromCategory) return false;
+        if (t.subjectId !== activeSubject) return false;
         const officialTitle = t.title.toLowerCase();
         return officialTitle.includes(cleanTitle) || cleanTitle.includes(officialTitle);
       });
@@ -401,14 +446,14 @@ export function resolveAeroFocusTopic(
     }
   }
 
-  // 5. Intento global de coincidencia por título exhaustivo si el título es suficientemente largo
+  // 5. Intento global de coincidencia por título exhaustivo
   if (titleText) {
     const cleanTitle = titleText.toLowerCase()
       .replace(/tema\s*\d+\s*[-:.]*/i, '')
       .replace(/^\d+[.:\- ]*/, '')
       .trim();
 
-    if (cleanTitle.length >= 8) {
+    if (cleanTitle.length >= 6) {
       const match = topicsList.find(t => {
         const officialTitle = t.title.toLowerCase();
         return officialTitle.includes(cleanTitle) || cleanTitle.includes(officialTitle);
@@ -419,27 +464,17 @@ export function resolveAeroFocusTopic(
     }
   }
 
-  // 6. Intento por número puro si coincide de forma inequívoca en la asignatura seleccionada
-  if ((subjectIdFromCategory || subjectIdFromTitle) && topicNum) {
-    const activeSub = subjectIdFromCategory || subjectIdFromTitle;
-    const subjectMatches = topicsList.filter(t => t.subjectId === activeSub);
-    const match = subjectMatches.find(t => t.number === topicNum);
+  // 6. Intento por número puro si la asignatura fue identificada
+  if (activeSubject && topicNum) {
+    const match = topicsList.find(t => t.subjectId === activeSubject && t.number === topicNum);
     if (match) {
       return buildResolvedTopic(match, item);
     }
   }
 
-  // 7. Si hay número pero la asignatura no vino explícita, buscar en Constitucional
-  if (topicNum) {
-    const defaultConst = topicsList.find(t => t.subjectId === 'constitucional' && t.number === topicNum);
-    if (defaultConst) {
-      return buildResolvedTopic(defaultConst, item);
-    }
-  }
-
-  // 8. Fallback amigable: NUNCA devolver null para evitar topic-unknown
+  // 7. Fallback determinista amigable
   const finalNum = topicNum || 1;
-  const finalSubId = subjectIdFromCategory || subjectIdFromTitle || 'constitucional';
+  const finalSubId = activeSubject || 'constitucional';
   const effectiveMins = extractMinutesFromAeroItem(item, 45);
 
   return {
@@ -450,6 +485,11 @@ export function resolveAeroFocusTopic(
     modality: normalizeModality((item as any).modalidad || (item as any).modality || (item as any).type),
     effectiveHours: Math.round((effectiveMins / 60) * 100) / 100,
     effectiveMinutes: effectiveMins,
+    plsema: item.plsema,
+    minutesPerPage: item.minutesPerPage ?? item.minutosPorPagina,
+    secondsPerPage: item.secondsPerPage ?? item.segundosPorPagina,
+    pageBreakdown: item.pageBreakdown,
+    tasksBreakdown: item.tasksBreakdown,
     original: item
   };
 }
@@ -461,6 +501,9 @@ function buildResolvedTopic(
   const rawAny = item as any;
   const effectiveMinutes = extractMinutesFromAeroItem(rawAny, 45);
   const effectiveHours = Math.round((effectiveMinutes / 60) * 100) / 100;
+  const effectiveSeconds = typeof rawAny.effectiveSeconds === 'number' ? rawAny.effectiveSeconds :
+                           typeof rawAny.segundosEfectivos === 'number' ? rawAny.segundosEfectivos :
+                           effectiveMinutes * 60;
 
   const grade = typeof rawAny.cantoGrade === 'number' ? rawAny.cantoGrade :
                 typeof rawAny.grade === 'number' ? rawAny.grade :
@@ -493,6 +536,12 @@ function buildResolvedTopic(
     modality: normalizeModality(rawAny.modalidad || rawAny.modality || rawAny.type),
     effectiveHours: Math.round(effectiveHours * 100) / 100,
     effectiveMinutes: effectiveMinutes,
+    effectiveSeconds: effectiveSeconds,
+    minutesPerPage: rawAny.minutesPerPage ?? rawAny.minutosPorPagina,
+    secondsPerPage: rawAny.secondsPerPage ?? rawAny.segundosPorPagina,
+    plsema: rawAny.plsema || rawAny.fasesPlsema,
+    pageBreakdown: rawAny.pageBreakdown,
+    tasksBreakdown: rawAny.tasksBreakdown,
     original: item
   };
 

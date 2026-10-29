@@ -1,3 +1,20 @@
+export * from '../types/aerofocusWebhook';
+
+import {
+  PlsemaPhase,
+  TaskStudyType,
+  WellsprepPlsemaBreakdown,
+  WellsprepPageStatV2,
+  WellsprepSubtaskStatV2,
+  WellsprepTaskDetailV2,
+  WellsprepTopicBreakdownV2,
+  WellsprepSessionTelemetryV2,
+  WellsprepAnalyticsV2,
+  WellsprepSubjectSummaryV2,
+  AeroFocusWebhookPayloadV2,
+  AeroFocusWebhookResponseV2
+} from '../types/aerofocusWebhook';
+
 export interface AeroFocusTopicItem {
   topicId?: string;
   topicNumber?: number;
@@ -17,6 +34,8 @@ export interface AeroFocusTopicItem {
   horasEfectivas?: number;
   effectiveMinutes?: number;
   minutosEfectivos?: number;
+  effectiveSeconds?: number;
+  segundosEfectivos?: number;
   grossMinutes?: number;
   minutosBrutos?: number;
   timeFormatted?: string;
@@ -33,6 +52,13 @@ export interface AeroFocusTopicItem {
   pagesCount?: number;
   pagesText?: string;
   paginas?: string;
+  minutesPerPage?: number | null;
+  minutosPorPagina?: number | null;
+  secondsPerPage?: number | null;
+  segundosPorPagina?: number | null;
+  plsema?: WellsprepPlsemaBreakdown;
+  pageBreakdown?: WellsprepPageStatV2[];
+  tasksBreakdown?: WellsprepTaskDetailV2[];
   isTopicCompleted?: boolean;
   completed?: boolean;
   completado?: boolean;
@@ -46,69 +72,7 @@ export interface AeroFocusTopicItem {
   };
 }
 
-export interface AeroFocusWebhookPayload {
-  schemaVersion?: string;
-  event?: string;
-  version?: string;
-  transactionId?: string;
-  timestamp?: string;
-  date?: string;
-  fecha?: string;
-  source?: string;
-  flightId?: string;
-  targetDailyHour?: number;
-  pilotCallsign?: string;
-  callsignName?: string;
-  dailyTotalFlightMinutes?: number;
-  dailyTotalEffectiveMinutes?: number;
-  dailyTotalEffectiveHours?: number;
-  totalFlightEffectiveMinutes?: number;
-  totalFlightEffectiveHours?: number;
-  totalEffectiveHours?: number;
-  horasEfectivas?: number;
-  minutosEfectivos?: number;
-  tiempoFormateado?: string;
-  totalDistractionMinutes?: number;
-  sessionsCount?: number;
-  focusScore?: number;
-  subject?: string;
-  materia?: string;
-  subjects?: any[];
-  topics?: AeroFocusTopicItem[];
-  sessions?: any[];
-  summary?: {
-    estudioHours?: number;
-    repasoHours?: number;
-    refrescoHours?: number;
-    cantoHours?: number;
-    totalHours?: number;
-    horasEstudio?: number;
-    horasRepaso?: number;
-    horasRefresco?: number;
-    totalMinutos?: number;
-    minutosEfectivos?: number;
-  };
-  resumen?: {
-    horasEfectivas?: number;
-    minutosEfectivos?: number;
-    tiempoFormateado?: string;
-    horasEstudio?: number;
-    horasRepaso?: number;
-    horasRefresco?: number;
-  };
-  reportMarkdown?: string;
-  textSummary?: string;
-  resumenTexto?: string;
-  message?: string;
-  telemetry?: {
-    appVersion?: string;
-    sourceApp?: string;
-    environment?: string;
-    [key: string]: any;
-  };
-  isTest?: boolean;
-  [key: string]: any;
-}
+export type AeroFocusWebhookPayload = AeroFocusWebhookPayloadV2;
 
 export interface WebhookResolvedTopic {
   resolvedTopicId: string;
@@ -118,6 +82,7 @@ export interface WebhookResolvedTopic {
   modality: 'primer_estudio' | 'repaso' | 'refresco' | 'canto';
   effectiveHours: number;
   effectiveMinutes: number;
+  effectiveSeconds?: number;
   difficulty?: number;
   dificultadReal?: number;
   completesVuelta?: boolean;
@@ -131,6 +96,13 @@ export interface WebhookResolvedTopic {
   endPage?: number;
   pagesCount?: number;
   pagesText?: string;
+  minutesPerPage?: number | null;
+  minutosPorPagina?: number | null;
+  secondsPerPage?: number | null;
+  segundosPorPagina?: number | null;
+  plsema?: WellsprepPlsemaBreakdown;
+  pageBreakdown?: WellsprepPageStatV2[];
+  tasksBreakdown?: WellsprepTaskDetailV2[];
   distractionSeconds?: number;
   summaryLine?: string;
   pageInfo?: {
@@ -149,12 +121,21 @@ export interface WebhookSyncRecord {
   source: string;
   flightId: string;
   transactionId?: string;
+  flightIdsIncluded?: string[];
+  syncScope?: 'single_session' | 'daily' | 'full_history' | string;
+  schemaVersion?: string;
   dailyTotalEffectiveHours?: number;
+  dailyTotalEffectiveMinutes?: number;
   totalFlightEffectiveMinutes: number;
   totalFlightEffectiveHours: number;
   status: 'pending' | 'quarantined' | 'processed' | 'error';
   errorMessage?: string;
   topics: WebhookResolvedTopic[];
+  pageBreakdown?: WellsprepPageStatV2[];
+  tasksBreakdown?: WellsprepTaskDetailV2[];
+  sessionsTelemetry?: WellsprepSessionTelemetryV2[];
+  plsema?: WellsprepPlsemaBreakdown;
+  analytics?: WellsprepAnalyticsV2;
   rawPayload?: any;
   summary?: {
     estudioHours?: number;
@@ -166,4 +147,6 @@ export interface WebhookSyncRecord {
   reportMarkdown?: string;
   pilotCallsign?: string;
   focusScore?: number;
+  avgMinutesPerPage?: number;
+  totalPagesWorked?: number;
 }

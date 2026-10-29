@@ -697,7 +697,7 @@ export function TemarioView() {
       </div>
 
       {/* TOPICS CONTAINER */}
-      <div className="flex-1 overflow-y-auto p-4 md:p-8 pb-28 relative z-10 w-full max-w-[100rem] mx-auto">
+      <div className="flex-1 min-h-0 overflow-y-auto overscroll-y-contain touch-pan-y p-4 md:p-8 pb-28 relative z-10 w-full max-w-[100rem] mx-auto">
         {viewMode === "grid" ? (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
             {subjectTopics.map((topic, index) => {

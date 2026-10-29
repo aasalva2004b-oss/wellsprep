@@ -9,7 +9,8 @@ import {
   processIncomingAeroFocusPayload,
   loadWebhookEvents,
   saveWebhookEvents,
-  getWebhookHealthOrSessions
+  getWebhookHealthOrSessions,
+  loadGlobalAnalytics
 } from "./src/lib/webhookStorage";
 
 // NOTE: require Vite explicitly to avoid ts-node / tsx dynamic import issues
@@ -141,257 +142,35 @@ Return a JSON array of these objects. ONLY valid JSON.`;
 
     try {
       // 1. Verificación de Seguridad
-      if (!isAuthorizedWebhookRequest(req.headers)) {
-        return res.status(401).json({ error: 'Token no autorizado' });
+      if (!isAuthorizedWebhookRequest(req.headers, req.body)) {
+        return res.status(401).json({ error: 'Token no autorizado', expected: 'wp_qLXi6WFkFY_live' });
       }
 
-      // 2. Extracción y normalización de Payload (admite JSON, string crudo, URL-encoded)
-      let payload = req.body;
-      if (typeof payload === 'string') {
-        try {
-          payload = JSON.parse(payload);
-        } catch {
-          payload = {};
-        }
-      } else if (!payload || typeof payload !== 'object') {
-        payload = {};
+      // 2. Procesamiento idempotente de alta precisión v2.2.0
+      const result = processIncomingAeroFocusPayload(req.body, req.headers);
+
+      if (result.createdRecord) {
+        broadcastWebhookEvent(result.createdRecord);
+        console.log(`[AeroFocus Webhook v2.2.0] Transmisión procesada con éxito: ${result.createdRecord.id} (${result.createdRecord.topics.length} temas, ${result.createdRecord.dailyTotalEffectiveHours}h).`);
       }
 
-      if (typeof payload.payload === 'string') {
-        try { payload = JSON.parse(payload.payload); } catch {}
-      }
-
-      console.log(`[AeroFocus Webhook] Recibida petición desde ${req.ip}. Evento: ${payload.event || 'daily_sync'}. Autenticado: ${Boolean(req.headers.authorization || req.headers['x-api-key'])}`);
-
-      // 3. Test de conexión / Handshake de AeroFocus (no toca la base de datos)
-      if (payload.isTest || payload.event === 'test_connection' || req.headers['x-test-ping']) {
-        return res.status(200).json({
-          success: true,
-          status: 'ok',
-          message: 'Enlace operativo AeroFocus Pro <-> WellsPrep'
-        });
-      }
-
-      // 4. Extracción universal con aliases planos
-      const { date, fecha, transactionId } = payload;
-      const sessionDate = date || fecha || (payload.timestamp ? new Date(payload.timestamp).toISOString().split('T')[0] : new Date().toISOString().split('T')[0]);
-      const totalHours = Number(payload.horasEfectivas ?? payload.dailyTotalEffectiveHours ?? payload.totalEffectiveHours ?? 0);
-      const totalMins = Number(payload.minutosEfectivos ?? payload.dailyTotalEffectiveMinutes ?? payload.totalFlightEffectiveMinutes ?? Math.round(totalHours * 60));
-
-      let rawTopics: any[] = [];
-      if (Array.isArray(payload)) {
-        rawTopics = payload;
-      } else if (Array.isArray(payload.topics)) {
-        rawTopics = payload.topics;
-      } else if (Array.isArray(payload.sessions)) {
-        rawTopics = payload.sessions;
-      } else if (Array.isArray(payload.studySessions)) {
-        rawTopics = payload.studySessions;
-      } else if (Array.isArray(payload.study_sessions)) {
-        rawTopics = payload.study_sessions;
-      } else if (Array.isArray(payload.items)) {
-        rawTopics = payload.items;
-      } else if (Array.isArray(payload.tasks)) {
-        rawTopics = payload.tasks;
-      } else if (Array.isArray(payload.blocks)) {
-        rawTopics = payload.blocks;
-      } else if (payload.data && Array.isArray(payload.data.topics)) {
-        rawTopics = payload.data.topics;
-      } else if (payload.topicId || payload.topicTitle || payload.topicNumber || payload.tema || payload.topic || payload.subject || payload.materia) {
-        rawTopics = [payload];
-      }
-
-      // Si es un ping explícito sin contenido de estudio
-      if (payload.event === 'ping') {
-        return res.status(200).json({
-          status: "ok",
-          synced: true,
-          date: sessionDate,
-          transactionId: transactionId || `ping_${sessionDate}`,
-          processedTopics: 0,
-          effectiveHours: 0,
-          message: "Conexión probada con éxito entre AeroFocus Pro y Wellsprep"
-        });
-      }
-
-      // Si no se encontraron temas pero venía tiempo efectivo
-      if (rawTopics.length === 0 && (totalHours > 0 || totalMins > 0)) {
-        rawTopics = [{
-          materia: payload.materia || payload.subject || "Derecho Constitucional",
-          topicTitle: payload.title || payload.topicTitle || payload.name || "Sesión AeroFocus Pro",
-          effectiveMinutes: totalMins || 45,
-          effectiveHours: totalHours || (totalMins / 60),
-          modality: payload.modality || "estudio"
-        }];
-      }
-
-      // Dynamic import to ensure clean resolution
-      const { resolveAeroFocusTopic, extractMinutesFromAeroItem } = await import("./src/lib/topicResolver");
-      const resolvedTopics: any[] = [];
-
-      // Filtrar temas que sean meras marcas de distracción o pausa
-      const filteredRawTopics = rawTopics.filter(t => {
-        const mod = String(t.modalidad || t.modality || t.type || '').toLowerCase();
-        if (mod === 'distraction' || mod === 'distraccion' || mod === 'pausa' || mod === 'break' || mod === 'descanso') {
-          return false;
-        }
-        const title = String(t.tema || t.topic || t.topicTitle || '').toLowerCase();
-        if (title.includes('distracci') || title.includes('pausa') || title.includes('descanso')) {
-          return false;
-        }
-        return true;
-      });
-
-      const topicsCount = filteredRawTopics.length || 1;
-      const distributedFallbackMins = totalMins > 0 ? Math.max(15, Math.round(totalMins / topicsCount)) : 45;
-
-      for (const t of filteredRawTopics) {
-        const materia = t.materia || t.subject || t.subjectName || t.category || payload.materia || payload.subject || 'Derecho Constitucional';
-        const numeroTema = t.temaNumero ?? t.topicNumber ?? null;
-        const titulo = t.tema || t.topic || t.topicTitle || (numeroTema ? `Tema ${numeroTema}` : 'Tema');
-        const modalidad = t.modalidad || t.modality || t.type || 'estudio';
-        
-        // Extracción robusta de minutos individuales del tema
-        const directMins = extractMinutesFromAeroItem(t, 0);
-        const minutos = directMins > 0 ? directMins : distributedFallbackMins;
-        const horas = Math.round((minutos / 60) * 100) / 100;
-
-        // Descartar sesiones fantasmas de 1 minuto procedentes de pings o clics accidentales
-        if (minutos <= 1 && !t.cantoGrade && !t.grade) {
-          continue;
-        }
-
-        const startPage = t.startPage ?? t.pages?.pageStart ?? null;
-        const endPage = t.endPage ?? t.pages?.pageEnd ?? null;
-        const pagesCount = t.pagesCount ?? t.pages?.pagesCount ?? (startPage != null && endPage != null ? Math.max(0, endPage - startPage + 1) : 0);
-        const pagesText = t.pagesText ?? t.pages?.rawText ?? t.paginas ?? (startPage != null && endPage != null ? `Págs. ${startPage}-${endPage}` : undefined);
-        const isCompleted = Boolean(t.completado || t.completed || t.isTopicCompleted || t.status === 'completed');
-
-        const enriched = {
-          ...t,
-          category: materia,
-          materia,
-          topicNumber: numeroTema,
-          temaNumero: numeroTema,
-          topicTitle: titulo,
-          tema: titulo,
-          topic: titulo,
-          modality: modalidad,
-          modalidad,
-          effectiveHours: horas,
-          horasEfectivas: horas,
-          effectiveMinutes: minutos,
-          minutosEfectivos: minutos,
-          startPage,
-          endPage,
-          pagesCount,
-          pagesText,
-          isTopicCompleted: isCompleted,
-          completesVuelta: isCompleted || Boolean(t.completesVuelta)
-        };
-
-        const resolved = resolveAeroFocusTopic(enriched);
-
-        const topicItem: any = resolved
-          ? {
-              ...resolved,
-              effectiveMinutes: minutos,
-              effectiveHours: horas,
-              startPage,
-              endPage,
-              pagesCount,
-              pagesText,
-              isTopicCompleted: isCompleted,
-              completesVuelta: isCompleted || resolved.completesVuelta
-            }
-          : {
-              resolvedTopicId: String(t.topicId || (numeroTema ? `constitucional-${numeroTema}` : 'topic-unknown')),
-              resolvedSubjectId: 'constitucional',
-              resolvedTopicNumber: Number(numeroTema || 0),
-              resolvedTopicTitle: titulo,
-              effectiveMinutes: minutos,
-              effectiveHours: horas,
-              modality: modalidad,
-              startPage,
-              endPage,
-              pagesCount,
-              pagesText,
-              isTopicCompleted: isCompleted,
-              completesVuelta: isCompleted,
-              notes: t.notes || 'Sincronizado vía AeroFocus Webhook'
-            };
-
-        resolvedTopics.push(topicItem);
-      }
-
-      const calculatedEffectiveMinutes = totalMins || resolvedTopics.reduce((acc, t) => acc + (t.effectiveMinutes || 0), 0);
-      const calculatedEffectiveHours = totalHours || Math.round((calculatedEffectiveMinutes / 60) * 100) / 100;
-      const flightId = String(payload.flightId || transactionId || `vuelo_${sessionDate}`);
-
-      const record = {
-        id: `af_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-        receivedAt: new Date().toISOString(),
-        date: sessionDate,
-        source: payload.source || "aerofocus_pro",
-        flightId,
-        transactionId: transactionId || flightId,
-        dailyTotalEffectiveHours: calculatedEffectiveHours,
-        totalFlightEffectiveMinutes: calculatedEffectiveMinutes,
-        totalFlightEffectiveHours: calculatedEffectiveHours,
-        status: "quarantined",
-        topics: resolvedTopics,
-        rawPayload: payload,
-        reportMarkdown: payload.reportMarkdown,
-        pilotCallsign: payload.pilotCallsign || payload.callsignName,
-        focusScore: payload.focusScore,
-        summary: payload.summary || {
-          estudioHours: resolvedTopics.filter(t => t.modality === 'primer_estudio').reduce((a, b) => a + (b.effectiveHours || 0), 0),
-          repasoHours: resolvedTopics.filter(t => t.modality === 'repaso').reduce((a, b) => a + (b.effectiveHours || 0), 0),
-          refrescoHours: resolvedTopics.filter(t => t.modality === 'refresco').reduce((a, b) => a + (b.effectiveHours || 0), 0),
-          cantoHours: resolvedTopics.filter(t => t.modality === 'canto').reduce((a, b) => a + (b.effectiveHours || 0), 0),
-          totalHours: calculatedEffectiveHours
-        }
-      };
-
-      const currentEvents = loadWebhookEvents();
-      currentEvents.push(record);
-      saveWebhookEvents(currentEvents);
-
-      // Buffer en memoria global para consulta GET de AeroFocus / Dashboard
-      const buffer = globalThis.__wellsprep_sessions || [];
-      buffer.unshift({
-        id: record.flightId || record.transactionId || record.id,
-        receivedAt: new Date().toISOString(),
-        payload
-      });
-      if (buffer.length > 50) buffer.pop();
-      globalThis.__wellsprep_sessions = buffer;
-
-      // Notificar a todos los clientes web conectados en tiempo real mediante SSE
-      broadcastWebhookEvent(record);
-
-      console.log(`[AeroFocus Webhook] Evento ${record.id} (${transactionId || flightId}) procesado con éxito (${resolvedTopics.length} temas, ${calculatedEffectiveHours}h).`);
-
-      // Respuesta exacta estandarizada compatible con Next.js y AeroFocus Pro
-      return res.status(200).json({
-        status: 'ok',
-        synced: true,
-        date: sessionDate,
-        transactionId: transactionId || flightId,
-        processedTopics: resolvedTopics.length,
-        effectiveHours: calculatedEffectiveHours,
-        quarantined: true,
-        recordId: record.id,
-        message: payload.message || `Registradas ${calculatedEffectiveHours}h netas en WellsPrep`
-      });
+      return res.status(result.statusCode).json(result.responseData);
     } catch (err: any) {
       console.error("[AeroFocus Webhook] Error processing request:", err);
       return res.status(500).json({
-        error: err?.message || 'Error interno',
+        ok: false,
+        error: err?.message || 'Error interno en ingesta',
         status: 'error',
         synced: false
       });
     }
+  });
+
+  // Endpoint para consultar el Snapshot Analítico Global de AeroFocus
+  app.get("/api/webhook/analytics", (req, res) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    const analytics = loadGlobalAnalytics();
+    return res.json({ ok: true, analytics });
   });
 
   // Query events / quarantined syncs

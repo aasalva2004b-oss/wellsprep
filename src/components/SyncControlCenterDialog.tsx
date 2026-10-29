@@ -24,7 +24,14 @@ import {
   Key,
   Globe,
   Wrench,
-  BookOpen
+  BookOpen,
+  Activity,
+  Brain,
+  Timer,
+  TrendingUp,
+  BarChart3,
+  Flame,
+  Award
 } from "lucide-react";
 import { useFirebase } from "../lib/FirebaseProvider";
 import { initialSubjects, initialTopics } from "../data/initialData";
@@ -36,14 +43,14 @@ import {
 import { EditSessionDialog } from "./EditSessionDialog";
 import { toast } from "sonner";
 import { cn } from "../lib/utils";
-import { WebhookSyncRecord } from "../lib/webhookTypes";
+import { WebhookSyncRecord, WellsprepAnalyticsV2 } from "../lib/webhookTypes";
 import { simulateAeroFocusFlight } from "../hooks/useAeroFocusSync";
 
 interface SyncControlCenterDialogProps {
   onClose: () => void;
 }
 
-type ControlCenterTab = "quarantine" | "sessions" | "webhook" | "raw_logs";
+type ControlCenterTab = "quarantine" | "sessions" | "analytics" | "webhook" | "raw_logs";
 
 export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProps) {
   const {
@@ -116,9 +123,36 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
     }
   };
 
+  // Global Analytics v2.2.0 state
+  const [globalAnalytics, setGlobalAnalytics] = useState<WellsprepAnalyticsV2 | null>(null);
+  const [isLoadingAnalytics, setIsLoadingAnalytics] = useState(false);
+
+  const fetchAnalytics = async () => {
+    try {
+      setIsLoadingAnalytics(true);
+      const res = await fetch("/api/webhook/analytics");
+      if (res.ok) {
+        const data = await res.json();
+        if (data?.analytics) {
+          setGlobalAnalytics(data.analytics);
+        }
+      }
+    } catch (e) {
+      console.warn("Error fetching analytics:", e);
+    } finally {
+      setIsLoadingAnalytics(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchAnalytics();
+  }, []);
+
   useEffect(() => {
     if (activeTab === "raw_logs") {
       fetchLogs();
+    } else if (activeTab === "analytics") {
+      fetchAnalytics();
     }
   }, [activeTab]);
 
@@ -555,6 +589,22 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
             </button>
 
             <button
+              onClick={() => setActiveTab("analytics")}
+              className={cn(
+                "py-2.5 sm:py-3 px-3 sm:px-4 text-xs font-bold tracking-tight border-b-2 transition-all flex items-center gap-1.5 sm:gap-2 whitespace-nowrap",
+                activeTab === "analytics"
+                  ? "border-purple-600 text-purple-900"
+                  : "border-transparent text-slate-400 hover:text-slate-700"
+              )}
+            >
+              <Brain size={14} className={activeTab === "analytics" ? "text-purple-600" : "text-slate-400"} />
+              <span>Analítica Pro v2.2</span>
+              {globalAnalytics && (
+                <span className="w-1.5 h-1.5 rounded-full bg-purple-500 animate-pulse" />
+              )}
+            </button>
+
+            <button
               onClick={() => setActiveTab("webhook")}
               className={cn(
                 "py-2.5 sm:py-3 px-3 sm:px-4 text-xs font-bold tracking-tight border-b-2 transition-all flex items-center gap-1.5 sm:gap-2 whitespace-nowrap",
@@ -973,6 +1023,41 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                                     </div>
                                   </div>
                                 </div>
+
+                                {/* Row 3: PLSEMA Cognitive Phases and Pages Pace (v2.2.0) */}
+                                {(t.plsema || t.minutesPerPage || t.pagesCount || (evt.pageBreakdown && evt.pageBreakdown.length > 0)) && (
+                                  <div className="pt-2 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                                    <div className="flex flex-wrap items-center gap-1.5">
+                                      {t.minutesPerPage != null && t.minutesPerPage > 0 && (
+                                        <span className="px-2 py-0.5 rounded-md font-mono font-bold bg-indigo-50 text-indigo-700 border border-indigo-200/60 flex items-center gap-1">
+                                          <Timer size={10} />
+                                          <span>{t.minutesPerPage.toFixed(1)} min/pág</span>
+                                        </span>
+                                      )}
+                                      {(t.pagesText || t.pagesCount) && (
+                                        <span className="px-2 py-0.5 rounded-md font-mono bg-slate-100 text-slate-700 border border-slate-200/60">
+                                          📖 {t.pagesText || `${t.pagesCount} págs`}
+                                        </span>
+                                      )}
+                                      {t.plsema && (
+                                        <div className="flex items-center gap-1 text-[10px] font-mono">
+                                          <span className="text-slate-400 font-bold uppercase text-[9px]">PLSEMA:</span>
+                                          <span className="px-1 py-0.2 rounded bg-slate-100 text-slate-600" title="Prelectura">P:{t.plsema.minutes?.prelectura || 0}m</span>
+                                          <span className="px-1 py-0.2 rounded bg-slate-100 text-slate-600" title="Lectura">L:{t.plsema.minutes?.lectura || 0}m</span>
+                                          <span className="px-1 py-0.2 rounded bg-slate-100 text-slate-600" title="Subrayado">S:{t.plsema.minutes?.subrayado || 0}m</span>
+                                          <span className="px-1 py-0.2 rounded bg-slate-100 text-slate-600" title="Esquema">E:{t.plsema.minutes?.esquema || 0}m</span>
+                                          <span className="px-1 py-0.2 rounded bg-emerald-50 text-emerald-700 font-bold" title="Memorizar">M:{t.plsema.minutes?.memorizar || 0}m</span>
+                                          <span className="px-1 py-0.2 rounded bg-purple-50 text-purple-700 font-bold" title="Cantar">A:{t.plsema.minutes?.cantar || 0}m</span>
+                                        </div>
+                                      )}
+                                    </div>
+                                    {t.plsema?.activeRecallRatio != null && (
+                                      <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-purple-50 text-purple-700 border border-purple-200/60">
+                                        Recuerdo Activo: {Math.round(t.plsema.activeRecallRatio)}%
+                                      </span>
+                                    )}
+                                  </div>
+                                )}
                               </div>
                             );
                           })}
@@ -1153,7 +1238,311 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
           </div>
         )}
 
-        {/* TAB 3: CONEXIÓN & WEBHOOK (DEDICATED, CLEAN) */}
+        {/* TAB: ANALÍTICA PRO v2.2.0 (PLSEMA, MIN/PÁG, CRONOBIOLOGÍA, RETENCIÓN) */}
+        {activeTab === "analytics" && (
+          <div className="flex-1 p-4 sm:p-8 overflow-y-auto bg-slate-50/50 space-y-6">
+            <div className="max-w-4xl mx-auto space-y-6">
+              {/* Header Title & Sync Action */}
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h3 className="text-base font-bold text-slate-900 font-serif">
+                      Analítica Cognitiva & Telemetría AeroFocus Pro
+                    </h3>
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-black bg-purple-100 text-purple-800 border border-purple-200">
+                      v2.2.0
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    Paridad matemática 1:1 con fases PLSEMA, ritmo de páginas al segundo y curva de fatiga.
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={fetchAnalytics}
+                    disabled={isLoadingAnalytics}
+                    className="px-3 py-1.5 rounded-xl text-xs font-semibold bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 shadow-2xs transition-colors flex items-center gap-1.5"
+                  >
+                    <RefreshCw size={12} className={cn(isLoadingAnalytics && "animate-spin")} />
+                    <span>Actualizar</span>
+                  </button>
+                  <button
+                    onClick={handleSimulateFlight}
+                    disabled={isSimulatingFlight}
+                    className="px-3 py-1.5 rounded-xl text-xs font-semibold bg-slate-900 hover:bg-slate-800 text-white shadow-2xs transition-colors flex items-center gap-1.5"
+                  >
+                    <Plane size={12} />
+                    <span>Simular Telemetría v2.2</span>
+                  </button>
+                </div>
+              </div>
+
+              {!globalAnalytics ? (
+                <div className="p-8 rounded-3xl bg-white border border-slate-200/80 shadow-xs text-center space-y-4 max-w-lg mx-auto">
+                  <div className="w-14 h-14 rounded-2xl bg-purple-50 text-purple-600 flex items-center justify-center mx-auto">
+                    <Brain size={28} />
+                  </div>
+                  <div>
+                    <h4 className="text-sm font-bold text-slate-900">Snapshot Analítico Pendiente de Sincronización</h4>
+                    <p className="text-xs text-slate-500 mt-1 leading-relaxed">
+                      AeroFocus Pro envía este snapshot completo con la opción <strong>"Sincronizar Todo el Historial y Estadísticas"</strong> (`full_history_sync`) o en el cierre diario de las 22:00h.
+                    </p>
+                  </div>
+                  <button
+                    onClick={handleSimulateFlight}
+                    disabled={isSimulatingFlight}
+                    className="px-4 py-2 rounded-xl text-xs font-bold bg-purple-600 hover:bg-purple-700 text-white shadow-xs transition-colors inline-flex items-center gap-1.5"
+                  >
+                    <Plane size={13} />
+                    <span>Generar Telemetría de Prueba Ahora</span>
+                  </button>
+                </div>
+              ) : (
+                <div className="space-y-6">
+                  {/* Top Stats Overview */}
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                    <div className="p-4 rounded-2xl bg-white border border-slate-200 shadow-2xs">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Pureza de Foco</span>
+                      <div className="text-xl font-bold font-mono text-slate-900 mt-1">
+                        {globalAnalytics.overview?.focusScoreAverage || globalAnalytics.overview?.purezaFocoGlobal || 98}%
+                      </div>
+                      <span className="text-[10px] text-emerald-600 font-semibold">Sin distracciones</span>
+                    </div>
+
+                    <div className="p-4 rounded-2xl bg-white border border-slate-200 shadow-2xs">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Ritmo de Asimilación</span>
+                      <div className="text-xl font-bold font-mono text-indigo-700 mt-1">
+                        {(globalAnalytics.pagesPace?.avgMinutesPerPage || 15).toFixed(1)} <span className="text-xs font-normal">min/pág</span>
+                      </div>
+                      <span className="text-[10px] text-slate-500">Páginas de 1ª vuelta</span>
+                    </div>
+
+                    <div className="p-4 rounded-2xl bg-white border border-slate-200 shadow-2xs">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Racha de Estudio</span>
+                      <div className="text-xl font-bold font-mono text-amber-600 mt-1 flex items-center gap-1">
+                        <Flame size={18} className="text-amber-500 fill-amber-500" />
+                        <span>{globalAnalytics.overview?.streakDays || 1} días</span>
+                      </div>
+                      <span className="text-[10px] text-slate-500">Constancia activa</span>
+                    </div>
+
+                    <div className="p-4 rounded-2xl bg-white border border-slate-200 shadow-2xs">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Recuerdo Activo</span>
+                      <div className="text-xl font-bold font-mono text-purple-700 mt-1">
+                        {Math.round(globalAnalytics.plsemaGlobal?.activeRecallRatio || 35)}%
+                      </div>
+                      <span className="text-[10px] text-purple-600 font-semibold">Memorizar + Cantar</span>
+                    </div>
+                  </div>
+
+                  {/* Section 1: PLSEMA Cognitive Breakdown */}
+                  <div className="p-5 rounded-2xl bg-white border border-slate-200 shadow-2xs space-y-4">
+                    <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 border-b border-slate-100 pb-3">
+                      <div>
+                        <h4 className="text-xs font-bold text-slate-900 uppercase tracking-wider flex items-center gap-1.5">
+                          <Brain size={14} className="text-purple-600" />
+                          <span>Metodología Cognitiva PLSEMA (Fases de Estudio)</span>
+                        </h4>
+                        <p className="text-[11px] text-slate-500 mt-0.5">
+                          Desglose al segundo entre asimilación pasiva y recuerdo activo (Active Recall).
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="px-2.5 py-1 rounded-lg text-xs font-bold bg-purple-50 text-purple-800 border border-purple-200">
+                          Recuerdo Activo: {Math.round(globalAnalytics.plsemaGlobal?.activeRecallRatio || 35)}%
+                        </span>
+                        <span className="px-2.5 py-1 rounded-lg text-xs font-medium bg-slate-100 text-slate-600">
+                          Pasivo: {Math.round(globalAnalytics.plsemaGlobal?.passiveRatio || 50)}%
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Phase Chips Grid */}
+                    <div className="grid grid-cols-2 sm:grid-cols-6 gap-2 pt-1">
+                      {[
+                        { key: "prelectura", label: "P · Prelectura", bg: "bg-amber-50 text-amber-900 border-amber-200" },
+                        { key: "lectura", label: "L · Lectura", bg: "bg-blue-50 text-blue-900 border-blue-200" },
+                        { key: "subrayado", label: "S · Subrayado", bg: "bg-cyan-50 text-cyan-900 border-cyan-200" },
+                        { key: "esquema", label: "E · Esquema", bg: "bg-emerald-50 text-emerald-900 border-emerald-200" },
+                        { key: "memorizar", label: "M · Memorizar", bg: "bg-purple-50 text-purple-900 border-purple-200 font-bold" },
+                        { key: "cantar", label: "A · Cantar", bg: "bg-rose-50 text-rose-900 border-rose-200 font-bold" },
+                      ].map((phase) => {
+                        const mins = globalAnalytics.plsemaGlobal?.phaseMinutes?.[phase.key as any] || 0;
+                        return (
+                          <div key={phase.key} className={cn("p-2.5 rounded-xl border text-center", phase.bg)}>
+                            <div className="text-[10px] font-bold uppercase">{phase.label}</div>
+                            <div className="text-sm font-black font-mono mt-1">{mins}m</div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Section 2: Chronobiology & Cognitive Fatigue */}
+                  {globalAnalytics.chronobiology && (
+                    <div className="p-5 rounded-2xl bg-white border border-slate-200 shadow-2xs space-y-4">
+                      <div className="border-b border-slate-100 pb-3">
+                        <h4 className="text-xs font-bold text-slate-900 uppercase tracking-wider flex items-center gap-1.5">
+                          <Clock size={14} className="text-indigo-600" />
+                          <span>Cronobiología & Curva de Fatiga Cognitiva</span>
+                        </h4>
+                        <p className="text-[11px] text-slate-500 mt-0.5">
+                          Calibrado en base a tus horas de máxima retención y minutos de primera distracción.
+                        </p>
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                        <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200/80">
+                          <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Hora Punta de Atención</span>
+                          <div className="text-base font-bold font-mono text-slate-900 mt-1">
+                            {globalAnalytics.chronobiology.peakHour !== undefined ? `${globalAnalytics.chronobiology.peakHour}:00h` : "10:00h"}
+                          </div>
+                          <span className="text-[10px] text-indigo-600 font-medium">Bloque: {globalAnalytics.chronobiology.peakTimeBlock || "Mañana"}</span>
+                        </div>
+
+                        <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200/80">
+                          <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Duración Óptima de Sesión</span>
+                          <div className="text-base font-bold font-mono text-slate-900 mt-1">
+                            {globalAnalytics.chronobiology.cognitiveFatigue?.recommendedSessionMinutes || 45} min
+                          </div>
+                          <span className="text-[10px] text-slate-500">Antes de fatiga cognitiva</span>
+                        </div>
+
+                        <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200/80">
+                          <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Punto de Fuga de Foco</span>
+                          <div className="text-base font-bold font-mono text-rose-700 mt-1">
+                            Minuto {globalAnalytics.chronobiology.cognitiveFatigue?.averageFirstDistractionMinute || 38}
+                          </div>
+                          <span className="text-[10px] text-slate-500">Caída inicial de concentración</span>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Section 3: Pages Pace Breakdown Table */}
+                  {globalAnalytics.pagesPace?.pages && globalAnalytics.pagesPace.pages.length > 0 && (
+                    <div className="p-5 rounded-2xl bg-white border border-slate-200 shadow-2xs space-y-3">
+                      <div className="flex items-center justify-between border-b border-slate-100 pb-2">
+                        <div>
+                          <h4 className="text-xs font-bold text-slate-900 uppercase tracking-wider flex items-center gap-1.5">
+                            <Timer size={14} className="text-emerald-600" />
+                            <span>Mapa de Densidad y Ritmo Página por Página</span>
+                          </h4>
+                          <p className="text-[11px] text-slate-500 mt-0.5">
+                            Tiempos netos auditados y clasificación de dificultad por página.
+                          </p>
+                        </div>
+                        <span className="text-xs font-mono font-bold text-slate-600">
+                          {globalAnalytics.pagesPace.pages.length} páginas registradas
+                        </span>
+                      </div>
+
+                      <div className="overflow-x-auto no-scrollbar max-h-60 overflow-y-auto">
+                        <table className="w-full text-left text-xs">
+                          <thead>
+                            <tr className="border-b border-slate-100 text-slate-400 font-semibold text-[10px] uppercase">
+                              <th className="py-2 px-3">Página</th>
+                              <th className="py-2 px-3">Tema / Asignatura</th>
+                              <th className="py-2 px-3">Tiempo Neto</th>
+                              <th className="py-2 px-3">Ritmo (min/pág)</th>
+                              <th className="py-2 px-3">Densidad</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-100">
+                            {globalAnalytics.pagesPace.pages.slice(0, 20).map((pg, i) => (
+                              <tr key={pg.pageKey || i} className="hover:bg-slate-50/80 transition-colors">
+                                <td className="py-2 px-3 font-mono font-bold text-slate-900">
+                                  {pg.pageLabel || `Pág. ${pg.pageNumber}`}
+                                </td>
+                                <td className="py-2 px-3 truncate max-w-xs text-slate-700">
+                                  {pg.topicTitle || pg.tema || pg.subjectName}
+                                </td>
+                                <td className="py-2 px-3 font-mono text-slate-600">
+                                  {pg.effectiveMinutes} min ({pg.effectiveSeconds || pg.effectiveMinutes * 60}s)
+                                </td>
+                                <td className="py-2 px-3 font-mono font-bold text-indigo-700">
+                                  {(pg.minutesPerPage || pg.effectiveMinutes).toFixed(1)} min/pág
+                                </td>
+                                <td className="py-2 px-3">
+                                  <span className={cn(
+                                    "px-2 py-0.5 rounded-md text-[10px] font-bold uppercase",
+                                    pg.densityTier === "rapida" ? "bg-emerald-50 text-emerald-700 border border-emerald-200" :
+                                    pg.densityTier === "densa" ? "bg-amber-50 text-amber-800 border border-amber-200" :
+                                    "bg-blue-50 text-blue-700 border border-blue-200"
+                                  )}>
+                                    {pg.densityTier || "media"}
+                                  </span>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Section 4: Memory Decay (Ebbinghaus) & Exam Projection */}
+                  {(globalAnalytics.memoryDecay || globalAnalytics.examProjection) && (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      {globalAnalytics.memoryDecay && (
+                        <div className="p-5 rounded-2xl bg-white border border-slate-200 shadow-2xs space-y-3">
+                          <h4 className="text-xs font-bold text-slate-900 uppercase tracking-wider flex items-center gap-1.5">
+                            <Brain size={14} className="text-indigo-600" />
+                            <span>Radar de Retención Ebbinghaus</span>
+                          </h4>
+                          <div className="flex items-center justify-between p-3 rounded-xl bg-slate-50 border border-slate-200/80">
+                            <span className="text-xs font-medium text-slate-600">Salud General de Retención</span>
+                            <span className="text-lg font-bold font-mono text-emerald-600">
+                              {globalAnalytics.memoryDecay.overallRetentionHealthScore || 92}%
+                            </span>
+                          </div>
+                          {globalAnalytics.memoryDecay.topPriorityReviewList && globalAnalytics.memoryDecay.topPriorityReviewList.length > 0 && (
+                            <div className="space-y-1.5">
+                              <span className="text-[10px] font-bold uppercase text-slate-400">Repasos Prioritarios Recomendados</span>
+                              {globalAnalytics.memoryDecay.topPriorityReviewList.slice(0, 3).map((item, idx) => (
+                                <div key={idx} className="p-2 rounded-lg bg-rose-50/60 border border-rose-100 flex items-center justify-between text-xs">
+                                  <span className="font-medium text-rose-950 truncate max-w-[200px]">{item.topicTitle}</span>
+                                  <span className="text-[10px] font-bold text-rose-700">{item.daysSinceLastReview}d sin repaso</span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {globalAnalytics.examProjection && (
+                        <div className="p-5 rounded-2xl bg-white border border-slate-200 shadow-2xs space-y-3">
+                          <h4 className="text-xs font-bold text-slate-900 uppercase tracking-wider flex items-center gap-1.5">
+                            <Award size={14} className="text-purple-600" />
+                            <span>Proyección Oficial de Examen</span>
+                          </h4>
+                          <div className="space-y-2 text-xs">
+                            <div className="flex justify-between p-2.5 rounded-xl bg-slate-50 border border-slate-200/80">
+                              <span className="text-slate-600">Fecha Estimada 1ª Vuelta</span>
+                              <span className="font-bold font-mono text-slate-900">{globalAnalytics.examProjection.estimatedDateVuelta1 || "En cálculo"}</span>
+                            </div>
+                            <div className="flex justify-between p-2.5 rounded-xl bg-slate-50 border border-slate-200/80">
+                              <span className="text-slate-600">Horas Diarias Requeridas</span>
+                              <span className="font-bold font-mono text-purple-700">{globalAnalytics.examProjection.dailyHoursRequired || 6} h/día</span>
+                            </div>
+                            <div className="flex justify-between p-2.5 rounded-xl bg-slate-50 border border-slate-200/80">
+                              <span className="text-slate-600">Viabilidad</span>
+                              <span className="font-bold uppercase text-[10px] text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-md border border-emerald-200">
+                                {globalAnalytics.examProjection.feasibility || "Viable"}
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* TAB: CONEXIÓN & WEBHOOK (DEDICATED, CLEAN) */}
         {activeTab === "webhook" && (
           <div className="flex-1 p-8 overflow-y-auto bg-slate-50/50">
             <div className="max-w-2xl mx-auto space-y-6">

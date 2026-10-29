@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useEffect } from "react";
 import { 
   Calendar, Clock, CheckCircle2, AlertTriangle, 
-  XCircle, Plus, Trash2, BookOpen, Star, ChevronRight, X, Search,
+  XCircle, Plus, Trash2, BookOpen, Star, ChevronRight, ChevronDown, ChevronUp, X, Search,
   Award, Sparkles, Save, ArrowUpDown, Brain, Timer, Target, Flame, Info,
   TrendingDown, History, Zap
 } from "lucide-react";
@@ -68,6 +68,7 @@ export function PreparadorView() {
 
   // Sorting state for topic cards
   const [sortOption, setSortOption] = useState<SortOption>("menor_nota");
+  const [showMobileKpiDetails, setShowMobileKpiDetails] = useState(false);
 
   // Sync schedule with Firestore when user is loaded
   useEffect(() => {
@@ -392,7 +393,7 @@ export function PreparadorView() {
   }, [recentSessions]);
 
   return (
-    <div className="flex flex-col h-full bg-[#F5F5F7] overflow-hidden select-none">
+    <div className="flex flex-col h-full bg-[#F5F5F7] overflow-hidden">
       {/* SLIM STICKY HEADER (Compact on mobile) */}
       <div className="bg-white/95 backdrop-blur-2xl border-b border-slate-200/70 px-3.5 py-2.5 sm:px-6 sm:py-3.5 sticky top-0 z-20 shrink-0 shadow-[0_2px_12px_rgba(0,0,0,0.03)]">
         <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2.5 max-w-[100rem] mx-auto">
@@ -490,25 +491,102 @@ export function PreparadorView() {
         </div>
       </div>
 
-      {/* MAIN SCROLLABLE CONTENT AREA */}
-      <div className="flex-1 overflow-y-auto overscroll-contain -webkit-overflow-scrolling-touch p-3 sm:p-6 md:p-8 pb-36 max-w-[100rem] mx-auto w-full">
+      {/* MAIN SCROLLABLE CONTENT AREA (Silky-smooth touch scroll enabled) */}
+      <div className="flex-1 min-h-0 overflow-y-auto overscroll-y-contain touch-pan-y -webkit-overflow-scrolling-touch p-3 sm:p-6 md:p-8 pb-32 sm:pb-36 max-w-[100rem] mx-auto w-full">
         {/* Status banner and Overview Benchmark Cards inside scrollable body */}
         {activeDay !== "historial" && (
-          <div className="space-y-3 mb-5">
-            {/* Status explanation & Meta banner */}
-            <div className="flex flex-wrap items-center justify-between gap-2 p-2.5 sm:p-3 bg-white rounded-2xl border border-slate-200/80 shadow-2xs">
-              <div className="flex items-center gap-2 text-xs font-semibold text-slate-700">
-                <Clock size={12} className="text-slate-500" />
-                <span>{scheduleStatus.timeRemainingMessage}</span>
+          <div className="space-y-2 sm:space-y-3 mb-4 sm:mb-5">
+            {/* Status explanation & Meta banner (Slim on mobile) */}
+            <div className="flex flex-wrap items-center justify-between gap-1.5 p-2 sm:p-3 bg-white rounded-2xl border border-slate-200/80 shadow-2xs">
+              <div className="flex items-center gap-1.5 text-[11px] sm:text-xs font-semibold text-slate-700">
+                <Clock size={12} className="text-slate-500 shrink-0" />
+                <span className="truncate">{scheduleStatus.timeRemainingMessage}</span>
               </div>
-              <div className="flex items-center gap-1.5 text-[11px] font-bold text-indigo-700 bg-indigo-50 border border-indigo-200/60 px-2.5 py-0.5 rounded-full">
+              <div className="flex items-center gap-1 text-[10px] sm:text-[11px] font-bold text-indigo-700 bg-indigo-50 border border-indigo-200/60 px-2 sm:px-2.5 py-0.5 rounded-full shrink-0">
                 <Target size={11} className="text-indigo-600" />
-                <span>Meta Tribunal: 12:30 min (Ventana 11:50 - 13:40)</span>
+                <span>Meta Tribunal: 12:30m</span>
               </div>
             </div>
 
-            {/* OVERVIEW BENCHMARK CARDS (Scrollable along with topics) */}
-            <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-3">
+            {/* MOBILE COMPACT KPI STRIP (< sm screens) */}
+            <div className="sm:hidden bg-white rounded-2xl p-2.5 border border-slate-200/70 shadow-2xs">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2 overflow-x-auto no-scrollbar py-0.5">
+                  <div className="flex items-baseline gap-1 bg-slate-50 px-2 py-1 rounded-lg border border-slate-100 shrink-0">
+                    <span className="text-[9px] font-bold uppercase text-slate-400">Nota:</span>
+                    <span className={cn(
+                      "text-xs font-black tabular-nums",
+                      kpis.avgScore === null ? "text-slate-400" :
+                      kpis.avgScore >= 8.5 ? "text-emerald-700" :
+                      kpis.avgScore >= 7.0 ? "text-indigo-700" :
+                      kpis.avgScore >= 5.0 ? "text-amber-700" : "text-rose-600"
+                    )}>
+                      {kpis.avgScore !== null ? `${kpis.avgScore.toFixed(1)}` : "—"}
+                    </span>
+                  </div>
+
+                  <div className="flex items-center gap-1 bg-slate-50 px-2 py-1 rounded-lg border border-slate-100 shrink-0 text-[10px] font-bold text-slate-700">
+                    <span className="text-emerald-600 font-black">{kpis.listosTribunal}L</span>
+                    <span>·</span>
+                    <span className="text-amber-600 font-black">{kpis.enAjuste}A</span>
+                    <span>·</span>
+                    <span className="text-rose-600 font-black">{kpis.enRiesgo}R</span>
+                  </div>
+
+                  <div className="flex items-center gap-1 bg-cyan-50/70 px-2 py-1 rounded-lg border border-cyan-100/60 shrink-0 text-[10px] font-bold text-cyan-800">
+                    <Brain size={10} className="text-cyan-600" />
+                    <span>{kpis.avgRetention !== null ? `${kpis.avgRetention}%` : "—"}</span>
+                  </div>
+
+                  <div className="flex items-center gap-1 bg-amber-50/70 px-2 py-1 rounded-lg border border-amber-100/60 shrink-0 text-[10px] font-bold text-amber-800">
+                    <Timer size={10} className="text-amber-600" />
+                    <span>~{kpis.totalMinutes}m</span>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setShowMobileKpiDetails(prev => !prev)}
+                  className="p-1 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-700 transition-colors shrink-0 ml-1"
+                  title="Expandir / Contraer diagnóstico"
+                >
+                  {showMobileKpiDetails ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
+                </button>
+              </div>
+
+              {/* Collapsible Mobile Detailed Grid */}
+              {showMobileKpiDetails && (
+                <div className="grid grid-cols-2 gap-2 mt-2 pt-2 border-t border-slate-100 animate-in fade-in duration-200">
+                  <div className="p-2 bg-slate-50 rounded-xl">
+                    <div className="text-[9px] font-bold text-slate-400 uppercase">Nota Proyectada</div>
+                    <div className="text-sm font-black text-slate-900 mt-0.5">
+                      {kpis.avgScore !== null ? `${kpis.avgScore.toFixed(1)} / 10` : "—"}
+                    </div>
+                  </div>
+                  <div className="p-2 bg-slate-50 rounded-xl">
+                    <div className="text-[9px] font-bold text-slate-400 uppercase">Diagnóstico</div>
+                    <div className="text-xs font-bold text-slate-800 mt-0.5">
+                      <span className="text-emerald-600 font-black">{kpis.listosTribunal}</span> Listos · <span className="text-amber-600 font-black">{kpis.enAjuste}</span> Ajuste
+                    </div>
+                  </div>
+                  <div className="p-2 bg-slate-50 rounded-xl">
+                    <div className="text-[9px] font-bold text-slate-400 uppercase">Curva Ebbinghaus</div>
+                    <div className="text-xs font-bold text-slate-800 mt-0.5">
+                      {kpis.avgRetention !== null ? `${kpis.avgRetention}% retención` : "—"}
+                    </div>
+                  </div>
+                  <div className="p-2 bg-slate-50 rounded-xl">
+                    <div className="text-[9px] font-bold text-slate-400 uppercase">Duración Cante</div>
+                    <div className="text-xs font-bold text-slate-800 mt-0.5">
+                      ~{kpis.totalMinutes} min ({kpis.total} temas)
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* DESKTOP & TABLET BENCHMARK CARDS (hidden on mobile, visible on sm and up) */}
+            <div className="hidden sm:grid sm:grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-3">
               {/* 1. Nota Media de Preparación Proyectada (1-10) */}
               <div className="bg-white rounded-2xl p-3 sm:p-3.5 border border-slate-200/70 shadow-2xs flex items-center gap-2.5 sm:gap-3">
                 <div className="w-8 h-8 sm:w-10 sm:h-10 rounded-xl bg-indigo-50 border border-indigo-100 flex items-center justify-center shrink-0 text-indigo-600">
@@ -678,15 +756,15 @@ export function PreparadorView() {
         ) : (
           /* ASSIGNED TOPICS CARDS LIST */
           <div className="space-y-4">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 sm:gap-3">
               <div>
-                <h2 className="text-lg font-black text-slate-900 font-serif flex items-center gap-2">
-                  <span>Temas Asignados para el {activeDay === "lunes" ? "Lunes" : "Jueves"}</span>
-                  <span className="text-xs px-2.5 py-0.5 bg-slate-200/80 text-slate-700 rounded-lg font-sans font-bold">
-                    {assignedTopics.length} seleccionados
+                <h2 className="text-base sm:text-lg font-black text-slate-900 font-serif flex items-center gap-2">
+                  <span>Temas Asignados ({activeDay === "lunes" ? "Lunes" : "Jueves"})</span>
+                  <span className="text-xs px-2 py-0.5 bg-slate-200/80 text-slate-700 rounded-lg font-sans font-bold">
+                    {assignedTopics.length}
                   </span>
                 </h2>
-                <p className="text-xs text-slate-500 mt-0.5">
+                <p className="text-xs text-slate-500 mt-0.5 hidden sm:block">
                   Visualiza la nota de preparación del 1 al 10, el cronómetro calibrado a 12:30, la curva del olvido y tus vueltas.
                 </p>
               </div>
