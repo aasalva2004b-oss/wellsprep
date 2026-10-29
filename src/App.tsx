@@ -1,7 +1,7 @@
 import { useState, useEffect, ReactNode } from "react";
 import { 
   BookOpen, LogOut, PanelLeftClose, PanelLeftOpen, ActivitySquare, Award,
-  Search, Mic, Command, Shield, Sparkles, SlidersHorizontal, RefreshCw
+  Search, Mic, Command, Shield, Sparkles, SlidersHorizontal, RefreshCw, Settings
 } from "lucide-react";
 import { cn } from "./lib/utils";
 import { TemarioView } from "./components/TemarioView";
@@ -266,34 +266,65 @@ export default function App() {
         </div>
       </main>
 
-      {/* Mobile Bottom Nav (Floating Glass Pill) */}
-      <nav className="md:hidden fixed bottom-5 left-4 right-4 bg-white/80 backdrop-blur-2xl border border-slate-200/70 rounded-[2rem] flex justify-around p-1.5 z-50 shadow-[0_15px_35px_-10px_rgba(0,0,0,0.12)]">
+      {/* Mobile Bottom Nav (Floating Apple Glass Island) */}
+      <nav 
+        aria-label="Navegación móvil"
+        className="md:hidden fixed bottom-4 left-3 right-3 max-w-md mx-auto bg-white/85 backdrop-blur-2xl border border-slate-200/80 rounded-[1.75rem] flex items-center justify-between p-1.5 z-50 shadow-[0_12px_36px_-6px_rgba(15,23,42,0.14)] ring-1 ring-black/[0.04]"
+      >
         <MobileNavItem
-          icon={<BookOpen size={18} strokeWidth={2.3} />}
+          icon={<BookOpen size={18} strokeWidth={activeTab === "temario" && !isSyncCenterOpen && !isSettingsOpen ? 2.5 : 2} />}
           label="Temario"
-          active={activeTab === "temario"}
-          onClick={() => { playSound.click(); setActiveTab("temario"); }}
+          active={activeTab === "temario" && !isSyncCenterOpen && !isSettingsOpen}
+          onClick={() => {
+            playSound.click();
+            setIsSyncCenterOpen(false);
+            setIsSettingsOpen(false);
+            setActiveTab("temario");
+          }}
         />
         <MobileNavItem
-          icon={<Award size={18} strokeWidth={2.3} />}
+          icon={<Award size={18} strokeWidth={activeTab === "preparador" && !isSyncCenterOpen && !isSettingsOpen ? 2.5 : 2} />}
           label="Preparador"
-          active={activeTab === "preparador"}
-          onClick={() => { playSound.click(); setActiveTab("preparador"); }}
+          active={activeTab === "preparador" && !isSyncCenterOpen && !isSettingsOpen}
+          onClick={() => {
+            playSound.click();
+            setIsSyncCenterOpen(false);
+            setIsSettingsOpen(false);
+            setActiveTab("preparador");
+          }}
         />
         <MobileNavItem
-          icon={<ActivitySquare size={18} strokeWidth={2.3} />}
+          icon={<ActivitySquare size={18} strokeWidth={activeTab === "dashboard" && !isSyncCenterOpen && !isSettingsOpen ? 2.5 : 2} />}
           label="Cantes"
-          active={activeTab === "dashboard"}
-          onClick={() => { playSound.click(); setActiveTab("dashboard"); }}
+          active={activeTab === "dashboard" && !isSyncCenterOpen && !isSettingsOpen}
+          onClick={() => {
+            playSound.click();
+            setIsSyncCenterOpen(false);
+            setIsSettingsOpen(false);
+            setActiveTab("dashboard");
+          }}
         />
-        <button
-          onClick={() => { playSound.click(); setIsCommandPaletteOpen(true); }}
-          className="flex flex-col items-center justify-center p-2 rounded-2xl text-slate-400 hover:text-slate-800"
-          title="Búsqueda rápida"
-        >
-          <Search size={18} strokeWidth={2.3} />
-          <span className="text-[9px] font-bold mt-0.5">Buscar</span>
-        </button>
+        <MobileNavItem
+          icon={<Shield size={18} strokeWidth={isSyncCenterOpen ? 2.5 : 2} className={cn(quarantinedEvents.length > 0 && "text-amber-500")} />}
+          label="AeroFocus"
+          badge={quarantinedEvents.length > 0 ? quarantinedEvents.length : undefined}
+          active={isSyncCenterOpen}
+          onClick={() => {
+            playSound.click();
+            setIsSettingsOpen(false);
+            setIsSyncCenterOpen(true);
+          }}
+        />
+        <MobileNavItem
+          icon={<Settings size={18} strokeWidth={isSettingsOpen ? 2.5 : 2} />}
+          label="Ajustes"
+          active={isSettingsOpen}
+          onClick={() => {
+            playSound.click();
+            setIsSyncCenterOpen(false);
+            setIsSettingsOpen(true);
+          }}
+        />
       </nav>
 
       {/* Global Command Palette Spotlight */}
@@ -369,32 +400,45 @@ function MobileNavItem({
   label,
   active,
   onClick,
+  badge,
 }: {
   icon: ReactNode;
   label: string;
   active: boolean;
   onClick: () => void;
+  badge?: string | number;
 }) {
   return (
     <button
+      type="button"
       onClick={onClick}
       className={cn(
-        "flex flex-col items-center gap-1.5 px-4 py-2.5 transition-all rounded-3xl w-full relative overflow-hidden",
-        active ? "text-indigo-700" : "text-slate-400",
+        "flex flex-col items-center justify-center py-2 px-1 rounded-2xl w-full relative transition-all duration-200 select-none active:scale-90",
+        active ? "text-indigo-600 font-bold" : "text-slate-400 hover:text-slate-600 font-medium",
       )}
     >
       {active && (
         <motion.div 
           layoutId="activeMobileTabIndicator"
-          className="absolute inset-0 bg-indigo-50/80 -z-10 rounded-3xl"
+          className="absolute inset-0 bg-indigo-50/90 rounded-2xl shadow-xs border border-indigo-100/60 -z-10"
           initial={false}
-          transition={{ type: "spring", stiffness: 400, damping: 30 }}
+          transition={{ type: "spring", stiffness: 450, damping: 32 }}
         />
       )}
-      <div className={cn("transition-transform duration-300", active && "-translate-y-0.5 scale-110")}>
-        {icon}
+      <div className="relative">
+        <div className={cn("transition-transform duration-200", active ? "scale-105" : "scale-100")}>
+          {icon}
+        </div>
+        {badge !== undefined && (
+          <span className="absolute -top-1.5 -right-2.5 min-w-[16px] h-4 px-1 rounded-full text-[9px] font-black bg-amber-500 text-white flex items-center justify-center shadow-xs border border-white font-mono animate-pulse">
+            {badge}
+          </span>
+        )}
       </div>
-      <span className={cn("text-[9px] uppercase tracking-[0.1em] font-black transition-all", active ? "opacity-100 translate-y-0" : "opacity-0 translate-y-2 absolute")}>
+      <span className={cn(
+        "text-[10px] tracking-tight mt-1 transition-colors duration-200 truncate max-w-full leading-none",
+        active ? "text-indigo-900 font-bold" : "text-slate-400"
+      )}>
         {label}
       </span>
     </button>

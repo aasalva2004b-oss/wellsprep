@@ -393,51 +393,52 @@ export function PreparadorView() {
 
   return (
     <div className="flex flex-col h-full bg-[#F5F5F7] overflow-hidden select-none">
-      {/* APPLE FROSTED HEADER */}
-      <div className="bg-white/90 backdrop-blur-2xl border-b border-slate-200/70 px-4 py-4 md:px-8 md:py-5 sticky top-0 z-20 shrink-0 shadow-[0_4px_24px_rgba(0,0,0,0.02)]">
-        <div className="flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4">
-          <div>
-            <div className="flex flex-wrap items-center gap-2.5">
-              <div className="w-8 h-8 md:w-9 md:h-9 rounded-xl bg-slate-900 text-white flex items-center justify-center shadow-md shadow-slate-900/10">
-                <Award size={18} strokeWidth={2.2} />
+      {/* SLIM STICKY HEADER (Compact on mobile) */}
+      <div className="bg-white/95 backdrop-blur-2xl border-b border-slate-200/70 px-3.5 py-2.5 sm:px-6 sm:py-3.5 sticky top-0 z-20 shrink-0 shadow-[0_2px_12px_rgba(0,0,0,0.03)]">
+        <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2.5 max-w-[100rem] mx-auto">
+          {/* Title Row */}
+          <div className="flex items-center justify-between sm:justify-start gap-2.5">
+            <div className="flex items-center gap-2">
+              <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-lg bg-slate-900 text-white flex items-center justify-center shrink-0 shadow-2xs">
+                <Award size={15} strokeWidth={2.2} />
               </div>
-              <h1 className="text-xl md:text-2xl font-black text-slate-900 tracking-tight font-serif">
+              <h1 className="text-sm sm:text-lg font-black text-slate-900 tracking-tight font-serif truncate">
                 Panel del Preparador (L/J)
               </h1>
-              <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[11px] font-black uppercase tracking-wider bg-indigo-50 text-indigo-700 border border-indigo-200/80">
-                <Target size={12} className="text-indigo-600" />
-                <span>Meta Tribunal: 12:30 min (Ventana 11:50 - 13:40)</span>
-              </span>
             </div>
-            
-            {/* Status explanation pill (shows that Thursday stays active until 22:00) */}
-            <div className="flex items-center gap-2 mt-1.5">
-              <span className="inline-flex items-center gap-1 text-[11px] font-bold text-slate-600 bg-slate-100 px-2.5 py-0.5 rounded-md border border-slate-200/60">
-                <Clock size={11} className="text-slate-500" />
-                <span>{scheduleStatus.timeRemainingMessage}</span>
-              </span>
-              <span className="text-slate-400 text-xs hidden sm:inline">·</span>
-              <p className="text-slate-500 text-xs font-medium hidden sm:inline">
-                Evaluación integral 1-10: tiempo óptimo (12:30), curva de olvido Ebbinghaus, vueltas y notas.
-              </p>
-            </div>
+
+            <span className="hidden md:inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-indigo-50 text-indigo-700 border border-indigo-200/80 shrink-0">
+              <Target size={11} className="text-indigo-600" />
+              <span>Meta: 12:30 min</span>
+            </span>
+
+            {/* Mobile Add Topics Button */}
+            {activeDay !== "historial" && (
+              <button
+                onClick={() => setIsPickerOpen(true)}
+                className="sm:hidden px-2.5 py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold transition-all shadow-xs flex items-center gap-1 shrink-0 active:scale-95"
+              >
+                <Plus size={13} strokeWidth={2.5} />
+                <span>Añadir</span>
+              </button>
+            )}
           </div>
 
           {/* DAY SEGMENTED CONTROLLER (LUNES / JUEVES / HISTORIAL) */}
-          <div className="flex items-center gap-2 w-full sm:w-auto">
-            <div className="flex bg-slate-200/70 p-1 rounded-2xl border border-slate-300/40 w-full sm:w-auto">
+          <div className="flex items-center gap-2">
+            <div className="flex bg-slate-200/70 p-1 rounded-xl border border-slate-300/40 flex-1 sm:flex-initial">
               <button
                 onClick={() => setActiveDay("lunes")}
                 className={cn(
-                  "flex-1 sm:flex-initial px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2",
+                  "flex-1 sm:flex-initial px-3 sm:px-4 py-1 sm:py-1.5 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-1.5",
                   activeDay === "lunes"
-                    ? "bg-white text-slate-900 shadow-sm"
+                    ? "bg-white text-slate-900 shadow-xs"
                     : "text-slate-600 hover:text-slate-900"
                 )}
               >
-                <Calendar size={13} />
+                <Calendar size={12} />
                 <span>Lunes</span>
-                <span className="text-[10px] px-1.5 py-0.5 rounded-md bg-slate-100 font-black">
+                <span className="text-[10px] px-1.5 py-0.2 rounded-md bg-slate-100 font-bold">
                   {(schedule.lunes || []).length}
                 </span>
               </button>
@@ -445,15 +446,15 @@ export function PreparadorView() {
               <button
                 onClick={() => setActiveDay("jueves")}
                 className={cn(
-                  "flex-1 sm:flex-initial px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2",
+                  "flex-1 sm:flex-initial px-3 sm:px-4 py-1 sm:py-1.5 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-1.5",
                   activeDay === "jueves"
-                    ? "bg-white text-slate-900 shadow-sm"
+                    ? "bg-white text-slate-900 shadow-xs"
                     : "text-slate-600 hover:text-slate-900"
                 )}
               >
-                <Calendar size={13} />
+                <Calendar size={12} />
                 <span>Jueves</span>
-                <span className="text-[10px] px-1.5 py-0.5 rounded-md bg-slate-100 font-black">
+                <span className="text-[10px] px-1.5 py-0.2 rounded-md bg-slate-100 font-bold">
                   {(schedule.jueves || []).length}
                 </span>
               </button>
@@ -461,120 +462,130 @@ export function PreparadorView() {
               <button
                 onClick={() => setActiveDay("historial")}
                 className={cn(
-                  "flex-1 sm:flex-initial px-4 py-2 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2",
+                  "flex-1 sm:flex-initial px-3 sm:px-4 py-1 sm:py-1.5 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-1.5",
                   activeDay === "historial"
-                    ? "bg-white text-slate-900 shadow-sm"
+                    ? "bg-white text-slate-900 shadow-xs"
                     : "text-slate-600 hover:text-slate-900"
                 )}
               >
-                <Award size={13} />
+                <Award size={12} />
                 <span>Historial</span>
-                <span className="text-[10px] px-1.5 py-0.5 rounded-md bg-slate-100 font-black">
+                <span className="text-[10px] px-1.5 py-0.2 rounded-md bg-slate-100 font-bold">
                   {preparadorSessions.length}
                 </span>
               </button>
             </div>
 
+            {/* Desktop Add Topics Button */}
             {activeDay !== "historial" && (
               <button
                 onClick={() => setIsPickerOpen(true)}
-                className="px-4 py-2.5 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold transition-all shadow-sm flex items-center gap-1.5 shrink-0 active:scale-95"
+                className="hidden sm:flex px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold transition-all shadow-xs items-center gap-1.5 shrink-0 active:scale-95"
               >
                 <Plus size={14} strokeWidth={2.5} />
-                <span className="hidden sm:inline">Añadir Temas</span>
+                <span>Añadir Temas</span>
               </button>
             )}
           </div>
         </div>
+      </div>
 
-        {/* OVERVIEW BENCHMARK CARDS */}
+      {/* MAIN SCROLLABLE CONTENT AREA */}
+      <div className="flex-1 overflow-y-auto overscroll-contain -webkit-overflow-scrolling-touch p-3 sm:p-6 md:p-8 pb-36 max-w-[100rem] mx-auto w-full">
+        {/* Status banner and Overview Benchmark Cards inside scrollable body */}
         {activeDay !== "historial" && (
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 sm:gap-3.5 mt-4">
-            {/* 1. Nota Media de Preparación Proyectada (1-10) */}
-            <div className="bg-slate-50/90 rounded-2xl p-3.5 border border-slate-200/70 flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl bg-white border border-slate-200/80 flex items-center justify-center shadow-sm text-indigo-600">
-                <Award size={18} strokeWidth={2.2} />
+          <div className="space-y-3 mb-5">
+            {/* Status explanation & Meta banner */}
+            <div className="flex flex-wrap items-center justify-between gap-2 p-2.5 sm:p-3 bg-white rounded-2xl border border-slate-200/80 shadow-2xs">
+              <div className="flex items-center gap-2 text-xs font-semibold text-slate-700">
+                <Clock size={12} className="text-slate-500" />
+                <span>{scheduleStatus.timeRemainingMessage}</span>
               </div>
-              <div className="min-w-0">
-                <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                  Nota Media Proyectada
+              <div className="flex items-center gap-1.5 text-[11px] font-bold text-indigo-700 bg-indigo-50 border border-indigo-200/60 px-2.5 py-0.5 rounded-full">
+                <Target size={11} className="text-indigo-600" />
+                <span>Meta Tribunal: 12:30 min (Ventana 11:50 - 13:40)</span>
+              </div>
+            </div>
+
+            {/* OVERVIEW BENCHMARK CARDS (Scrollable along with topics) */}
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-3">
+              {/* 1. Nota Media de Preparación Proyectada (1-10) */}
+              <div className="bg-white rounded-2xl p-3 sm:p-3.5 border border-slate-200/70 shadow-2xs flex items-center gap-2.5 sm:gap-3">
+                <div className="w-8 h-8 sm:w-10 sm:h-10 rounded-xl bg-indigo-50 border border-indigo-100 flex items-center justify-center shrink-0 text-indigo-600">
+                  <Award size={16} strokeWidth={2.2} />
                 </div>
-                <div className="flex items-baseline gap-1.5">
-                  <span className={cn(
-                    "text-xl font-black font-serif tabular-nums",
-                    kpis.avgScore === null ? "text-slate-400" :
-                    kpis.avgScore >= 8.5 ? "text-emerald-700" :
-                    kpis.avgScore >= 7.0 ? "text-indigo-700" :
-                    kpis.avgScore >= 5.0 ? "text-amber-700" : "text-rose-600"
-                  )}>
-                    {kpis.avgScore !== null ? `${kpis.avgScore.toFixed(1)}` : "—"}
-                  </span>
-                  <span className="text-xs font-bold text-slate-400">/ 10</span>
-                  {kpis.avgPeakScore !== null && kpis.avgDecay !== null && kpis.avgDecay >= 0.5 && (
-                    <span className="text-[10px] font-black text-rose-600 ml-1">
-                      (Pico {kpis.avgPeakScore.toFixed(1)})
+                <div className="min-w-0">
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400 truncate">
+                    Nota Proyectada
+                  </div>
+                  <div className="flex items-baseline gap-1">
+                    <span className={cn(
+                      "text-base sm:text-xl font-black font-serif tabular-nums",
+                      kpis.avgScore === null ? "text-slate-400" :
+                      kpis.avgScore >= 8.5 ? "text-emerald-700" :
+                      kpis.avgScore >= 7.0 ? "text-indigo-700" :
+                      kpis.avgScore >= 5.0 ? "text-amber-700" : "text-rose-600"
+                    )}>
+                      {kpis.avgScore !== null ? `${kpis.avgScore.toFixed(1)}` : "—"}
                     </span>
-                  )}
+                    <span className="text-[10px] sm:text-xs font-bold text-slate-400">/ 10</span>
+                  </div>
                 </div>
               </div>
-            </div>
 
-            {/* 2. Diagnóstico del Tribunal */}
-            <div className="bg-slate-50/90 rounded-2xl p-3.5 border border-slate-200/70 flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl bg-white border border-slate-200/80 flex items-center justify-center shadow-sm">
-                <div className="flex -space-x-1">
-                  <span className="w-3 h-3 rounded-full bg-emerald-500 ring-2 ring-white inline-block" />
-                  <span className="w-3 h-3 rounded-full bg-amber-500 ring-2 ring-white inline-block" />
-                  <span className="w-3 h-3 rounded-full bg-rose-500 ring-2 ring-white inline-block" />
+              {/* 2. Diagnóstico del Tribunal */}
+              <div className="bg-white rounded-2xl p-3 sm:p-3.5 border border-slate-200/70 shadow-2xs flex items-center gap-2.5 sm:gap-3">
+                <div className="w-8 h-8 sm:w-10 sm:h-10 rounded-xl bg-slate-50 border border-slate-200/80 flex items-center justify-center shrink-0">
+                  <div className="flex -space-x-1">
+                    <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 ring-1 ring-white inline-block" />
+                    <span className="w-2.5 h-2.5 rounded-full bg-amber-500 ring-1 ring-white inline-block" />
+                    <span className="w-2.5 h-2.5 rounded-full bg-rose-500 ring-1 ring-white inline-block" />
+                  </div>
+                </div>
+                <div className="min-w-0">
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400 truncate">
+                    Estado Tribunal
+                  </div>
+                  <div className="text-[11px] sm:text-xs font-bold text-slate-700 truncate">
+                    <span className="text-emerald-600 font-black">{kpis.listosTribunal}</span> L · <span className="text-amber-600 font-black">{kpis.enAjuste}</span> A · <span className="text-rose-600 font-black">{kpis.enRiesgo}</span> R
+                  </div>
                 </div>
               </div>
-              <div className="min-w-0">
-                <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                  Estado Tribunal
-                </div>
-                <div className="text-xs font-bold text-slate-700">
-                  <span className="text-emerald-600 font-black">{kpis.listosTribunal} Listos</span> · <span className="text-amber-600 font-black">{kpis.enAjuste} Ajustar</span> · <span className="text-rose-600 font-black">{kpis.enRiesgo} Riesgo</span>
-                </div>
-              </div>
-            </div>
 
-            {/* 3. Retención Media de Ebbinghaus */}
-            <div className="bg-slate-50/90 rounded-2xl p-3.5 border border-slate-200/70 flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl bg-white border border-slate-200/80 flex items-center justify-center shadow-sm text-cyan-600">
-                <Brain size={18} strokeWidth={2.2} />
-              </div>
-              <div className="min-w-0">
-                <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                  Curva de Ebbinghaus
+              {/* 3. Retención Media de Ebbinghaus */}
+              <div className="bg-white rounded-2xl p-3 sm:p-3.5 border border-slate-200/70 shadow-2xs flex items-center gap-2.5 sm:gap-3">
+                <div className="w-8 h-8 sm:w-10 sm:h-10 rounded-xl bg-cyan-50 border border-cyan-100 flex items-center justify-center shrink-0 text-cyan-600">
+                  <Brain size={16} strokeWidth={2.2} />
                 </div>
-                <div className="text-lg font-black text-slate-900">
-                  {kpis.avgRetention !== null ? `${kpis.avgRetention}%` : "—"}
-                  <span className="text-xs font-medium text-slate-500 ml-1">retención</span>
+                <div className="min-w-0">
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400 truncate">
+                    Curva Ebbinghaus
+                  </div>
+                  <div className="text-sm sm:text-lg font-black text-slate-900">
+                    {kpis.avgRetention !== null ? `${kpis.avgRetention}%` : "—"}
+                    <span className="text-[10px] sm:text-xs font-normal text-slate-500 ml-1">retención</span>
+                  </div>
                 </div>
               </div>
-            </div>
 
-            {/* 4. Tiempo Estimado Total */}
-            <div className="bg-slate-50/90 rounded-2xl p-3.5 border border-slate-200/70 flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl bg-white border border-slate-200/80 flex items-center justify-center shadow-sm text-amber-500">
-                <Timer size={18} strokeWidth={2.2} />
-              </div>
-              <div className="min-w-0">
-                <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                  Cante Total Estimado
+              {/* 4. Tiempo Estimado Total */}
+              <div className="bg-white rounded-2xl p-3 sm:p-3.5 border border-slate-200/70 shadow-2xs flex items-center gap-2.5 sm:gap-3">
+                <div className="w-8 h-8 sm:w-10 sm:h-10 rounded-xl bg-amber-50 border border-amber-100 flex items-center justify-center shrink-0 text-amber-500">
+                  <Timer size={16} strokeWidth={2.2} />
                 </div>
-                <div className="text-lg font-black text-slate-900">
-                  ~{kpis.totalMinutes}m
-                  <span className="text-xs font-medium text-slate-500 ml-1">({kpis.total} temas)</span>
+                <div className="min-w-0">
+                  <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400 truncate">
+                    Cante Total Estimado
+                  </div>
+                  <div className="text-sm sm:text-lg font-black text-slate-900">
+                    ~{kpis.totalMinutes}m
+                    <span className="text-[10px] sm:text-xs font-normal text-slate-500 ml-1">({kpis.total} temas)</span>
+                  </div>
                 </div>
               </div>
             </div>
           </div>
         )}
-      </div>
-
-      {/* MAIN CONTENT AREA */}
-      <div className="flex-1 overflow-y-auto p-4 md:p-8 pb-28 max-w-[100rem] mx-auto w-full">
         {activeDay === "historial" ? (
           /* HISTORIAL VIEW */
           <div className="space-y-4">

@@ -257,7 +257,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
         </div>
 
         {/* Tab Navigation */}
-        <div className="flex items-center gap-1 px-6 pt-3 pb-2 border-b border-slate-100 bg-slate-50/50">
+        <div className="flex items-center gap-1 px-4 sm:px-6 pt-3 pb-2 border-b border-slate-100 bg-slate-50/50 overflow-x-auto no-scrollbar whitespace-nowrap">
           <button
             type="button"
             onClick={() => setActiveTab('webhook')}

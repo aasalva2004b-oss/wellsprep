@@ -435,46 +435,47 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
       : "https://wellsprep-ltii.vercel.app/api/webhook/aerofocus";
 
   return (
-    <div className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-md flex items-center justify-center p-2 sm:p-4 md:p-6 overflow-hidden">
-      <div className="bg-white rounded-3xl shadow-2xl border border-slate-200/80 w-full max-w-5xl h-[92vh] max-h-[850px] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+    <div className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-md flex items-center justify-center p-0 sm:p-4 md:p-6 overflow-hidden">
+      <div className="bg-white rounded-none sm:rounded-3xl shadow-2xl border-0 sm:border border-slate-200/80 w-full max-w-5xl h-full sm:h-[92vh] max-h-none sm:max-h-[850px] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-200">
         
         {/* TOP HEADER */}
-        <div className="px-6 py-4 border-b border-slate-100 bg-white flex flex-wrap items-center justify-between gap-4 shrink-0">
-          <div className="flex items-center gap-3.5">
-            <div className="w-10 h-10 rounded-2xl bg-slate-900 text-white flex items-center justify-center shadow-sm">
-              <SlidersHorizontal size={18} strokeWidth={2.2} />
+        <div className="px-3.5 py-2.5 sm:px-6 sm:py-3.5 border-b border-slate-100 bg-white flex items-center justify-between gap-2 shrink-0">
+          <div className="flex items-center gap-2.5 sm:gap-3.5 min-w-0">
+            <div className="w-8 h-8 sm:w-10 sm:h-10 rounded-xl sm:rounded-2xl bg-slate-900 text-white flex items-center justify-center shadow-xs shrink-0">
+              <SlidersHorizontal size={16} strokeWidth={2.2} />
             </div>
-            <div>
-              <div className="flex items-center gap-2.5">
-                <h1 className="text-base font-bold text-slate-900 tracking-tight font-serif">
-                  Centro de Control de Estudio · AeroFocus Pro
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                <h1 className="text-sm sm:text-base font-bold text-slate-900 tracking-tight font-serif truncate">
+                  Centro de Control · AeroFocus
                 </h1>
-                <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-medium bg-emerald-50 text-emerald-700 border border-emerald-200/60">
+                <span className="hidden sm:inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-medium bg-emerald-50 text-emerald-700 border border-emerald-200/60 shrink-0">
                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
                   Enlace Activo
                 </span>
               </div>
-              <p className="text-xs text-slate-500 mt-0.5">
+              <p className="hidden sm:block text-xs text-slate-500 mt-0.5 truncate">
                 Conciliación y auditoría de sesiones para tu expediente oficial de Judicatura
               </p>
             </div>
           </div>
 
           {/* Top Actions */}
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
             <button
               onClick={handleReconcile}
               disabled={isReconciling}
-              className="px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-800 transition-colors flex items-center gap-1.5 disabled:opacity-50"
+              className="px-2.5 sm:px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-800 transition-colors flex items-center gap-1 disabled:opacity-50"
               title="Audita todas las sesiones y recalcula determinísticamente horas, vueltas y temas"
             >
               <RefreshCw size={12} className={cn(isReconciling && "animate-spin text-slate-600")} />
-              <span>{isReconciling ? "Reconciliando..." : "Reconciliar Expediente"}</span>
+              <span className="hidden sm:inline">{isReconciling ? "Reconciliando..." : "Reconciliar Expediente"}</span>
+              <span className="sm:hidden">{isReconciling ? "..." : "Reconciliar"}</span>
             </button>
 
             <button
               onClick={onClose}
-              className="w-8 h-8 rounded-full flex items-center justify-center text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors ml-1"
+              className="w-8 h-8 rounded-full flex items-center justify-center text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors"
               title="Cerrar panel"
             >
               <X size={18} />
@@ -482,59 +483,59 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
           </div>
         </div>
 
-        {/* STATS STRIP */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 px-6 py-3 bg-slate-50/70 border-b border-slate-100 shrink-0">
-          <div className="px-3.5 py-2 rounded-xl bg-white border border-slate-200/60 shadow-2xs">
-            <div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Sesiones Totales</div>
-            <div className="text-lg font-bold font-mono tabular-nums text-slate-900 mt-0.5">
+        {/* STATS STRIP (Compact horizontal scroll on mobile to conserve viewport) */}
+        <div className="flex sm:grid sm:grid-cols-4 overflow-x-auto no-scrollbar gap-2 px-3 py-2 sm:px-6 sm:py-3 bg-slate-50/70 border-b border-slate-100 shrink-0">
+          <div className="shrink-0 min-w-[125px] sm:min-w-0 px-2.5 py-1.5 sm:px-3.5 sm:py-2 rounded-xl bg-white border border-slate-200/60 shadow-2xs">
+            <div className="text-[9px] sm:text-[10px] font-semibold text-slate-400 uppercase tracking-wider truncate">Sesiones Totales</div>
+            <div className="text-base sm:text-lg font-bold font-mono tabular-nums text-slate-900 mt-0.5">
               {metrics.totalSessions}
             </div>
           </div>
 
-          <div className="px-3.5 py-2 rounded-xl bg-white border border-slate-200/60 shadow-2xs">
-            <div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Horas Auditadas</div>
-            <div className="text-lg font-bold font-mono tabular-nums text-blue-600 mt-0.5">
-              {metrics.totalHours} <span className="text-xs font-normal text-slate-400 font-sans">h netas</span>
+          <div className="shrink-0 min-w-[125px] sm:min-w-0 px-2.5 py-1.5 sm:px-3.5 sm:py-2 rounded-xl bg-white border border-slate-200/60 shadow-2xs">
+            <div className="text-[9px] sm:text-[10px] font-semibold text-slate-400 uppercase tracking-wider truncate">Horas Auditadas</div>
+            <div className="text-base sm:text-lg font-bold font-mono tabular-nums text-blue-600 mt-0.5">
+              {metrics.totalHours} <span className="text-[10px] sm:text-xs font-normal text-slate-400 font-sans">h netas</span>
             </div>
           </div>
 
-          <div className="px-3.5 py-2 rounded-xl bg-white border border-slate-200/60 shadow-2xs">
-            <div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">Vía AeroFocus Pro</div>
-            <div className="text-lg font-bold font-mono tabular-nums text-indigo-600 mt-0.5 flex items-center gap-1.5">
+          <div className="shrink-0 min-w-[125px] sm:min-w-0 px-2.5 py-1.5 sm:px-3.5 sm:py-2 rounded-xl bg-white border border-slate-200/60 shadow-2xs">
+            <div className="text-[9px] sm:text-[10px] font-semibold text-slate-400 uppercase tracking-wider truncate">Vía AeroFocus</div>
+            <div className="text-base sm:text-lg font-bold font-mono tabular-nums text-indigo-600 mt-0.5 flex items-center gap-1">
               {metrics.aeroCount}
-              <Sparkles size={13} className="text-indigo-400" />
+              <Sparkles size={12} className="text-indigo-400" />
             </div>
           </div>
 
-          <div className="px-3.5 py-2 rounded-xl bg-amber-50/50 border border-amber-200/70 shadow-2xs">
-            <div className="text-[10px] font-semibold text-amber-700 uppercase tracking-wider">Dificultad Pendiente</div>
-            <div className="text-lg font-bold font-mono tabular-nums text-amber-900 mt-0.5 flex items-center justify-between">
+          <div className="shrink-0 min-w-[135px] sm:min-w-0 px-2.5 py-1.5 sm:px-3.5 sm:py-2 rounded-xl bg-amber-50/60 border border-amber-200/70 shadow-2xs">
+            <div className="text-[9px] sm:text-[10px] font-semibold text-amber-700 uppercase tracking-wider truncate">Dificultad Pendiente</div>
+            <div className="text-base sm:text-lg font-bold font-mono tabular-nums text-amber-900 mt-0.5 flex items-center justify-between gap-1">
               <span>{metrics.pendingDiffCount}</span>
               {metrics.pendingDiffCount > 0 && (
-                <span className="text-[10px] font-semibold text-amber-700 bg-amber-100/90 px-2 py-0.5 rounded-full">
-                  Por calificar
+                <span className="text-[9px] sm:text-[10px] font-semibold text-amber-700 bg-amber-100/90 px-1.5 py-0.2 rounded-full">
+                  Evaluar
                 </span>
               )}
             </div>
           </div>
         </div>
 
-        {/* ELEGANT NAVIGATION TABS */}
-        <div className="flex items-center justify-between border-b border-slate-200 px-6 bg-white shrink-0">
-          <div className="flex gap-2">
+        {/* ELEGANT NAVIGATION TABS (Horizontally scrollable on mobile) */}
+        <div className="flex items-center justify-between border-b border-slate-200 px-3 sm:px-6 bg-white shrink-0 overflow-x-auto no-scrollbar">
+          <div className="flex gap-1 sm:gap-2">
             <button
               onClick={() => setActiveTab("quarantine")}
               className={cn(
-                "py-3 px-4 text-xs font-bold tracking-tight border-b-2 transition-all flex items-center gap-2",
+                "py-2.5 sm:py-3 px-3 sm:px-4 text-xs font-bold tracking-tight border-b-2 transition-all flex items-center gap-1.5 sm:gap-2 whitespace-nowrap",
                 activeTab === "quarantine"
                   ? "border-amber-600 text-amber-900"
                   : "border-transparent text-slate-500 hover:text-slate-800"
               )}
             >
               <ShieldAlert size={14} className={activeTab === "quarantine" ? "text-amber-600" : "text-slate-400"} />
-              <span>Bandeja de Cuarentena</span>
+              <span>Bandeja Cuarentena</span>
               {quarantinedEvents.length > 0 && (
-                <span className="px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-800 font-mono">
+                <span className="px-1.5 py-0.2 rounded-full text-[10px] font-bold bg-amber-100 text-amber-800 font-mono">
                   {quarantinedEvents.length}
                 </span>
               )}
@@ -543,40 +544,40 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
             <button
               onClick={() => setActiveTab("sessions")}
               className={cn(
-                "py-3 px-4 text-xs font-bold tracking-tight border-b-2 transition-all flex items-center gap-2",
+                "py-2.5 sm:py-3 px-3 sm:px-4 text-xs font-bold tracking-tight border-b-2 transition-all flex items-center gap-1.5 sm:gap-2 whitespace-nowrap",
                 activeTab === "sessions"
                   ? "border-slate-900 text-slate-900"
                   : "border-transparent text-slate-400 hover:text-slate-700"
               )}
             >
               <Layers size={14} />
-              <span>Auditoría de Sesiones ({filteredSessions.length})</span>
+              <span>Auditoría ({filteredSessions.length})</span>
             </button>
 
             <button
               onClick={() => setActiveTab("webhook")}
               className={cn(
-                "py-3 px-4 text-xs font-bold tracking-tight border-b-2 transition-all flex items-center gap-2",
+                "py-2.5 sm:py-3 px-3 sm:px-4 text-xs font-bold tracking-tight border-b-2 transition-all flex items-center gap-1.5 sm:gap-2 whitespace-nowrap",
                 activeTab === "webhook"
                   ? "border-indigo-600 text-indigo-900"
                   : "border-transparent text-slate-400 hover:text-slate-700"
               )}
             >
               <Zap size={14} className={activeTab === "webhook" ? "text-indigo-600" : "text-slate-400"} />
-              <span>Conexión & Webhook</span>
+              <span>Webhook</span>
             </button>
 
             <button
               onClick={() => setActiveTab("raw_logs")}
               className={cn(
-                "py-3 px-4 text-xs font-bold tracking-tight border-b-2 transition-all flex items-center gap-2",
+                "py-2.5 sm:py-3 px-3 sm:px-4 text-xs font-bold tracking-tight border-b-2 transition-all flex items-center gap-1.5 sm:gap-2 whitespace-nowrap",
                 activeTab === "raw_logs"
                   ? "border-slate-900 text-slate-900"
                   : "border-transparent text-slate-400 hover:text-slate-700"
               )}
             >
               <Database size={14} />
-              <span>Logs de Red ({rawEvents.length})</span>
+              <span>Logs ({rawEvents.length})</span>
             </button>
           </div>
 
@@ -585,10 +586,10 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
             <button
               onClick={handleApproveAll}
               disabled={isApprovingAll}
-              className="my-1.5 px-3.5 py-1.5 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-700 text-white shadow-xs transition-colors flex items-center gap-1.5 disabled:opacity-50"
+              className="my-1 px-3 py-1 sm:py-1.5 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-700 text-white shadow-xs transition-colors flex items-center gap-1 disabled:opacity-50 whitespace-nowrap shrink-0 ml-2"
             >
-              <CheckCircle2 size={13} className={cn(isApprovingAll && "animate-spin")} />
-              <span>{isApprovingAll ? "Aprobando..." : `Aprobar Todo (${quarantinedEvents.length})`}</span>
+              <CheckCircle2 size={12} className={cn(isApprovingAll && "animate-spin")} />
+              <span>{isApprovingAll ? "..." : `Aprobar Todo (${quarantinedEvents.length})`}</span>
             </button>
           )}
         </div>
@@ -596,54 +597,54 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
         {/* TAB 1: BANDEJA DE CUARENTENA */}
         {activeTab === "quarantine" && (
           <div className="flex-1 flex flex-col min-h-0 overflow-hidden bg-slate-50/50">
-            {/* Top action bar */}
-            <div className="px-6 py-3 bg-white border-b border-slate-200/60 flex flex-wrap items-center justify-between gap-3 shrink-0">
-              <div className="flex items-center gap-2">
-                <span className="text-xs font-bold text-slate-700">
+            {/* Top action bar (compact, single line with horizontal scroll on mobile) */}
+            <div className="px-3 sm:px-6 py-2 sm:py-2.5 bg-white border-b border-slate-200/60 flex items-center justify-between gap-2 shrink-0 overflow-x-auto no-scrollbar">
+              <div className="flex items-center gap-1.5 text-xs font-bold text-slate-700 whitespace-nowrap shrink-0">
+                <span>
                   {quarantinedEvents.length === 0
                     ? "Bandeja vacía"
-                    : `${quarantinedEvents.length} vuelo${quarantinedEvents.length > 1 ? "s" : ""} retenido${quarantinedEvents.length > 1 ? "s" : ""}`}
+                    : `${quarantinedEvents.length} vuelo${quarantinedEvents.length > 1 ? "s" : ""}`}
                 </span>
-                <span className="text-slate-300">·</span>
-                <span className="text-xs text-slate-500">
-                  Valida dificultad y vueltas antes de incorporar a tu expediente.
+                <span className="hidden sm:inline text-slate-300">·</span>
+                <span className="hidden sm:inline text-xs font-normal text-slate-500">
+                  Valida dificultad y vueltas antes de incorporar.
                 </span>
               </div>
 
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
                 <button
                   onClick={handleQuickClipboardPaste}
-                  className="px-3 py-1.5 rounded-xl text-xs font-semibold bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200/60 transition-colors flex items-center gap-1.5"
+                  className="px-2.5 sm:px-3 py-1 sm:py-1.5 rounded-xl text-xs font-semibold bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200/60 transition-colors flex items-center gap-1 whitespace-nowrap"
                   title="Importar automáticamente el cierre copiado al portapapeles"
                 >
-                  <Send size={12} className="text-indigo-600" />
-                  <span>Pegar Cierre (Portapapeles)</span>
+                  <Send size={11} className="text-indigo-600" />
+                  <span>Pegar Portapapeles</span>
                 </button>
 
                 <button
                   onClick={() => setIsPasteModalOpen(true)}
-                  className="px-3 py-1.5 rounded-xl text-xs font-semibold bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 transition-colors flex items-center gap-1.5"
+                  className="px-2.5 sm:px-3 py-1 sm:py-1.5 rounded-xl text-xs font-semibold bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 transition-colors flex items-center gap-1 whitespace-nowrap"
                 >
-                  <Edit2 size={12} className="text-slate-500" />
-                  <span>Pegar Manual</span>
+                  <Edit2 size={11} className="text-slate-500" />
+                  <span>Manual</span>
                 </button>
 
                 <button
                   onClick={handleTestWebhook}
                   disabled={isTestingWebhook}
-                  className="px-3 py-1.5 rounded-xl text-xs font-semibold bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 transition-colors flex items-center gap-1.5"
+                  className="px-2.5 sm:px-3 py-1 sm:py-1.5 rounded-xl text-xs font-semibold bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 transition-colors flex items-center gap-1 whitespace-nowrap"
                 >
-                  <ShieldCheck size={12} className="text-emerald-600" />
-                  <span>{isTestingWebhook ? "Comprobando..." : "Test Enlace"}</span>
+                  <ShieldCheck size={11} className="text-emerald-600" />
+                  <span>{isTestingWebhook ? "..." : "Ping"}</span>
                 </button>
 
                 <button
                   onClick={() => fetchQuarantinedEvents()}
                   disabled={isLoadingQuarantine}
-                  className="p-1.5 rounded-xl text-slate-500 hover:text-slate-800 hover:bg-slate-100 border border-slate-200 transition-colors"
+                  className="p-1 sm:p-1.5 rounded-xl text-slate-500 hover:text-slate-800 hover:bg-slate-100 border border-slate-200 transition-colors shrink-0"
                   title="Refrescar lista"
                 >
-                  <RefreshCw size={13} className={cn(isLoadingQuarantine && "animate-spin")} />
+                  <RefreshCw size={12} className={cn(isLoadingQuarantine && "animate-spin")} />
                 </button>
 
                 {quarantinedEvents.length > 0 && (
@@ -653,17 +654,17 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                         clearAllQuarantine();
                       }
                     }}
-                    className="p-1.5 rounded-xl text-rose-600 hover:bg-rose-50 border border-rose-200 transition-colors"
+                    className="p-1 sm:p-1.5 rounded-xl text-rose-600 hover:bg-rose-50 border border-rose-200 transition-colors shrink-0"
                     title="Vaciar cuarentena"
                   >
-                    <Trash2 size={13} />
+                    <Trash2 size={12} />
                   </button>
                 )}
               </div>
             </div>
 
             {/* Quarantine Cards Container */}
-            <div className="flex-1 p-6 overflow-y-auto min-h-0">
+            <div className="flex-1 p-3 sm:p-6 overflow-y-auto overscroll-contain -webkit-overflow-scrolling-touch min-h-0 pb-24 sm:pb-6">
               {quarantinedEvents.length === 0 ? (
                 <div className="h-full flex flex-col items-center justify-center text-center p-8 max-w-md mx-auto">
                   <div className="w-14 h-14 rounded-3xl bg-slate-100 text-slate-500 flex items-center justify-center mb-4">
@@ -891,43 +892,62 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                                 </div>
 
                                 {/* Row 2: Duration, Difficulty rating (1-10) and Vuelta Toggle */}
-                                <div className="flex flex-wrap items-center justify-between gap-3 pt-1 border-t border-slate-100 text-xs">
-                                  {/* Duration Stepper */}
-                                  <div className="flex items-center gap-2">
-                                    <span className="text-slate-400 font-medium">Tiempo:</span>
-                                    <div className="flex items-center gap-1">
-                                      <button
-                                        onClick={() =>
-                                          updateQuarantineTopic(evt.id, idx, {
-                                            effectiveMinutes: Math.max(5, durationMins - 5),
-                                            effectiveHours: Math.max(5, durationMins - 5) / 60,
-                                          })
-                                        }
-                                        className="w-6 h-6 rounded-md bg-white border border-slate-200 hover:bg-slate-100 text-slate-700 flex items-center justify-center font-bold text-xs"
-                                      >
-                                        -
-                                      </button>
-                                      <span className="font-mono font-bold text-slate-900 px-1.5 tabular-nums">
-                                        {durationMins} min
-                                      </span>
-                                      <button
-                                        onClick={() =>
-                                          updateQuarantineTopic(evt.id, idx, {
-                                            effectiveMinutes: durationMins + 5,
-                                            effectiveHours: (durationMins + 5) / 60,
-                                          })
-                                        }
-                                        className="w-6 h-6 rounded-md bg-white border border-slate-200 hover:bg-slate-100 text-slate-700 flex items-center justify-center font-bold text-xs"
-                                      >
-                                        +
-                                      </button>
+                                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 sm:gap-3 pt-2 border-t border-slate-100 text-xs">
+                                  <div className="flex items-center justify-between sm:justify-start gap-4">
+                                    {/* Duration Stepper */}
+                                    <div className="flex items-center gap-1.5">
+                                      <span className="text-slate-400 font-medium text-[11px] uppercase tracking-wider">Tiempo:</span>
+                                      <div className="flex items-center gap-1">
+                                        <button
+                                          onClick={() =>
+                                            updateQuarantineTopic(evt.id, idx, {
+                                              effectiveMinutes: Math.max(5, durationMins - 5),
+                                              effectiveHours: Math.max(5, durationMins - 5) / 60,
+                                            })
+                                          }
+                                          className="w-6 h-6 rounded-md bg-white border border-slate-200 hover:bg-slate-100 active:scale-95 text-slate-700 flex items-center justify-center font-bold text-xs"
+                                        >
+                                          -
+                                        </button>
+                                        <span className="font-mono font-bold text-slate-900 px-1.5 tabular-nums text-xs">
+                                          {durationMins} min
+                                        </span>
+                                        <button
+                                          onClick={() =>
+                                            updateQuarantineTopic(evt.id, idx, {
+                                              effectiveMinutes: durationMins + 5,
+                                              effectiveHours: (durationMins + 5) / 60,
+                                            })
+                                          }
+                                          className="w-6 h-6 rounded-md bg-white border border-slate-200 hover:bg-slate-100 active:scale-95 text-slate-700 flex items-center justify-center font-bold text-xs"
+                                        >
+                                          +
+                                        </button>
+                                      </div>
                                     </div>
+
+                                    {/* Vuelta Checkbox */}
+                                    <label className="flex items-center gap-1.5 cursor-pointer select-none">
+                                      <input
+                                        type="checkbox"
+                                        checked={completesVuelta}
+                                        onChange={(e) =>
+                                          updateQuarantineTopic(evt.id, idx, {
+                                            completesVuelta: e.target.checked,
+                                          })
+                                        }
+                                        className="rounded text-emerald-600 focus:ring-emerald-500 w-3.5 h-3.5"
+                                      />
+                                      <span className={cn("text-[11px] font-semibold", completesVuelta ? "text-emerald-700" : "text-slate-500")}>
+                                        {completesVuelta ? "✓ Vuelta Oficial" : "Parcial"}
+                                      </span>
+                                    </label>
                                   </div>
 
                                   {/* Difficulty 1-10 Chips */}
-                                  <div className="flex items-center gap-1.5">
-                                    <span className="text-slate-400 font-medium">Dificultad:</span>
-                                    <div className="flex items-center gap-0.5">
+                                  <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-0.5">
+                                    <span className="text-slate-400 font-medium text-[11px] uppercase tracking-wider shrink-0">Dif:</span>
+                                    <div className="flex items-center gap-1 shrink-0">
                                       {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((num) => {
                                         const isSelected = currentDiff === num;
                                         return (
@@ -940,7 +960,7 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                                               })
                                             }
                                             className={cn(
-                                              "w-6 h-6 rounded-md text-[11px] font-bold font-mono transition-colors flex items-center justify-center",
+                                              "w-6 h-6 rounded-md text-[11px] font-bold font-mono transition-colors flex items-center justify-center shrink-0",
                                               isSelected
                                                 ? "bg-slate-900 text-white shadow-2xs"
                                                 : "bg-white text-slate-600 border border-slate-200 hover:bg-slate-100"
@@ -952,23 +972,6 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                                       })}
                                     </div>
                                   </div>
-
-                                  {/* Vuelta Checkbox */}
-                                  <label className="flex items-center gap-2 cursor-pointer select-none">
-                                    <input
-                                      type="checkbox"
-                                      checked={completesVuelta}
-                                      onChange={(e) =>
-                                        updateQuarantineTopic(evt.id, idx, {
-                                          completesVuelta: e.target.checked,
-                                        })
-                                      }
-                                      className="rounded text-emerald-600 focus:ring-emerald-500 w-3.5 h-3.5"
-                                    />
-                                    <span className={cn("text-xs font-semibold", completesVuelta ? "text-emerald-700" : "text-slate-500")}>
-                                      {completesVuelta ? "✓ Suma Vuelta Oficial" : "Repaso Parcial"}
-                                    </span>
-                                  </label>
                                 </div>
                               </div>
                             );

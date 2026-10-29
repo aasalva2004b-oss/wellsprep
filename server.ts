@@ -17,7 +17,7 @@ import { createServer as createViteServer } from "vite";
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = Number(process.env.PORT) || 3000;
   const upload = multer({ dest: 'uploads/' });
 
   // Robust parsing: JSON, URL-encoded, and raw text (for non-standard webhook senders)
