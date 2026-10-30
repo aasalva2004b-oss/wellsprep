@@ -31,7 +31,9 @@ import {
   TrendingUp,
   BarChart3,
   Flame,
-  Award
+  Award,
+  Plus,
+  Save
 } from "lucide-react";
 import { useFirebase } from "../lib/FirebaseProvider";
 import { initialSubjects, initialTopics } from "../data/initialData";
@@ -43,7 +45,7 @@ import {
 import { EditSessionDialog } from "./EditSessionDialog";
 import { toast } from "sonner";
 import { cn } from "../lib/utils";
-import { WebhookSyncRecord, WellsprepAnalyticsV2 } from "../lib/webhookTypes";
+import { WebhookSyncRecord, WellsprepAnalyticsV2, WebhookResolvedTopic } from "../lib/webhookTypes";
 import { simulateAeroFocusFlight } from "../hooks/useAeroFocusSync";
 
 interface SyncControlCenterDialogProps {
@@ -73,7 +75,10 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
     addQuarantineEventManually,
     updateQuarantineEvent,
     updateQuarantineTopic,
+    deleteQuarantineTopic,
+    addQuarantineTopic,
     mergeQuarantineTopics,
+    cleanTestArtifacts,
   } = useFirebase();
 
   const [activeTab, setActiveTab] = useState<ControlCenterTab>("quarantine");
@@ -98,6 +103,17 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
   const [isImportingPaste, setIsImportingPaste] = useState(false);
   const [copiedUrl, setCopiedUrl] = useState(false);
   const [copiedToken, setCopiedToken] = useState(false);
+
+  // Dedicated Topic Editor in Quarantine
+  const [editingTopicModal, setEditingTopicModal] = useState<{
+    eventId: string;
+    topicIndex: number;
+    topic: WebhookResolvedTopic;
+  } | null>(null);
+
+  // Add Topic to Flight state
+  const [addingTopicFlightId, setAddingTopicFlightId] = useState<string | null>(null);
+  const [addTopicSearch, setAddTopicSearch] = useState("");
 
   // Topic Reassign state
   const [reassigningItem, setReassigningItem] = useState<{ eventId: string; topicIndex: number } | null>(null);
@@ -517,41 +533,59 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
           </div>
         </div>
 
-        {/* STATS STRIP (Compact horizontal scroll on mobile to conserve viewport) */}
-        <div className="flex sm:grid sm:grid-cols-4 overflow-x-auto no-scrollbar gap-2 px-3 py-2 sm:px-6 sm:py-3 bg-slate-50/70 border-b border-slate-100 shrink-0">
-          <div className="shrink-0 min-w-[125px] sm:min-w-0 px-2.5 py-1.5 sm:px-3.5 sm:py-2 rounded-xl bg-white border border-slate-200/60 shadow-2xs">
-            <div className="text-[9px] sm:text-[10px] font-semibold text-slate-400 uppercase tracking-wider truncate">Sesiones Totales</div>
-            <div className="text-base sm:text-lg font-bold font-mono tabular-nums text-slate-900 mt-0.5">
+        {/* STATS STRIP (Compact single line on mobile, full grid on desktop) */}
+        <div className="hidden sm:grid sm:grid-cols-4 gap-2 px-6 py-3 bg-slate-50/70 border-b border-slate-100 shrink-0">
+          <div className="px-3.5 py-2 rounded-xl bg-white border border-slate-200/60 shadow-2xs">
+            <div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider truncate">Sesiones Totales</div>
+            <div className="text-lg font-bold font-mono tabular-nums text-slate-900 mt-0.5">
               {metrics.totalSessions}
             </div>
           </div>
 
-          <div className="shrink-0 min-w-[125px] sm:min-w-0 px-2.5 py-1.5 sm:px-3.5 sm:py-2 rounded-xl bg-white border border-slate-200/60 shadow-2xs">
-            <div className="text-[9px] sm:text-[10px] font-semibold text-slate-400 uppercase tracking-wider truncate">Horas Auditadas</div>
-            <div className="text-base sm:text-lg font-bold font-mono tabular-nums text-blue-600 mt-0.5">
-              {metrics.totalHours} <span className="text-[10px] sm:text-xs font-normal text-slate-400 font-sans">h netas</span>
+          <div className="px-3.5 py-2 rounded-xl bg-white border border-slate-200/60 shadow-2xs">
+            <div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider truncate">Horas Auditadas</div>
+            <div className="text-lg font-bold font-mono tabular-nums text-blue-600 mt-0.5">
+              {metrics.totalHours} <span className="text-xs font-normal text-slate-400 font-sans">h netas</span>
             </div>
           </div>
 
-          <div className="shrink-0 min-w-[125px] sm:min-w-0 px-2.5 py-1.5 sm:px-3.5 sm:py-2 rounded-xl bg-white border border-slate-200/60 shadow-2xs">
-            <div className="text-[9px] sm:text-[10px] font-semibold text-slate-400 uppercase tracking-wider truncate">Vía AeroFocus</div>
-            <div className="text-base sm:text-lg font-bold font-mono tabular-nums text-indigo-600 mt-0.5 flex items-center gap-1">
+          <div className="px-3.5 py-2 rounded-xl bg-white border border-slate-200/60 shadow-2xs">
+            <div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider truncate">Vía AeroFocus</div>
+            <div className="text-lg font-bold font-mono tabular-nums text-indigo-600 mt-0.5 flex items-center gap-1">
               {metrics.aeroCount}
               <Sparkles size={12} className="text-indigo-400" />
             </div>
           </div>
 
-          <div className="shrink-0 min-w-[135px] sm:min-w-0 px-2.5 py-1.5 sm:px-3.5 sm:py-2 rounded-xl bg-amber-50/60 border border-amber-200/70 shadow-2xs">
-            <div className="text-[9px] sm:text-[10px] font-semibold text-amber-700 uppercase tracking-wider truncate">Dificultad Pendiente</div>
-            <div className="text-base sm:text-lg font-bold font-mono tabular-nums text-amber-900 mt-0.5 flex items-center justify-between gap-1">
+          <div className="px-3.5 py-2 rounded-xl bg-amber-50/60 border border-amber-200/70 shadow-2xs">
+            <div className="text-[10px] font-semibold text-amber-700 uppercase tracking-wider truncate">Dificultad Pendiente</div>
+            <div className="text-lg font-bold font-mono tabular-nums text-amber-900 mt-0.5 flex items-center justify-between gap-1">
               <span>{metrics.pendingDiffCount}</span>
               {metrics.pendingDiffCount > 0 && (
-                <span className="text-[9px] sm:text-[10px] font-semibold text-amber-700 bg-amber-100/90 px-1.5 py-0.2 rounded-full">
+                <span className="text-[10px] font-semibold text-amber-700 bg-amber-100/90 px-1.5 py-0.2 rounded-full">
                   Evaluar
                 </span>
               )}
             </div>
           </div>
+        </div>
+
+        {/* Mobile ultra-compact stats strip to leave 85% screen height to content */}
+        <div className="sm:hidden flex items-center justify-between gap-1.5 px-3 py-1.5 bg-slate-50/90 border-b border-slate-100 shrink-0 text-[11px]">
+          <div className="flex items-center gap-2 overflow-x-auto no-scrollbar py-0.5">
+            <span className="font-mono font-bold text-slate-900">{metrics.totalSessions} ses.</span>
+            <span className="text-slate-300">·</span>
+            <span className="font-mono font-bold text-blue-600">{metrics.totalHours}h netas</span>
+            <span className="text-slate-300">·</span>
+            <span className="font-mono font-bold text-indigo-600 flex items-center gap-0.5">
+              {metrics.aeroCount} <Sparkles size={10} className="text-indigo-400" />
+            </span>
+          </div>
+          {metrics.pendingDiffCount > 0 && (
+            <span className="font-bold text-amber-800 bg-amber-100 px-1.5 py-0.5 rounded-md text-[10px] shrink-0">
+              {metrics.pendingDiffCount} por calificar
+            </span>
+          )}
         </div>
 
         {/* ELEGANT NAVIGATION TABS (Horizontally scrollable on mobile) */}
@@ -683,9 +717,19 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                   onClick={handleTestWebhook}
                   disabled={isTestingWebhook}
                   className="px-2.5 sm:px-3 py-1 sm:py-1.5 rounded-xl text-xs font-semibold bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 transition-colors flex items-center gap-1 whitespace-nowrap"
+                  title="Comprobar enlace ping"
                 >
                   <ShieldCheck size={11} className="text-emerald-600" />
                   <span>{isTestingWebhook ? "..." : "Ping"}</span>
+                </button>
+
+                <button
+                  onClick={cleanTestArtifacts}
+                  className="px-2.5 sm:px-3 py-1 sm:py-1.5 rounded-xl text-xs font-semibold bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200/80 transition-colors flex items-center gap-1 whitespace-nowrap"
+                  title="Eliminar automáticamente cualquier vuelo de prueba o Tema 1 de test"
+                >
+                  <Sparkles size={11} className="text-amber-600" />
+                  <span>Limpiar Test</span>
                 </button>
 
                 <button
@@ -705,7 +749,7 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                       }
                     }}
                     className="p-1 sm:p-1.5 rounded-xl text-rose-600 hover:bg-rose-50 border border-rose-200 transition-colors shrink-0"
-                    title="Vaciar cuarentena"
+                    title="Vaciar toda la cuarentena"
                   >
                     <Trash2 size={12} />
                   </button>
@@ -798,19 +842,31 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                             </span>
                           </div>
 
-                          <div className="flex items-center gap-2">
+                          <div className="flex items-center gap-1.5 sm:gap-2">
+                            <button
+                              onClick={() => {
+                                setAddingTopicFlightId(evt.id);
+                                setAddTopicSearch("");
+                              }}
+                              className="px-2.5 sm:px-3 py-1.5 rounded-xl text-xs font-semibold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200/60 transition-colors flex items-center gap-1"
+                              title="Añadir un tema estudiado a este vuelo"
+                            >
+                              <Plus size={12} />
+                              <span>+ Tema</span>
+                            </button>
+
                             <button
                               onClick={() => discardQuarantineEvent(evt.id)}
-                              className="px-3 py-1.5 rounded-xl text-xs font-semibold text-rose-700 bg-white hover:bg-rose-50 border border-slate-200 hover:border-rose-200 transition-colors flex items-center gap-1"
+                              className="px-2.5 sm:px-3 py-1.5 rounded-xl text-xs font-semibold text-rose-700 bg-white hover:bg-rose-50 border border-slate-200 hover:border-rose-200 transition-colors flex items-center gap-1"
                               title="Descartar este vuelo"
                             >
                               <Trash2 size={12} />
-                              <span>Descartar</span>
+                              <span className="hidden sm:inline">Descartar</span>
                             </button>
 
                             <button
                               onClick={() => approveQuarantineEvent(evt.id)}
-                              className="px-4 py-1.5 rounded-xl text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 shadow-xs transition-colors flex items-center gap-1.5"
+                              className="px-3 sm:px-4 py-1.5 rounded-xl text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 shadow-xs transition-colors flex items-center gap-1.5"
                             >
                               <CheckCircle2 size={13} />
                               <span>Aprobar Vuelo</span>
@@ -928,17 +984,46 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                                     </span>
                                   </div>
 
-                                  <button
-                                    onClick={() => {
-                                      setReassigningItem({ eventId: evt.id, topicIndex: idx });
-                                      setReassignSearch("");
-                                    }}
-                                    className="px-2.5 py-1 rounded-lg text-xs font-medium text-slate-600 bg-white hover:bg-slate-100 border border-slate-200 transition-colors flex items-center gap-1"
-                                    title="Reasignar a otro tema del temario oficial"
-                                  >
-                                    <BookOpen size={11} className="text-slate-400" />
-                                    <span>Cambiar tema</span>
-                                  </button>
+                                  <div className="flex items-center gap-1.5 shrink-0">
+                                    <button
+                                      onClick={() => {
+                                        setEditingTopicModal({
+                                          eventId: evt.id,
+                                          topicIndex: idx,
+                                          topic: { ...t },
+                                        });
+                                      }}
+                                      className="px-2 py-1 rounded-lg text-xs font-semibold text-slate-700 bg-white hover:bg-slate-100 border border-slate-200 transition-colors flex items-center gap-1 shadow-2xs"
+                                      title="Editar todos los campos de este tema"
+                                    >
+                                      <Edit2 size={11} className="text-slate-500" />
+                                      <span>Editar</span>
+                                    </button>
+
+                                    <button
+                                      onClick={() => {
+                                        setReassigningItem({ eventId: evt.id, topicIndex: idx });
+                                        setReassignSearch("");
+                                      }}
+                                      className="px-2 py-1 rounded-lg text-xs font-medium text-slate-600 bg-white hover:bg-slate-100 border border-slate-200 transition-colors flex items-center gap-1"
+                                      title="Reasignar a otro tema del temario oficial"
+                                    >
+                                      <BookOpen size={11} className="text-slate-400" />
+                                      <span className="hidden sm:inline">Cambiar tema</span>
+                                    </button>
+
+                                    <button
+                                      onClick={() => {
+                                        if (confirm(`¿Eliminar solo el Tema ${info.number} (${info.title}) de este vuelo?`)) {
+                                          deleteQuarantineTopic(evt.id, idx);
+                                        }
+                                      }}
+                                      className="p-1 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 border border-slate-200 hover:border-rose-200 transition-colors"
+                                      title="Eliminar solo este tema del vuelo"
+                                    >
+                                      <Trash2 size={13} />
+                                    </button>
+                                  </div>
                                 </div>
 
                                 {/* Row 2: Duration, Difficulty rating (1-10) and Vuelta Toggle */}
@@ -1844,6 +1929,40 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
         </div>
       )}
 
+      {/* Dedicated Topic Editor in Quarantine */}
+      {editingTopicModal && (
+        <EditQuarantineTopicModal
+          item={editingTopicModal}
+          onClose={() => setEditingTopicModal(null)}
+          onSave={(updated) => {
+            updateQuarantineTopic(editingTopicModal.eventId, editingTopicModal.topicIndex, updated);
+            setEditingTopicModal(null);
+            toast.success("Tema actualizado en cuarentena");
+          }}
+          onDelete={() => {
+            if (confirm("¿Eliminar definitivamente solo este tema de la sesión?")) {
+              deleteQuarantineTopic(editingTopicModal.eventId, editingTopicModal.topicIndex);
+              setEditingTopicModal(null);
+            }
+          }}
+        />
+      )}
+
+      {/* Add Topic to Quarantine Flight Modal */}
+      {addingTopicFlightId && (
+        <AddQuarantineTopicModal
+          isOpen={Boolean(addingTopicFlightId)}
+          onClose={() => setAddingTopicFlightId(null)}
+          onAdd={async (topicData) => {
+            const ok = await addQuarantineTopic(addingTopicFlightId, topicData);
+            if (ok) {
+              setAddingTopicFlightId(null);
+              toast.success(`Tema ${topicData.resolvedTopicNumber} añadido al vuelo`);
+            }
+          }}
+        />
+      )}
+
       {/* Edit Session Modal */}
       {editingSession && (
         <EditSessionDialog
@@ -1857,3 +1976,522 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
     </div>
   );
 }
+
+// ==========================================
+// DEDICATED TOPIC EDITOR MODAL IN QUARANTINE
+// ==========================================
+function EditQuarantineTopicModal({
+  item,
+  onClose,
+  onSave,
+  onDelete,
+}: {
+  item: { eventId: string; topicIndex: number; topic: WebhookResolvedTopic };
+  onClose: () => void;
+  onSave: (updated: Partial<WebhookResolvedTopic>) => void;
+  onDelete: () => void;
+}) {
+  const [topic, setTopic] = useState<WebhookResolvedTopic>({ ...item.topic });
+  const [isChangingTopic, setIsChangingTopic] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+
+  const durationMins = topic.effectiveMinutes || Math.round((topic.effectiveHours || 0) * 60) || 45;
+  const currentDiff = topic.dificultadReal !== undefined ? topic.dificultadReal : (topic.difficulty ?? 5);
+  const completesVuelta = topic.completesVuelta !== undefined ? topic.completesVuelta : (topic.modality === "repaso" || topic.modality === "canto");
+
+  const subject = initialSubjects.find(s => s.id === topic.resolvedSubjectId) || {
+    id: topic.resolvedSubjectId || "general",
+    name: topic.resolvedSubjectId || "General",
+    color: "#6366f1"
+  };
+
+  const filteredTopics = useMemo(() => {
+    if (!searchQuery.trim()) return initialTopics.slice(0, 40);
+    const q = searchQuery.toLowerCase().trim();
+    return initialTopics.filter(t => 
+      t.title.toLowerCase().includes(q) ||
+      t.id.toLowerCase().includes(q) ||
+      String(t.number).includes(q)
+    );
+  }, [searchQuery]);
+
+  return (
+    <div className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
+      <div className="bg-white rounded-3xl shadow-2xl border border-slate-200/80 w-full max-w-lg max-h-[92vh] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+        
+        {/* Header */}
+        <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between gap-3 bg-slate-50/50 shrink-0">
+          <div className="min-w-0">
+            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+              Edición Quirúrgica en Cuarentena
+            </span>
+            <h3 className="text-base font-bold text-slate-900 truncate">
+              Tema {topic.resolvedTopicNumber}: {topic.resolvedTopicTitle}
+            </h3>
+          </div>
+          <button
+            onClick={onClose}
+            className="w-8 h-8 rounded-full flex items-center justify-center text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors shrink-0"
+          >
+            <X size={18} />
+          </button>
+        </div>
+
+        {/* Scrollable Body */}
+        <div className="p-5 space-y-4 overflow-y-auto flex-1">
+          
+          {/* Topic Assignment Box */}
+          <div className="p-3.5 rounded-2xl bg-slate-50 border border-slate-200/80">
+            <div className="flex items-center justify-between gap-2 mb-2">
+              <span className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
+                <BookOpen size={13} className="text-indigo-600" />
+                Tema Asignado Oficial
+              </span>
+              <button
+                type="button"
+                onClick={() => setIsChangingTopic(!isChangingTopic)}
+                className="text-xs font-bold text-indigo-600 hover:text-indigo-800 transition-colors"
+              >
+                {isChangingTopic ? "Cerrar selector" : "Cambiar tema..."}
+              </button>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <span
+                className="w-3 h-3 rounded-full shrink-0"
+                style={{ backgroundColor: subject.color }}
+              />
+              <span className="text-xs font-semibold text-slate-600">
+                {subject.name}
+              </span>
+              <span className="text-xs text-slate-300">·</span>
+              <span className="text-xs font-bold text-slate-900 truncate">
+                Tema {topic.resolvedTopicNumber}: {topic.resolvedTopicTitle}
+              </span>
+            </div>
+
+            {/* Quick Topic Search Dropdown */}
+            {isChangingTopic && (
+              <div className="mt-3 pt-3 border-t border-slate-200/80 space-y-2">
+                <div className="relative">
+                  <Search size={13} className="absolute left-2.5 top-2.5 text-slate-400" />
+                  <input
+                    type="text"
+                    placeholder="Buscar por número o nombre de tema..."
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    className="w-full pl-8 pr-3 py-1.5 text-xs bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
+                    autoFocus
+                  />
+                </div>
+                <div className="max-h-40 overflow-y-auto space-y-1 pr-1">
+                  {filteredTopics.map((t) => (
+                    <button
+                      key={t.id}
+                      type="button"
+                      onClick={() => {
+                        setTopic(prev => ({
+                          ...prev,
+                          resolvedTopicId: t.id,
+                          resolvedTopicTitle: t.title,
+                          resolvedTopicNumber: t.number,
+                          resolvedSubjectId: t.subjectId,
+                        }));
+                        setIsChangingTopic(false);
+                      }}
+                      className={cn(
+                        "w-full text-left p-2 rounded-xl text-xs flex items-center justify-between gap-2 transition-colors",
+                        topic.resolvedTopicId === t.id
+                          ? "bg-indigo-50 text-indigo-900 font-bold border border-indigo-200"
+                          : "hover:bg-white text-slate-700"
+                      )}
+                    >
+                      <span className="truncate">Tema {t.number}: {t.title}</span>
+                      <span className="text-[10px] font-mono text-slate-400 shrink-0">{t.id}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Modalidad Selector */}
+          <div>
+            <label className="block text-xs font-bold text-slate-700 mb-1.5">
+              Modalidad de Estudio
+            </label>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
+              {(
+                [
+                  { id: "primer_estudio", label: "1er Estudio" },
+                  { id: "repaso", label: "Repaso" },
+                  { id: "refresco", label: "Refresco" },
+                  { id: "canto", label: "Cante" },
+                ] as const
+              ).map((m) => (
+                <button
+                  key={m.id}
+                  type="button"
+                  onClick={() => setTopic(prev => ({ ...prev, modality: m.id }))}
+                  className={cn(
+                    "py-2 px-2.5 rounded-xl text-xs font-bold transition-all text-center border",
+                    topic.modality === m.id
+                      ? "bg-slate-900 text-white border-slate-900 shadow-xs"
+                      : "bg-white text-slate-600 border-slate-200 hover:bg-slate-50"
+                  )}
+                >
+                  {m.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Tiempo Efectivo */}
+          <div>
+            <label className="block text-xs font-bold text-slate-700 mb-1.5">
+              Tiempo Efectivo Neto ({durationMins} minutos)
+            </label>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setTopic(prev => {
+                  const m = Math.max(5, durationMins - 15);
+                  return { ...prev, effectiveMinutes: m, effectiveHours: m / 60 };
+                })}
+                className="px-2 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs"
+              >
+                -15m
+              </button>
+              <button
+                type="button"
+                onClick={() => setTopic(prev => {
+                  const m = Math.max(5, durationMins - 5);
+                  return { ...prev, effectiveMinutes: m, effectiveHours: m / 60 };
+                })}
+                className="px-2 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs"
+              >
+                -5m
+              </button>
+              <input
+                type="number"
+                min={1}
+                max={600}
+                value={durationMins}
+                onChange={(e) => {
+                  const val = parseInt(e.target.value) || 0;
+                  setTopic(prev => ({
+                    ...prev,
+                    effectiveMinutes: val,
+                    effectiveHours: val / 60
+                  }));
+                }}
+                className="flex-1 py-1.5 px-3 bg-white border border-slate-200 rounded-xl text-center font-mono font-bold text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
+              />
+              <button
+                type="button"
+                onClick={() => setTopic(prev => {
+                  const m = durationMins + 5;
+                  return { ...prev, effectiveMinutes: m, effectiveHours: m / 60 };
+                })}
+                className="px-2 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs"
+              >
+                +5m
+              </button>
+              <button
+                type="button"
+                onClick={() => setTopic(prev => {
+                  const m = durationMins + 15;
+                  return { ...prev, effectiveMinutes: m, effectiveHours: m / 60 };
+                })}
+                className="px-2 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs"
+              >
+                +15m
+              </button>
+            </div>
+            {/* Quick Presets */}
+            <div className="flex items-center gap-1.5 mt-2 overflow-x-auto no-scrollbar">
+              {[15, 30, 45, 60, 90, 120].map((preset) => (
+                <button
+                  key={preset}
+                  type="button"
+                  onClick={() => setTopic(prev => ({ ...prev, effectiveMinutes: preset, effectiveHours: preset / 60 }))}
+                  className={cn(
+                    "px-2 py-0.5 rounded-lg text-[11px] font-bold shrink-0 transition-colors",
+                    durationMins === preset
+                      ? "bg-indigo-600 text-white"
+                      : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+                  )}
+                >
+                  {preset}m
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Dificultad (1-10) */}
+          <div>
+            <div className="flex items-center justify-between mb-1.5">
+              <label className="text-xs font-bold text-slate-700">
+                Dificultad Percibida ({currentDiff} / 10)
+              </label>
+              <span className="text-[11px] font-bold text-slate-500">
+                {currentDiff <= 3 ? "Baja / Asimilado" : currentDiff <= 6 ? "Media" : currentDiff <= 8 ? "Alta" : "Extrema"}
+              </span>
+            </div>
+            <div className="grid grid-cols-10 gap-1">
+              {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((num) => {
+                const isSelected = currentDiff === num;
+                return (
+                  <button
+                    key={num}
+                    type="button"
+                    onClick={() => setTopic(prev => ({ ...prev, difficulty: num, dificultadReal: num }))}
+                    className={cn(
+                      "py-2 rounded-lg text-xs font-black transition-all",
+                      isSelected
+                        ? num <= 3
+                          ? "bg-emerald-600 text-white shadow-xs"
+                          : num <= 6
+                          ? "bg-blue-600 text-white shadow-xs"
+                          : num <= 8
+                          ? "bg-amber-600 text-white shadow-xs"
+                          : "bg-rose-600 text-white shadow-xs"
+                        : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+                    )}
+                  >
+                    {num}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Vuelta Oficial */}
+          <div className="p-3 rounded-2xl bg-slate-50 border border-slate-200/80 flex items-center justify-between gap-3">
+            <div>
+              <div className="text-xs font-bold text-slate-900">Computar Vuelta Oficial</div>
+              <div className="text-[11px] text-slate-500">
+                Suma +1 al contador de vueltas completas de la oposición
+              </div>
+            </div>
+            <input
+              type="checkbox"
+              checked={completesVuelta}
+              onChange={(e) => setTopic(prev => ({ ...prev, completesVuelta: e.target.checked }))}
+              className="w-4 h-4 rounded text-indigo-600 focus:ring-indigo-500 cursor-pointer"
+            />
+          </div>
+
+          {/* Páginas y Notas */}
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-[11px] font-bold text-slate-600 mb-1">Pág. Inicio</label>
+              <input
+                type="number"
+                value={topic.startPage ?? ""}
+                onChange={(e) => setTopic(prev => ({ ...prev, startPage: e.target.value ? parseInt(e.target.value) : undefined }))}
+                placeholder="Ej. 1"
+                className="w-full px-3 py-1.5 text-xs bg-white border border-slate-200 rounded-xl"
+              />
+            </div>
+            <div>
+              <label className="block text-[11px] font-bold text-slate-600 mb-1">Pág. Fin</label>
+              <input
+                type="number"
+                value={topic.endPage ?? ""}
+                onChange={(e) => setTopic(prev => ({ ...prev, endPage: e.target.value ? parseInt(e.target.value) : undefined }))}
+                placeholder="Ej. 24"
+                className="w-full px-3 py-1.5 text-xs bg-white border border-slate-200 rounded-xl"
+              />
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-[11px] font-bold text-slate-600 mb-1">Notas / Observaciones</label>
+            <textarea
+              rows={2}
+              value={topic.notes ?? ""}
+              onChange={(e) => setTopic(prev => ({ ...prev, notes: e.target.value }))}
+              placeholder="Anotaciones sobre este tema..."
+              className="w-full px-3 py-2 text-xs bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 resize-none"
+            />
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div className="px-5 py-3.5 border-t border-slate-100 bg-slate-50/70 flex items-center justify-between gap-3 shrink-0">
+          <button
+            type="button"
+            onClick={onDelete}
+            className="px-3 py-2 rounded-xl text-xs font-bold text-rose-600 hover:bg-rose-50 border border-slate-200 hover:border-rose-200 transition-colors flex items-center gap-1.5"
+          >
+            <Trash2 size={13} />
+            <span>Eliminar solo este tema</span>
+          </button>
+
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={onClose}
+              className="px-3 py-2 rounded-xl text-xs font-semibold text-slate-600 hover:bg-slate-200 transition-colors"
+            >
+              Cancelar
+            </button>
+            <button
+              type="button"
+              onClick={() => onSave(topic)}
+              className="px-4 py-2 rounded-xl text-xs font-bold text-white bg-slate-900 hover:bg-slate-800 shadow-xs transition-colors flex items-center gap-1.5"
+            >
+              <Save size={13} />
+              <span>Guardar Cambios</span>
+            </button>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  );
+}
+
+// ==========================================
+// ADD TOPIC TO QUARANTINE FLIGHT MODAL
+// ==========================================
+function AddQuarantineTopicModal({
+  isOpen,
+  onClose,
+  onAdd,
+}: {
+  isOpen: boolean;
+  onClose: () => void;
+  onAdd: (topic: Partial<WebhookResolvedTopic>) => void;
+}) {
+  const [search, setSearch] = useState("");
+  const [selectedSubject, setSelectedSubject] = useState<string>("all");
+
+  const filtered = useMemo(() => {
+    let list = initialTopics;
+    if (selectedSubject !== "all") {
+      list = list.filter(t => t.subjectId === selectedSubject);
+    }
+    if (!search.trim()) return list;
+    const q = search.toLowerCase().trim();
+    return list.filter(t =>
+      t.title.toLowerCase().includes(q) ||
+      t.id.toLowerCase().includes(q) ||
+      String(t.number).includes(q)
+    );
+  }, [search, selectedSubject]);
+
+  if (!isOpen) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
+      <div className="bg-white rounded-3xl shadow-2xl border border-slate-200/80 w-full max-w-lg max-h-[85vh] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+        
+        {/* Header */}
+        <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between gap-3 bg-slate-50/50 shrink-0">
+          <div>
+            <h3 className="text-base font-bold text-slate-900 font-serif">
+              Añadir Tema al Vuelo de AeroFocus
+            </h3>
+            <p className="text-xs text-slate-500 mt-0.5">
+              Selecciona un tema oficial para incorporarlo a esta sesión en cuarentena.
+            </p>
+          </div>
+          <button
+            onClick={onClose}
+            className="w-8 h-8 rounded-full flex items-center justify-center text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors shrink-0"
+          >
+            <X size={18} />
+          </button>
+        </div>
+
+        {/* Filters & Search */}
+        <div className="p-4 border-b border-slate-100 space-y-2.5 bg-white shrink-0">
+          <div className="relative">
+            <Search size={14} className="absolute left-3 top-2.5 text-slate-400" />
+            <input
+              type="text"
+              placeholder="Buscar por número o nombre (ej. 14, Obligaciones, Constitucional)..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="w-full pl-9 pr-3 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
+              autoFocus
+            />
+          </div>
+
+          <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-0.5">
+            <button
+              onClick={() => setSelectedSubject("all")}
+              className={cn(
+                "px-2.5 py-1 rounded-lg text-[11px] font-bold shrink-0 transition-colors",
+                selectedSubject === "all"
+                  ? "bg-slate-900 text-white"
+                  : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+              )}
+            >
+              Todos (328)
+            </button>
+            {initialSubjects.map(s => (
+              <button
+                key={s.id}
+                onClick={() => setSelectedSubject(s.id)}
+                className={cn(
+                  "px-2.5 py-1 rounded-lg text-[11px] font-bold shrink-0 transition-colors flex items-center gap-1",
+                  selectedSubject === s.id
+                    ? "bg-slate-900 text-white"
+                    : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+                )}
+              >
+                <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: s.color }} />
+                <span>{s.name}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Topic List */}
+        <div className="p-4 overflow-y-auto space-y-1.5 flex-1">
+          {filtered.map(t => {
+            const sub = initialSubjects.find(s => s.id === t.subjectId);
+            return (
+              <button
+                key={t.id}
+                onClick={() => {
+                  onAdd({
+                    resolvedTopicId: t.id,
+                    resolvedTopicTitle: t.title,
+                    resolvedTopicNumber: t.number,
+                    resolvedSubjectId: t.subjectId,
+                    modality: "repaso",
+                    effectiveMinutes: 45,
+                    effectiveHours: 0.75,
+                    difficulty: 5,
+                    dificultadReal: 5,
+                    completesVuelta: true,
+                  });
+                }}
+                className="w-full text-left p-2.5 rounded-xl hover:bg-indigo-50/60 border border-slate-100 hover:border-indigo-200 transition-colors flex items-center justify-between gap-3 group"
+              >
+                <div className="min-w-0">
+                  <div className="text-xs font-bold text-slate-900 group-hover:text-indigo-950 truncate">
+                    Tema {t.number}: {t.title}
+                  </div>
+                  <div className="text-[10px] text-slate-400 mt-0.5 flex items-center gap-1.5">
+                    <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: sub?.color || "#94a3b8" }} />
+                    <span>{sub?.name || t.subjectId}</span>
+                  </div>
+                </div>
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-100 text-slate-600 shrink-0 group-hover:bg-indigo-100 group-hover:text-indigo-800">
+                  Añadir
+                </span>
+              </button>
+            );
+          })}
+        </div>
+
+      </div>
+    </div>
+  );
+}
+

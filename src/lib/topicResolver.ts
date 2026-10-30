@@ -10,7 +10,7 @@ export function normalizeCategoryToSubjectId(category?: string): string | null {
     .replace(/[._\-]/g, ' ')
     .replace(/\s+/g, ' ');
 
-  // Procesal Civil y Penal (comprobar SIEMPRE antes que civil/penal simples)
+  // 1. Procesal Civil y Penal (comprobar SIEMPRE antes que civil/penal simples)
   if (
     clean.includes('proc civ') ||
     clean.includes('procesal civ') ||
@@ -18,6 +18,8 @@ export function normalizeCategoryToSubjectId(category?: string): string | null {
     clean.includes('dpc') ||
     clean.includes('d.p.c') ||
     clean.includes('d. proc. civ') ||
+    clean.includes('enjuiciamiento civil') ||
+    clean.includes('lec') ||
     (clean.includes('procesal') && clean.includes('civil')) ||
     clean === 'pciv' ||
     clean === 'proc_civ'
@@ -32,6 +34,8 @@ export function normalizeCategoryToSubjectId(category?: string): string | null {
     clean.includes('dpp') ||
     clean.includes('d.p.p') ||
     clean.includes('d. proc. pen') ||
+    clean.includes('enjuiciamiento criminal') ||
+    clean.includes('lecrim') ||
     (clean.includes('procesal') && clean.includes('penal')) ||
     clean === 'ppen' ||
     clean === 'proc_pen'
@@ -39,13 +43,50 @@ export function normalizeCategoryToSubjectId(category?: string): string | null {
     return 'procesal-penal';
   }
 
-  // Constitucional
+  // 2. Mercantil (comprobar antes de abreviaturas)
+  if (
+    clean.includes('mercantil') ||
+    clean.includes('comercio') ||
+    clean.includes('sociedad') ||
+    clean.startsWith('merc') ||
+    clean === 'dm' ||
+    clean === 'd merc' ||
+    clean === 'd.merc'
+  ) {
+    return 'mercantil';
+  }
+
+  // 3. Administrativo y Laboral
+  if (
+    clean.includes('admin') ||
+    clean.includes('laboral') ||
+    clean.includes('trabajo') ||
+    clean.includes('seguridad social') ||
+    clean.includes('contencioso') ||
+    clean === 'da' ||
+    clean === 'dl' ||
+    clean === 'ca' ||
+    clean === 'lab' ||
+    clean === 'adm_lab' ||
+    clean === 'admin_lab' ||
+    clean === 'adm lab' ||
+    clean === 'admin lab'
+  ) {
+    return 'administrativo-laboral';
+  }
+
+  // 4. Constitucional, Unión Europea y Poder Judicial
   if (
     clean.includes('const') ||
     clean.includes('constitucion') ||
     clean.includes('europa') ||
     clean.includes('unión europea') ||
     clean.includes('union europea') ||
+    clean.includes('ue') ||
+    clean.includes('poder judicial') ||
+    clean.includes('organizacion judicial') ||
+    clean.includes('organización judicial') ||
+    clean.includes('lopj') ||
     clean.includes('dce') ||
     clean.includes('d.const') ||
     clean === 'dcon' ||
@@ -54,51 +95,33 @@ export function normalizeCategoryToSubjectId(category?: string): string | null {
     return 'constitucional';
   }
 
-  // Civil puro (sin procesal)
+  // 5. Civil puro (sin procesal)
   if (
     clean.includes('civil') ||
     clean === 'civ' ||
     clean === 'dc' ||
     clean === 'd. civ' ||
     clean === 'd.civ' ||
-    clean === 'd civil'
+    clean === 'd civil' ||
+    clean.includes('obligaciones y contratos') ||
+    clean.includes('derechos reales')
   ) {
     return 'civil';
   }
 
-  // Penal puro (sin procesal)
+  // 6. Penal puro (sin procesal)
   if (
     clean.includes('penal') ||
     clean === 'pen' ||
     clean === 'dp' ||
     clean === 'd. pen' ||
     clean === 'd.pen' ||
-    clean === 'd penal'
+    clean === 'd penal' ||
+    clean.includes('delitos') ||
+    clean.includes('codigo penal') ||
+    clean.includes('código penal')
   ) {
     return 'penal';
-  }
-
-  // Mercantil
-  if (
-    clean.includes('merc') ||
-    clean.includes('mercantil') ||
-    clean === 'dm' ||
-    clean === 'd. merc' ||
-    clean === 'd.merc'
-  ) {
-    return 'mercantil';
-  }
-
-  // Administrativo y Laboral
-  if (
-    clean.includes('admin') ||
-    clean.includes('laboral') ||
-    clean.includes('lab') ||
-    clean === 'da' ||
-    clean === 'dl' ||
-    clean.includes('contencioso')
-  ) {
-    return 'administrativo-laboral';
   }
 
   return null;
@@ -356,13 +379,94 @@ export function extractMinutesFromAeroItem(item: any, fallbackMinutes: number = 
   return fallbackMinutes;
 }
 
+const SPANISH_STOPWORDS = new Set([
+  'de', 'la', 'el', 'en', 'y', 'a', 'los', 'las', 'del', 'un', 'una', 'por', 'con', 'para', 'su', 'al', 'lo',
+  'como', 'mas', 'más', 'o', 'pero', 'sus', 'le', 'ya', 'fue', 'este', 'ha', 'si', 'porque', 'esta',
+  'son', 'entre', 'cuando', 'muy', 'sin', 'sobre', 'ser', 'tiene', 'tambien', 'también', 'me', 'hasta',
+  'hay', 'donde', 'quien', 'desde', 'todo', 'nos', 'durante', 'todos', 'uno', 'les', 'ni', 'contra', 'otros',
+  'fueron', 'ese', 'eso', 'habia', 'había', 'ante', 'ellos', 'e', 'esto', 'mi', 'antes', 'algunos', 'qué', 'que',
+  'unos', 'yo', 'otro', 'otras', 'otra', 'tanto', 'esa', 'estos', 'mucho', 'quienes', 'nada', 'muchos',
+  'cual', 'sea', 'poco', 'ella', 'estar', 'haber', 'estas', 'estaba', 'estamos', 'algunas', 'algo', 'nosotros',
+  'tema', 'temas', 'derecho', 'derechos', 'general', 'especial', 'parte'
+]);
+
+function extractMeaningfulTokens(text: string): string[] {
+  if (!text) return [];
+  const normalized = text
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^\w\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  return normalized
+    .split(" ")
+    .filter(w => w.length >= 3 && !SPANISH_STOPWORDS.has(w));
+}
+
+function findBestTopicByTitleMatch(
+  titleText: string,
+  topicsList: typeof initialTopics,
+  preferredSubject?: string | null,
+  topicNum?: number | null
+): typeof initialTopics[0] | null {
+  const queryTokens = extractMeaningfulTokens(titleText);
+  if (queryTokens.length === 0 && !topicNum) return null;
+
+  let bestMatch: typeof initialTopics[0] | null = null;
+  let bestScore = 0;
+
+  for (const candidate of topicsList) {
+    let score = 0;
+
+    // Bonus por coincidencia de materia
+    const isSameSubject = preferredSubject && candidate.subjectId === preferredSubject;
+    if (isSameSubject) score += 0.35;
+
+    // Bonus por coincidencia de número de tema
+    if (topicNum && candidate.number === topicNum) {
+      score += 0.45;
+      if (isSameSubject) {
+        // Asignatura exacta + Número exacto = 100% de coincidencia
+        return candidate;
+      }
+    }
+
+    if (queryTokens.length > 0) {
+      const candidateTokens = extractMeaningfulTokens(candidate.title);
+      let matchCount = 0;
+      for (const qt of queryTokens) {
+        if (candidateTokens.some(ct => ct === qt || (ct.length >= 4 && qt.length >= 4 && (ct.includes(qt) || qt.includes(ct))))) {
+          matchCount++;
+        }
+      }
+
+      const overlap = matchCount / Math.max(1, Math.min(queryTokens.length, candidateTokens.length));
+      score += overlap * 0.7;
+    }
+
+    if (score > bestScore) {
+      bestScore = score;
+      bestMatch = candidate;
+    }
+  }
+
+  // Umbral de confianza mínimo
+  if (bestScore >= 0.50 && bestMatch) {
+    return bestMatch;
+  }
+  return null;
+}
+
 /**
  * Resuelve de forma unívoca y rigurosa un tema de AeroFocus Pro contra el temario de Wellsprep
  * Jerarquía estricta:
  * 1. Coincidencia directa por topicId canónico (jud-1..jud-328)
  * 2. Coincidencia por ID de Wellsprep o prefijo estándar (ej. civil-12, CIV_T12, etc.)
  * 3. Coincidencia compuesta: normalizeCategoryToSubjectId(materia) + topicNumber
- * 4. Coincidencia por título oficial normalizado
+ * 4. Coincidencia semántica difusa por palabras clave contra los 328 temas
+ * 5. Coincidencia por número dentro de la materia identificada
  */
 export function resolveAeroFocusTopic(
   item: AeroFocusTopicItem,
@@ -426,45 +530,19 @@ export function resolveAeroFocusTopic(
     }
   }
 
-  // 4. Intento por similitud de texto del título dentro de la asignatura conocida
+  // 4. Coincidencia semántica difusa por palabras clave contra los 328 temas
   const activeSubject = subjectIdFromCategory || subjectIdFromTitle;
-  if (activeSubject && titleText) {
-    const cleanTitle = titleText.toLowerCase()
-      .replace(/tema\s*\d+\s*[-:.]*/i, '')
-      .replace(/^\d+[.:\- ]*/, '')
-      .trim();
-
-    if (cleanTitle.length >= 4) {
-      const match = topicsList.find(t => {
-        if (t.subjectId !== activeSubject) return false;
-        const officialTitle = t.title.toLowerCase();
-        return officialTitle.includes(cleanTitle) || cleanTitle.includes(officialTitle);
-      });
-      if (match) {
-        return buildResolvedTopic(match, item);
-      }
-    }
+  const bestFuzzyMatch = findBestTopicByTitleMatch(
+    titleText,
+    topicsList,
+    activeSubject,
+    topicNum
+  );
+  if (bestFuzzyMatch) {
+    return buildResolvedTopic(bestFuzzyMatch, item);
   }
 
-  // 5. Intento global de coincidencia por título exhaustivo
-  if (titleText) {
-    const cleanTitle = titleText.toLowerCase()
-      .replace(/tema\s*\d+\s*[-:.]*/i, '')
-      .replace(/^\d+[.:\- ]*/, '')
-      .trim();
-
-    if (cleanTitle.length >= 6) {
-      const match = topicsList.find(t => {
-        const officialTitle = t.title.toLowerCase();
-        return officialTitle.includes(cleanTitle) || cleanTitle.includes(officialTitle);
-      });
-      if (match) {
-        return buildResolvedTopic(match, item);
-      }
-    }
-  }
-
-  // 6. Intento por número puro si la asignatura fue identificada
+  // 5. Intento directo por número si la asignatura fue identificada
   if (activeSubject && topicNum) {
     const match = topicsList.find(t => t.subjectId === activeSubject && t.number === topicNum);
     if (match) {
@@ -472,16 +550,33 @@ export function resolveAeroFocusTopic(
     }
   }
 
-  // 7. Fallback determinista amigable
-  const finalNum = topicNum || 1;
-  const finalSubId = activeSubject || 'constitucional';
+  // 6. Intento si se tiene un ID que coincide parcialmente (ej. "jud-12" o "jud-28")
+  if (item.topicId) {
+    const canonical = resolveCanonicalJudicaturaId(item.topicId);
+    if (canonical) {
+      const match = topicsList.find(t => t.id === canonical.topicId);
+      if (match) return buildResolvedTopic(match, item);
+    }
+  }
+
+  // 7. Fallback determinista amigable con búsqueda del tema oficial más cercano
+  let matchedFallback: typeof initialTopics[0] | undefined;
+  if (!activeSubject && topicNum) {
+    matchedFallback = topicsList.find(t => t.number === topicNum);
+  }
+
+  const finalNum = matchedFallback ? matchedFallback.number : (topicNum || 1);
+  const finalSubId = matchedFallback ? matchedFallback.subjectId : (activeSubject || 'constitucional');
+  const officialTitle = matchedFallback 
+    ? matchedFallback.title 
+    : (titleText ? titleText.replace(/^tema\s*\d+[\s:.-]*/i, '').trim() : `Tema ${finalNum}`);
   const effectiveMins = extractMinutesFromAeroItem(item, 45);
 
   return {
-    resolvedTopicId: `${finalSubId}-${finalNum}`,
+    resolvedTopicId: matchedFallback ? matchedFallback.id : `${finalSubId}-${finalNum}`,
     resolvedSubjectId: finalSubId,
     resolvedTopicNumber: finalNum,
-    resolvedTopicTitle: titleText ? `Tema ${finalNum} - ${titleText}` : `Tema ${finalNum}`,
+    resolvedTopicTitle: `Tema ${finalNum} - ${officialTitle}`,
     modality: normalizeModality((item as any).modalidad || (item as any).modality || (item as any).type),
     effectiveHours: Math.round((effectiveMins / 60) * 100) / 100,
     effectiveMinutes: effectiveMins,

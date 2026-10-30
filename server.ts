@@ -249,62 +249,118 @@ Return a JSON array of these objects. ONLY valid JSON.`;
     res.json({ status: "ok", acknowledged: updatedCount });
   });
 
-  // Webhook test endpoint for AeroFocus Pro
-  app.post("/api/webhook/test", async (req, res) => {
-    try {
-      if (!req.body?.simulateSession) {
-        return res.json({
-          status: "ok",
-          success: true,
-          message: "Enlace operativo AeroFocus Pro <-> WellsPrep",
-          ready: true
-        });
-      }
-      const { resolveAeroFocusTopic } = await import("./src/lib/topicResolver");
-      const sampleTopic = req.body?.topic || {
-        topicId: "jud-const-01",
-        topicNumber: 1,
-        topicTitle: "Derecho Constitucional - Tema 1: La Constitución Española de 1978",
-        category: "Derecho Constitucional",
-        modality: "repaso",
-        effectiveHours: 1.5,
-        effectiveMinutes: 90,
-        grossMinutes: 90
-      };
+  // Delete a specific topic from a quarantined flight
+  app.post("/api/webhook/delete-topic", (req, res) => {
+    const { eventId, topicIndex } = req.body || {};
+    if (!eventId || topicIndex === undefined) return res.status(400).json({ error: "Faltan parámetros" });
+    const events = loadWebhookEvents();
+    const target = events.find((e: any) => e.id === eventId);
+    if (!target) return res.status(404).json({ error: "Evento no encontrado" });
 
-      const resolved = resolveAeroFocusTopic(sampleTopic);
-      const testRecord = {
-        id: `af_test_${Date.now()}`,
-        receivedAt: new Date().toISOString(),
-        date: new Date().toISOString().split("T")[0],
-        source: "aerofocus_pro",
-        flightId: String(Date.now()),
-        totalFlightEffectiveMinutes: sampleTopic.effectiveMinutes || 90,
-        totalFlightEffectiveHours: sampleTopic.effectiveHours || 1.5,
-        status: "quarantined",
-        topics: resolved ? [resolved] : [],
-        summary: {
-          estudioHours: 0,
-          repasoHours: 1.5,
-          refrescoHours: 0,
-          totalHours: 1.5
-        }
-      };
-
-      const events = loadWebhookEvents();
-      events.push(testRecord);
-      saveWebhookEvents(events);
-      broadcastWebhookEvent(testRecord);
-
-      res.json({
-        status: "ok",
-        synced: true,
-        testRecord,
-        resolvedTopic: resolved
-      });
-    } catch (e: any) {
-      res.status(500).json({ error: e.message });
+    const newTopics = (target.topics || []).filter((_: any, idx: number) => idx !== topicIndex);
+    if (newTopics.length === 0) {
+      const filtered = events.filter((e: any) => e.id !== eventId);
+      saveWebhookEvents(filtered);
+      broadcastWebhookEvent({ type: "quarantine_updated", eventId, action: "flight_discarded" });
+      return res.json({ status: "ok", message: "Vuelo descartado al retirar su único tema" });
     }
+
+    const totalMinutes = newTopics.reduce((acc: number, t: any) => acc + (t.effectiveMinutes || 0), 0);
+    const totalHours = Math.round((totalMinutes / 60) * 100) / 100;
+    const updated = events.map((e: any) => {
+      if (e.id === eventId) {
+        return {
+          ...e,
+          topics: newTopics,
+          totalFlightEffectiveMinutes: totalMinutes,
+          totalFlightEffectiveHours: totalHours,
+          dailyTotalEffectiveMinutes: totalMinutes,
+          dailyTotalEffectiveHours: totalHours
+        };
+      }
+      return e;
+    });
+
+    saveWebhookEvents(updated);
+    broadcastWebhookEvent({ type: "quarantine_updated", eventId });
+    return res.json({ status: "ok", remainingTopics: newTopics.length });
+  });
+
+  // Add a topic to a quarantined flight
+  app.post("/api/webhook/add-topic", (req, res) => {
+    const { eventId, topic } = req.body || {};
+    if (!eventId) return res.status(400).json({ error: "Falta eventId" });
+    const events = loadWebhookEvents();
+    const target = events.find((e: any) => e.id === eventId);
+    if (!target) return res.status(404).json({ error: "Evento no encontrado" });
+
+    const newTopic = topic || {
+      resolvedTopicId: "constitucional-1",
+      resolvedSubjectId: "constitucional",
+      resolvedTopicNumber: 1,
+      resolvedTopicTitle: "Tema 1: La Constitución Española de 1978",
+      effectiveMinutes: 45,
+      effectiveHours: 0.75,
+      modality: "repaso",
+      completesVuelta: true,
+      difficulty: 5,
+      dificultadReal: 5,
+      notes: "Añadido manualmente al vuelo"
+    };
+
+    const newTopics = [...(target.topics || []), newTopic];
+    const totalMinutes = newTopics.reduce((acc: number, t: any) => acc + (t.effectiveMinutes || 0), 0);
+    const totalHours = Math.round((totalMinutes / 60) * 100) / 100;
+    const updated = events.map((e: any) => {
+      if (e.id === eventId) {
+        return {
+          ...e,
+          topics: newTopics,
+          totalFlightEffectiveMinutes: totalMinutes,
+          totalFlightEffectiveHours: totalHours,
+          dailyTotalEffectiveMinutes: totalMinutes,
+          dailyTotalEffectiveHours: totalHours
+        };
+      }
+      return e;
+    });
+
+    saveWebhookEvents(updated);
+    broadcastWebhookEvent({ type: "quarantine_updated", eventId });
+    return res.json({ status: "ok", topicsCount: newTopics.length });
+  });
+
+  // Clean test / demo flights from server
+  app.post("/api/webhook/clean-tests", (req, res) => {
+    const events = loadWebhookEvents();
+    const filtered = events.filter((e: any) => {
+      const idStr = String(e.id || "").toLowerCase();
+      const flightStr = String(e.flightId || "").toLowerCase();
+      return (
+        !e.isTest &&
+        !e.isSample &&
+        !e.isDemo &&
+        !idStr.includes("test") &&
+        !idStr.includes("curl") &&
+        !idStr.includes("sample") &&
+        !flightStr.includes("test") &&
+        !flightStr.includes("sample")
+      );
+    });
+    saveWebhookEvents(filtered);
+    broadcastWebhookEvent({ type: "quarantine_updated" });
+    return res.json({ status: "ok", removed: events.length - filtered.length, remaining: filtered.length });
+  });
+
+  // Webhook test endpoint for AeroFocus Pro (Strict ping without modifying events)
+  app.post("/api/webhook/test", async (req, res) => {
+    return res.json({
+      status: "ok",
+      success: true,
+      message: "Enlace operativo AeroFocus Pro <-> WellsPrep",
+      schemaSupported: "2.2.0",
+      ready: true
+    });
   });
 
   // Clear/Purge webhook events (Quarantine cleanup)
