@@ -518,15 +518,28 @@ export function DashboardView({
       const dateObj = new Date(c.date);
       const fechaStr = dateObj.toLocaleDateString("es-ES", { day: "2-digit", month: "short" });
       const totalSecs = c.durationMinutes * 60 + c.durationSeconds;
-      const durDec = totalSecs / 60;
-      const isOptimal = totalSecs >= 660 && totalSecs <= 820;
+      const durDec = totalSecs > 0 ? Number((totalSecs / 60).toFixed(2)) : 0;
+      const isOptimal = totalSecs >= 660 && totalSecs <= 820; // 11:00 to 13:40 min
       const isExcess = totalSecs > 820;
       const isShort = totalSecs < 660 && totalSecs > 0;
+      const isApproved = (c.grade || 0) >= 5;
 
       let barColor = "#6366f1";
       if (isOptimal) barColor = "#10b981";
       else if (isExcess) barColor = "#f43f5e";
       else if (isShort) barColor = "#f59e0b";
+
+      // Quadrant classification
+      let status: "zona_tribunal" | "riesgo_tiempo" | "riesgo_materia" | "critico" = "zona_tribunal";
+      if (isOptimal && isApproved) {
+        status = "zona_tribunal";
+      } else if (!isOptimal && isApproved) {
+        status = "riesgo_tiempo";
+      } else if (isOptimal && !isApproved) {
+        status = "riesgo_materia";
+      } else {
+        status = "critico";
+      }
 
       return {
         id: c.id,
@@ -534,14 +547,28 @@ export function DashboardView({
         cantoNum: idx + 1,
         displayX: `T.${c.topicNumber}`,
         fecha: fechaStr,
-        duracion: Math.round(durDec * 10) / 10,
-        duracionStr: `${c.durationMinutes}m ${c.durationSeconds ? c.durationSeconds + "s" : ""}`.trim(),
+        date: c.date,
+        totalSecs,
+        deviationSecs: totalSecs - 750, // 750s = 12m 30s
+        duracion: durDec,
+        duracionMinDec: durDec,
+        duracionMin: c.durationMinutes,
+        duracionSec: c.durationSeconds,
+        duracionStr: `${c.durationMinutes}m ${c.durationSeconds ? c.durationSeconds + "s" : "00s"}`.trim(),
         nota: c.grade,
+        topicId: c.topicId,
         topicNumber: c.topicNumber,
         topicTitle: c.topicTitle,
+        topicSubject: c.topicSubject || "",
         barColor,
+        isOptimal,
+        isExcess,
+        isShort,
+        isApproved,
+        status,
         mistakes: c.mistakes,
         notes: c.notes,
+        difficulty: c.difficulty || 5,
       };
     });
   }, [filteredCantos]);
@@ -830,6 +857,7 @@ export function DashboardView({
               estadoDeForma={estadoDeForma}
               onManageCantos={() => setIsManagingCantos(true)}
               onLogCanto={() => setIsLoggingCanto(true)}
+              onSelectTopic={onSelectTopic}
             />
           )}
         </div>
