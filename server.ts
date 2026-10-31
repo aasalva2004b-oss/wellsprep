@@ -180,7 +180,9 @@ Return a JSON array of these objects. ONLY valid JSON.`;
     const limit = parseInt((req.query.limit as string) || "50", 10);
 
     let filtered = events;
-    if (statusFilter) {
+    if (statusFilter === "pending" || statusFilter === "quarantined" || statusFilter === "unprocessed") {
+      filtered = filtered.filter((e: any) => e.status === "quarantined" || e.status === "pending");
+    } else if (statusFilter) {
       filtered = filtered.filter((e: any) => e.status === statusFilter);
     }
 

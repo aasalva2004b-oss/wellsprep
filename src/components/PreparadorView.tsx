@@ -492,7 +492,7 @@ export function PreparadorView() {
       </div>
 
       {/* MAIN SCROLLABLE CONTENT AREA (Silky-smooth touch scroll enabled) */}
-      <div className="flex-1 min-h-0 overflow-y-auto overscroll-y-contain touch-pan-y -webkit-overflow-scrolling-touch p-3 sm:p-6 md:p-8 pb-32 sm:pb-36 max-w-[100rem] mx-auto w-full">
+      <div className="flex-1 min-h-0 overflow-y-auto overscroll-y-contain touch-pan-y -webkit-overflow-scrolling-touch p-3 sm:p-6 md:p-8 pb-44 sm:pb-36 max-w-[100rem] mx-auto w-full">
         {/* Status banner and Overview Benchmark Cards inside scrollable body */}
         {activeDay !== "historial" && (
           <div className="space-y-2 sm:space-y-3 mb-4 sm:mb-5">

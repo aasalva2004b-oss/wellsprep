@@ -235,7 +235,10 @@ export default function App() {
                 transition={{ duration: 0.2, ease: [0.23, 1, 0.32, 1] }}
                 className="w-full h-full absolute inset-0"
               >
-                <DashboardView />
+                <DashboardView 
+                  onNavigateTab={setActiveTab}
+                  onSelectTopic={handleSelectTopicFromPalette}
+                />
               </motion.div>
             )}
             {activeTab === "temario" && (

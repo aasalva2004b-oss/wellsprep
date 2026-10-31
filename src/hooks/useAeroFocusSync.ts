@@ -154,19 +154,47 @@ export function useAeroFocusSync(onNewSession?: (session: any) => void) {
 
     connectSSE();
 
-    // 3. Heartbeat de conectividad (comprueba estado sin reinyectar sesiones históricas)
+    // 3. Heartbeat de conectividad y sondeo activo de vuelos pendientes (Failover de ultra-resiliencia)
     const checkServer = async () => {
       if (!isMounted) return;
       try {
-        const res = await fetch('/api/webhook/ping');
+        const res = await fetch('/api/webhook/events?status=pending&limit=10');
         if (res.ok) {
+          const data = await res.json();
           setSyncState(prev => ({ ...prev, isConnected: true }));
+          const pendingEvents = data.events || [];
+          if (Array.isArray(pendingEvents)) {
+            for (const ev of pendingEvents) {
+              const fId = String(ev.flightId || ev.transactionId || ev.id || '');
+              if (fId && !processedIdsRef.current.has(fId)) {
+                handleIncomingPayload(ev);
+              }
+            }
+          }
+        } else {
+          // Fallback a ping básico
+          const pingRes = await fetch('/api/webhook/ping');
+          if (pingRes.ok) {
+            setSyncState(prev => ({ ...prev, isConnected: true }));
+          }
         }
-      } catch {}
+      } catch {
+        // Red no disponible temporalmente
+      }
     };
 
-    const initialTimer = setTimeout(checkServer, 2000);
-    pollInterval = setInterval(checkServer, 15000);
+    const initialTimer = setTimeout(checkServer, 1500);
+    pollInterval = setInterval(checkServer, 4000);
+
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        checkServer();
+      }
+    };
+    if (typeof window !== 'undefined') {
+      document.addEventListener('visibilitychange', handleVisibility);
+      window.addEventListener('focus', checkServer);
+    }
 
     return () => {
       isMounted = false;
@@ -177,6 +205,8 @@ export function useAeroFocusSync(onNewSession?: (session: any) => void) {
       if (aeroChannel) aeroChannel.close();
       if (typeof window !== 'undefined') {
         window.removeEventListener('message', handleWindowMessage);
+        document.removeEventListener('visibilitychange', handleVisibility);
+        window.removeEventListener('focus', checkServer);
       }
       if (sse) sse.close();
     };

@@ -1940,34 +1940,36 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
     if (!rec) return true;
     const idStr = String(rec.id || "").toLowerCase();
     const flightStr = String(rec.flightId || "").toLowerCase();
-    const sourceStr = String(rec.source || "").toLowerCase();
     const eventStr = String(rec.rawPayload?.event || rec.event || "").toLowerCase();
     const titleStr = Array.isArray(rec.topics)
       ? rec.topics.map((t: any) => String(t.resolvedTopicTitle || t.topicTitle || "")).join(" ").toLowerCase()
       : "";
-    return (
-      idStr === "test_curl_1" ||
-      idStr.startsWith("test_") ||
-      idStr.includes("test") ||
-      idStr.includes("curl") ||
-      idStr.includes("sample") ||
-      flightStr.startsWith("test_") ||
-      flightStr.includes("test") ||
-      flightStr.includes("sample") ||
-      flightStr.includes("demo") ||
-      sourceStr.includes("curl") ||
-      rec.isTest === true ||
-      rec.isSample === true ||
-      rec.isDemo === true ||
-      rec.rawPayload?.isTest === true ||
-      rec.rawPayload?.isSample === true ||
-      rec.rawPayload?.isDemo === true ||
-      eventStr.includes("test") ||
-      eventStr.includes("ping") ||
-      titleStr.includes("(prueba)") ||
-      titleStr.includes("[test]") ||
-      titleStr.includes("ejemplo del prompt")
-    );
+
+    // Pings diagnósticos de conectividad puros
+    if (
+      rec.isDiagnosticPing === true ||
+      rec.isTestPing === true ||
+      rec.rawPayload?.isDiagnosticPing === true ||
+      rec.rawPayload?.isTestPing === true ||
+      eventStr === "test_connection" ||
+      eventStr === "ping" ||
+      eventStr === "test_ping"
+    ) {
+      return true;
+    }
+
+    // Registros explícitamente marcados de test sin minutos reales
+    const mins = Number(rec.totalFlightEffectiveMinutes || rec.dailyTotalEffectiveMinutes || rec.minutosEfectivos || 0);
+    if ((rec.isTest === true || rec.rawPayload?.isTest === true) && mins === 0 && (!rec.topics || rec.topics.length === 0)) {
+      return true;
+    }
+
+    // Artefactos de desarrollo conocidos
+    if (idStr === "test_curl_1" || flightStr === "flight_test_aero_99" || titleStr.includes("ejemplo del prompt")) {
+      return true;
+    }
+
+    return false;
   }, []);
 
   // Carga reactiva de eventos retenidos en cuarentena (Híbrida: Servidor + Firestore multi-dispositivo)
@@ -2026,6 +2028,60 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
       setIsLoadingQuarantine(false);
     }
   }, [user]);
+
+  // Sincronización automática de alta frecuencia y escucha reactiva de la Bandeja de Cuarentena
+  useEffect(() => {
+    if (!user) return;
+
+    fetchQuarantinedEvents();
+
+    // 1. Polling adaptativo cada 4 segundos sobre /api/webhook/events
+    const pollTimer = setInterval(() => {
+      fetchQuarantinedEvents();
+    }, 4000);
+
+    // 2. Listener en tiempo real de Firestore para sincronización multi-dispositivo y multi-pestaña
+    const qCol = collection(db, `users/${user.uid}/quarantine`);
+    const unsubscribeQuarantine = onSnapshot(
+      qCol,
+      (snap) => {
+        const firestoreEvents: WebhookSyncRecord[] = [];
+        snap.forEach((docSnap) => {
+          const rec = { id: docSnap.id, ...docSnap.data() } as WebhookSyncRecord;
+          if (!isTestArtifact(rec) && (rec.status === "quarantined" || rec.status === "pending")) {
+            firestoreEvents.push(rec);
+          }
+        });
+        setQuarantinedEvents((prev) => {
+          const map = new Map<string, WebhookSyncRecord>();
+          prev.forEach((e) => map.set(e.id, e));
+          firestoreEvents.forEach((e) => map.set(e.id, e));
+          return Array.from(map.values()).filter(
+            (e: any) => e.status === "quarantined" || e.status === "pending"
+          );
+        });
+      },
+      (err) => {
+        console.warn("Aviso en listener de cuarentena:", err);
+      }
+    );
+
+    // 3. Forzar sincronización inmediata al volver a la pestaña o ventana
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible") {
+        fetchQuarantinedEvents();
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibility);
+    window.addEventListener("focus", fetchQuarantinedEvents);
+
+    return () => {
+      clearInterval(pollTimer);
+      unsubscribeQuarantine();
+      document.removeEventListener("visibilitychange", handleVisibility);
+      window.removeEventListener("focus", fetchQuarantinedEvents);
+    };
+  }, [user, fetchQuarantinedEvents, isTestArtifact]);
 
   // Importación e inserción manual de transmisiones de AeroFocus a la Bandeja de Cuarentena
   const addQuarantineEventManually = useCallback(async (rawInput: any): Promise<boolean> => {
@@ -2138,15 +2194,22 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
           });
         } else {
           const rawTitleStr = t.topicTitle || t.tema || t.topic || t.title || "";
-          const subId = normalizeCategoryToSubjectId(materia) || normalizeCategoryToSubjectId(rawTitleStr) || "constitucional";
-          const num = extractTopicNumber(t.topicNumber) || extractTopicNumber(t.temaNumero) || extractTopicNumber(rawTitleStr) || extractTopicNumber(t.id) || 1;
-          const matchedOfficial = initialTopics.find(it => it.subjectId === subId && it.number === num);
+          const subId = normalizeCategoryToSubjectId(materia) || normalizeCategoryToSubjectId(rawTitleStr);
+          const parsedNum = extractTopicNumber(t.topicNumber) || extractTopicNumber(t.temaNumero) || extractTopicNumber(rawTitleStr) || extractTopicNumber(t.id);
+          const matchedOfficial = parsedNum && subId ? initialTopics.find(it => it.subjectId === subId && it.number === parsedNum) : undefined;
+
+          const finalSubId = matchedOfficial ? matchedOfficial.subjectId : (subId || (parsedNum ? 'constitucional' : 'otros'));
+          const finalNum = matchedOfficial ? matchedOfficial.number : (parsedNum && parsedNum > 0 ? parsedNum : undefined);
+          const finalTopicId = matchedOfficial ? matchedOfficial.id : (finalNum ? `${finalSubId}-${finalNum}` : `pendiente_${Date.now()}`);
+          const finalTitle = matchedOfficial
+            ? `Tema ${matchedOfficial.number} - ${matchedOfficial.title}`
+            : (rawTitleStr || (finalNum ? `Tema ${finalNum} (${finalSubId})` : 'Sesión pendiente de clasificar'));
 
           const fallbackTopic: WebhookResolvedTopic = {
-            resolvedTopicId: matchedOfficial ? matchedOfficial.id : `${subId}-${num}`,
-            resolvedSubjectId: matchedOfficial ? matchedOfficial.subjectId : subId,
-            resolvedTopicNumber: matchedOfficial ? matchedOfficial.number : num,
-            resolvedTopicTitle: matchedOfficial ? `Tema ${matchedOfficial.number} - ${matchedOfficial.title}` : (rawTitleStr || `Tema ${num}`),
+            resolvedTopicId: finalTopicId,
+            resolvedSubjectId: finalSubId,
+            resolvedTopicNumber: finalNum,
+            resolvedTopicTitle: finalTitle,
             effectiveMinutes: minutos,
             effectiveHours: horas,
             modality: (modalidad as any) || "repaso",

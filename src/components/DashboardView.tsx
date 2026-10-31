@@ -29,8 +29,15 @@ import { DashboardQuickCantoModal } from "./dashboard/DashboardQuickCantoModal";
 import { DashboardActivityRingsCard } from "./dashboard/DashboardActivityRingsCard";
 import { DashboardWeeklyConsistencyCard } from "./dashboard/DashboardWeeklyConsistencyCard";
 import { DashboardTodayRecommender } from "./dashboard/DashboardTodayRecommender";
+import { DashboardPreparadorExecutiveCard } from "./dashboard/DashboardPreparadorExecutiveCard";
 
-export function DashboardView({ onSelectTopic }: { onSelectTopic?: (topicId: string) => void }) {
+export function DashboardView({ 
+  onSelectTopic,
+  onNavigateTab 
+}: { 
+  onSelectTopic?: (topicId: string) => void;
+  onNavigateTab?: (tab: "dashboard" | "temario" | "preparador") => void;
+}) {
   const { userProgress, recentSessions, deleteStudySession, addStudySession } = useFirebase();
 
   // Section switcher: 'hoy' | 'temas' | 'cantos' | 'general' | 'todo'
@@ -761,7 +768,14 @@ export function DashboardView({ onSelectTopic }: { onSelectTopic?: (topicId: str
                 <DashboardWeeklyConsistencyCard weeklyData={weeklyConsistency} />
               </div>
 
-              {/* Row 2: Today's Smart Study Queue (Full width) */}
+              {/* Row 2: Executive Preparador Cante Card */}
+              <div className="md:col-span-2 xl:col-span-3">
+                <DashboardPreparadorExecutiveCard
+                  onNavigateToPreparador={() => onNavigateTab?.("preparador")}
+                />
+              </div>
+
+              {/* Row 3: Today's Smart Study Queue (Full width) */}
               <div className="md:col-span-2 xl:col-span-3">
                 <DashboardTodayRecommender
                   tasks={todayStudyQueue.tasks}

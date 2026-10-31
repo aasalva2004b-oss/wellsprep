@@ -11,7 +11,7 @@ import {
   WellsprepTaskDetailV2,
   AeroFocusWebhookResponseV2
 } from './webhookTypes';
-import { resolveAeroFocusTopic, extractMinutesFromAeroItem } from './topicResolver';
+import { resolveAeroFocusTopic, extractMinutesFromAeroItem, normalizeCategoryToSubjectId, extractTopicNumber } from './topicResolver';
 
 export const EXPECTED_WEBHOOK_TOKEN = 'wp_qLXi6WFkFY_live';
 
@@ -217,27 +217,18 @@ export function processIncomingAeroFocusPayload(
     } catch {}
   }
 
-  // 2. Filtro estricto de Pings y Vuelos de Prueba / Demo (NO alterar DB ni estadísticas)
-  const isTestPing =
-    payload.isTest === true ||
+  // 2. Filtro estricto de Pings de Diagnóstico (NO alterar DB ni estadísticas para pings de comprobación)
+  const isDiagnosticPing =
     payload.isDiagnosticPing === true ||
-    payload.isSample === true ||
-    payload.isDemo === true ||
-    payload.isExample === true ||
+    payload.isTestPing === true ||
     headers['x-test-ping'] === 'true' ||
     headers['X-Test-Ping'] === 'true' ||
     payload.event === 'test_connection' ||
     payload.event === 'ping' ||
     payload.event === 'test_ping' ||
-    payload.event === 'test_session' ||
-    String(payload.flightId || '').toLowerCase().includes('test') ||
-    String(payload.flightId || '').toLowerCase().includes('sample') ||
-    String(payload.flightId || '').toLowerCase().includes('demo') ||
-    String(payload.id || '').toLowerCase().includes('test_curl') ||
-    String(payload.topicTitle || '').toLowerCase().includes('(prueba)') ||
-    String(payload.notes || '').toLowerCase().includes('prueba de enlace');
+    (payload.isTest === true && !payload.dailyTotalEffectiveMinutes && !payload.minutosEfectivos && !payload.totalEffectiveStudyMinutes);
 
-  if (isTestPing) {
+  if (isDiagnosticPing) {
     return {
       statusCode: 200,
       responseData: {
@@ -339,13 +330,22 @@ export function processIncomingAeroFocusPayload(
         tasksBreakdown: t.tasksBreakdown || resolved.tasksBreakdown,
       });
     } else {
-      const num = Number(t.temaNumero ?? t.topicNumber ?? 1);
+      const rawTitle = t.topicTitle || t.tema || t.topic || t.title || '';
+      const materia = t.materia || t.subject || t.category || '';
+      const subId = normalizeCategoryToSubjectId(materia) || normalizeCategoryToSubjectId(rawTitle);
+      const parsedNum = extractTopicNumber(t.temaNumero) || extractTopicNumber(t.topicNumber) || extractTopicNumber(rawTitle) || extractTopicNumber(t.id);
+      
+      const num = parsedNum && parsedNum > 0 ? parsedNum : undefined;
+      const targetSub = subId || (num ? 'constitucional' : 'otros');
+      const topicId = num ? `${targetSub}-${num}` : (rawTitle ? `pendiente_${Date.now()}` : 'pendiente_clasificacion');
+      const topicTitle = rawTitle || (num ? `Tema ${num} (${targetSub})` : 'Sesión pendiente de clasificar');
+
       resolvedTopics.push({
-        resolvedTopicId: `constitucional-${num}`,
-        resolvedSubjectId: 'constitucional',
+        resolvedTopicId: topicId,
+        resolvedSubjectId: targetSub,
         resolvedTopicNumber: num,
-        resolvedTopicTitle: t.topicTitle || t.tema || `Tema ${num}`,
-        modality: 'repaso',
+        resolvedTopicTitle: topicTitle,
+        modality: (t.modalidad || t.modality || t.type || 'repaso') as any,
         effectiveMinutes: mins,
         effectiveHours: hrs,
         plsema: t.plsema,

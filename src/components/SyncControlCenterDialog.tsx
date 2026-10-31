@@ -1014,9 +1014,8 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
 
                                     <button
                                       onClick={() => {
-                                        if (confirm(`¿Eliminar solo el Tema ${info.number} (${info.title}) de este vuelo?`)) {
-                                          deleteQuarantineTopic(evt.id, idx);
-                                        }
+                                        deleteQuarantineTopic(evt.id, idx);
+                                        toast.info(`Tema retirado del vuelo.`);
                                       }}
                                       className="p-1 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 border border-slate-200 hover:border-rose-200 transition-colors"
                                       title="Eliminar solo este tema del vuelo"
