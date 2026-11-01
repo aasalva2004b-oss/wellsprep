@@ -66,21 +66,33 @@ export function TopicsEvolutionSection({
   const [activeMetricTab, setActiveMetricTab] = useState<"metodo_preparador" | "aceleracion" | "materias" | "tendencia">("metodo_preparador");
   const [inspectingTopicId, setInspectingTopicId] = useState<string | null>(null);
 
+  // Pre-indexed sessions map for instant O(1) topic session lookups
+  const sessionsByTopic = useMemo(() => {
+    const map = new Map<string, any[]>();
+    (rawSessions || []).forEach((s) => {
+      if (s.type === "canto" || s.type === "simulacro" || !s.topicId) return;
+      const list = map.get(s.topicId);
+      if (!list) map.set(s.topicId, [s]);
+      else list.push(s);
+    });
+    map.forEach((list) => {
+      list.sort((a, b) => {
+        const dateCmp = (a.date || "").localeCompare(b.date || "");
+        if (dateCmp !== 0) return dateCmp;
+        const timeA = a.createdAt?.toMillis ? a.createdAt.toMillis() : (a.createdAt || 0);
+        const timeB = b.createdAt?.toMillis ? b.createdAt.toMillis() : (b.createdAt || 0);
+        return timeA - timeB;
+      });
+    });
+    return map;
+  }, [rawSessions]);
+
   // Normalización y cálculo de telemetría por cada tema
   const analyzedTopics = useMemo(() => {
     return topics.map((topic) => {
       const prog = userProgress[topic.id];
-      // Sesiones de estudio (excluyendo cantos y simulacros orales)
-      const studySessions = (rawSessions || [])
-        .filter((s) => s.topicId === topic.id && s.type !== "canto" && s.type !== "simulacro")
-        .sort((a, b) => {
-          const dateCmp = (a.date || "").localeCompare(b.date || "");
-          if (dateCmp !== 0) return dateCmp;
-          const timeA = a.createdAt?.toMillis ? a.createdAt.toMillis() : (a.createdAt || 0);
-          const timeB = b.createdAt?.toMillis ? b.createdAt.toMillis() : (b.createdAt || 0);
-          return timeA - timeB;
-        });
-
+      // Sesiones de estudio pre-ordenadas O(1)
+      const studySessions = sessionsByTopic.get(topic.id) || [];
       const hasStudied = !!(prog?.firstStudyDate || studySessions.length > 0);
 
       // Primera sesión de estudio
@@ -181,7 +193,7 @@ export function TopicsEvolutionSection({
         cycleInfo,
       };
     });
-  }, [topics, userProgress, rawSessions]);
+  }, [topics, userProgress, sessionsByTopic]);
 
   // Temas estudiados filtrados
   const studiedTopics = useMemo(() => {
@@ -222,9 +234,7 @@ export function TopicsEvolutionSection({
 
     // Desglose de los 3 refrescos por orden en el historial de cada tema
     analyzedTopics.forEach((t) => {
-      const topicRefrescos = (rawSessions || [])
-        .filter((s) => s.topicId === t.id && s.type === 'refresco')
-        .sort((a, b) => (a.date || "").localeCompare(b.date || ""));
+      const topicRefrescos = t.sessions.filter((s) => s.type === 'refresco');
 
       if (topicRefrescos[0]) refresco1Times.push(topicRefrescos[0].durationMinutes || topicRefrescos[0].duration || 0);
       if (topicRefrescos[1]) refresco2Times.push(topicRefrescos[1].durationMinutes || topicRefrescos[1].duration || 0);

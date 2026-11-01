@@ -460,20 +460,26 @@ export function processIncomingAeroFocusPayload(
       : 0)
   );
 
-  const responseData: AeroFocusWebhookResponseV2 = {
+  const responseData: AeroFocusWebhookResponseV2 & Record<string, any> = {
     ok: true,
     success: true,
+    synced: true,
+    status: 'ok',
+    quarantined: false,
+    isQuarantined: false,
     schemaVersion: '2.2.0',
     receivedEvent: eventName,
     transactionId: transactionId,
+    flightId: flightId,
     date: sessionDate,
     reconciledFlightsCount: Array.isArray(payload.flightIdsIncluded) ? payload.flightIdsIncluded.length : 1,
     effectiveMinutesAssigned: calculatedEffectiveMinutes,
+    effectiveHoursAssigned: calculatedEffectiveHours,
     pagesAssigned: pageBreakdown.length || Number(payload.totalPagesWorked || 0),
     avgMinutesPerPage: avgPace,
     plsemaAssigned: Boolean(plsemaRoot || resolvedTopics.some(t => Boolean(t.plsema))),
     globalAnalyticsUpdated: Boolean(analyticsSnapshot),
-    message: payload.message || `Reconciliadas ${calculatedEffectiveHours}h netas con paridad matemática en WellsPrep`
+    message: payload.message || `Aterrizaje sincronizado con éxito. ${calculatedEffectiveHours}h netas incorporadas en WellsPrep`
   };
 
   return {

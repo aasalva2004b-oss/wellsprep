@@ -32,16 +32,12 @@ export function useAeroFocusSync(onNewSession?: (session: any) => void) {
     const raw = payload.payload || payload;
     const flightId = String(raw.flightId || raw.transactionId || raw.id || '');
 
+    // Throttle duplicate payloads by flightId within a 15-second window only
     if (flightId) {
-      if (processedIdsRef.current.has(flightId)) {
-        return;
-      }
-      processedIdsRef.current.add(flightId);
-
-      // Descartar si ya fue procesado en esta sesión
       try {
         const key = `wp_af_processed_${flightId}`;
-        if (sessionStorage.getItem(key)) {
+        const prev = sessionStorage.getItem(key);
+        if (prev && Date.now() - Number(prev) < 15000) {
           return;
         }
         sessionStorage.setItem(key, String(Date.now()));
@@ -65,13 +61,42 @@ export function useAeroFocusSync(onNewSession?: (session: any) => void) {
     let reconnectTimeout: any = null;
     let isMounted = true;
 
+    const emitAckToAeroFocus = (flightId?: string) => {
+      const ackPayload = {
+        type: 'AEROFOCUS_SYNC_CONFIRMED',
+        status: 'ok',
+        synced: true,
+        quarantined: false,
+        isQuarantined: false,
+        flightId: flightId || 'live',
+        timestamp: new Date().toISOString(),
+        message: 'Aterrizaje sincronizado e integrado con éxito en WellsPrep'
+      };
+      try {
+        channel?.postMessage(ackPayload);
+        channel?.postMessage({ ...ackPayload, type: 'WELLSPREP_SYNC_ACK' });
+        channel?.postMessage({ ...ackPayload, type: 'WELLSPREP_TOUCHDOWN_ACK' });
+        aeroChannel?.postMessage(ackPayload);
+        aeroChannel?.postMessage({ ...ackPayload, type: 'WELLSPREP_SYNC_ACK' });
+        if (typeof window !== 'undefined') {
+          window.postMessage(ackPayload, '*');
+          window.postMessage({ ...ackPayload, type: 'WELLSPREP_SYNC_ACK' }, '*');
+        }
+      } catch {}
+    };
+
     // 1. Canales entre pestañas (BroadcastChannel) y window.postMessage
     try {
       if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
         channel = new BroadcastChannel('wellsprep_sync_bus');
         channel.onmessage = (event) => {
-          if (event.data?.type === 'AEROFOCUS_TOUCHDOWN_SYNC') {
-            handleIncomingPayload(event.data.payload);
+          if (
+            event.data?.type === 'AEROFOCUS_TOUCHDOWN_SYNC' ||
+            event.data?.type === 'AEROFOCUS_WELLSPREP_SYNC'
+          ) {
+            const raw = event.data?.payload || event.data;
+            handleIncomingPayload(raw);
+            emitAckToAeroFocus(raw?.flightId || raw?.id);
           }
         };
 
@@ -82,7 +107,9 @@ export function useAeroFocusSync(onNewSession?: (session: any) => void) {
             event.data?.type === 'AEROFOCUS_WELLSPREP_DAILY_SYNC' ||
             event.data?.type === 'AEROFOCUS_TOUCHDOWN_SYNC'
           ) {
-            handleIncomingPayload(event.data.payload || event.data);
+            const raw = event.data.payload || event.data;
+            handleIncomingPayload(raw);
+            emitAckToAeroFocus(raw?.flightId || raw?.id);
           }
         };
       }
@@ -91,9 +118,12 @@ export function useAeroFocusSync(onNewSession?: (session: any) => void) {
     const handleWindowMessage = (event: MessageEvent) => {
       if (
         event.data?.type === 'AEROFOCUS_WELLSPREP_SYNC' ||
-        event.data?.type === 'AEROFOCUS_WELLSPREP_DAILY_SYNC'
+        event.data?.type === 'AEROFOCUS_WELLSPREP_DAILY_SYNC' ||
+        event.data?.type === 'AEROFOCUS_TOUCHDOWN_SYNC'
       ) {
-        handleIncomingPayload(event.data.payload || event.data);
+        const raw = event.data.payload || event.data;
+        handleIncomingPayload(raw);
+        emitAckToAeroFocus(raw?.flightId || raw?.id);
       }
     };
     if (typeof window !== 'undefined') {
@@ -141,22 +171,22 @@ export function useAeroFocusSync(onNewSession?: (session: any) => void) {
           }
           setSyncState(prev => ({
             ...prev,
-            isConnected: true,
+            isConnected: false,
             connectionMode: 'polling',
           }));
-          // Intentar reconectar SSE tras 5 segundos
+          // Reintento exponencial suave tras 5 segundos
           reconnectTimeout = setTimeout(connectSSE, 5000);
         };
       } catch {
-        setSyncState(prev => ({ ...prev, isConnected: true, connectionMode: 'polling' }));
+        setSyncState(prev => ({ ...prev, isConnected: false, connectionMode: 'polling' }));
       }
     };
 
     connectSSE();
 
-    // 3. Heartbeat de conectividad y sondeo activo de vuelos pendientes (Failover de ultra-resiliencia)
+    // 3. Heartbeat de conectividad y sondeo adaptativo (latencia cero sin sobrecargar la red)
     const checkServer = async () => {
-      if (!isMounted) return;
+      if (!isMounted || (typeof document !== 'undefined' && document.visibilityState === 'hidden')) return;
       try {
         const res = await fetch('/api/webhook/events?status=pending&limit=10');
         if (res.ok) {
@@ -171,20 +201,15 @@ export function useAeroFocusSync(onNewSession?: (session: any) => void) {
               }
             }
           }
-        } else {
-          // Fallback a ping básico
-          const pingRes = await fetch('/api/webhook/ping');
-          if (pingRes.ok) {
-            setSyncState(prev => ({ ...prev, isConnected: true }));
-          }
         }
       } catch {
         // Red no disponible temporalmente
       }
     };
 
-    const initialTimer = setTimeout(checkServer, 1500);
-    pollInterval = setInterval(checkServer, 4000);
+    const initialTimer = setTimeout(checkServer, 1000);
+    // Polling adaptativo cada 8s como salvaguarda
+    pollInterval = setInterval(checkServer, 8000);
 
     const handleVisibility = () => {
       if (document.visibilityState === 'visible') {

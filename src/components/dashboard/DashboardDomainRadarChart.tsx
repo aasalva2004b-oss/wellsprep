@@ -17,7 +17,9 @@ interface DashboardDomainRadarChartProps {
 export const DashboardDomainRadarChart: React.FC<DashboardDomainRadarChartProps> = ({
   radarData,
 }) => {
-  const hasData = radarData.length > 0 && radarData.some((d) => parseFloat(String(d.dominio)) > 0);
+  const hasData =
+    radarData.length > 0 &&
+    radarData.some((d) => parseFloat(String(d.dominio)) > 0 || (Number(d.cobertura) || 0) > 0);
 
   return (
     <div className="md:col-span-1 xl:col-span-1 bg-white/95 backdrop-blur-xl p-4 sm:p-6 rounded-2xl shadow-xs border border-slate-200/80 flex flex-col relative overflow-hidden group">

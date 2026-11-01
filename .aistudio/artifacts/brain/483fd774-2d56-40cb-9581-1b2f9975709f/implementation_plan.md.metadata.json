@@ -1,6 +1,6 @@
 {
-  "summary":  "Plan de transformación completado con éxito: Matriz de Tribunal en ScatterPlot de 4 cuadrantes, ventana sombreada reglamentaria 11:00-13:40m, diana 12:30m, modos de visualización (Matriz, Temporal, Cadencia), inspector interactivo de telemetría y Hero KPIs con microinteracciones y tipografía tabular.",
-  "updatedAt":  "2026-10-31T10:52:16.753639967Z",
+  "summary":  "Plan maestro actualizado con la corrección definitiva del Scatter Chart: Eliminación del componente ZAxis conflictivo (que causaba radius = NaN), inyección de renderizado SVG nativo vía shape callback con radio garantizado (5.5px/7.5px) y selector de escala dinámica (Ventana Tribunal 8-16m vs Escala Completa).",
+  "updatedAt":  "2026-11-01T11:53:47.072288148Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

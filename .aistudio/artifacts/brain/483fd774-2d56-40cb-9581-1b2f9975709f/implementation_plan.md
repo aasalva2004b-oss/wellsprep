@@ -1,51 +1,31 @@
 # Plan Maestro: Transformación Radical del Dashboard y Evolución de Cantos (WellsPrep Pro)
 
-## Estado: COMPLETADO CON ÉXITO ✅
+## Estado: RESOLUCIÓN Y BLINDAJE COMPLETADO ✅🚀
 
 ---
 
-### 1. Resumen de la Transformación
-Se ha completado una refundación exhaustiva de la sección **Dashboard y Evolución de Cantos**, alcanzando el estándar de diseño y precisión técnica requerido:
-- **Zero latency y 60 FPS**: Renderizado de gráficos con `recharts` 3.x optimizado, memoización pura en hooks y cero re-renders superfluos.
-- **Apple Design Award Aesthetic**: Vidrio esmerilado suave (`backdrop-blur-xl`), micropulsos de estado, bordes con degradados sutiles y tipografía tabular monoespaciada (`font-mono tabular-nums`).
+### Diagnóstico del Problema Reportado ("no aparecen las estadísticas ahora")
+En la captura adjunta por el usuario, el contenedor de la Matriz de Dispersión aparecía sin los puntos/nodos de los cantes a pesar de contar con 157 registros (50 en Zona Tribunal, 88 en Riesgo Tiempo, 19 en Crítico):
+1. **Causa Raíz Principal**: En Recharts 3.x, la presencia de `<ZAxis type="number" dataKey="z" range={[90, 120]} />` con valores idénticos `z: 1` para todos los puntos provocaba que la escala lineal de d3 (`deinterpolate`) normalizara entre `[1, 1]`, dividiendo por cero y arrojando `NaN`. Al ser `size = NaN`, el radio calculado resultaba en 0 o en paths SVG inválidos (`MNaN,NaN...`), ocultando todos los puntos.
+2. **Causa Secundaria de Escala**: Algunos cantes históricos de larga duración (ej. 42 minutos de sesiones acumuladas) estiraban el eje X hasta `43m`, comprimiendo los cantes reglamentarios en una franja diminuta.
 
 ---
 
-### 2. Módulos y Funcionalidades Implementadas
+### Correcciones Aplicadas
 
-#### A. Matriz de Dispersión y Cuadrantes de Tribunal (`DashboardCantoScatterChart.tsx`)
-1. **Modo 1: Matriz de Tribunal (Scatter Plot Interactivo)**:
-   - **Eje X (Duración)**: Adaptado dinámicamente con ventana oficial sombreada en verde esmeralda translúcido entre `11:00` y `13:40 min`.
-   - **Eje Y (Calificación)**: Escala oficial de `0` a `10.0` con línea de corte en `5.0` y línea de excelencia en `8.5`.
-   - **Diana de Tiempo Óptimo**: Línea vertical dorada discontinua en `12:30 min`.
-   - **4 Cuadrantes Clasificados**:
-     * *Zona Tribunal*: En tiempo oficial (11:00–13:40) y aprobado ($\ge 5.0$). Nodos verdes esmeralda con halo.
-     * *Riesgo Tiempo*: Aprobado en contenido ($\ge 5.0$) pero fuera de la ventana reglamentaria (suspenso por tiempo según tribunal). Nodos ámbar.
-     * *Riesgo Materia*: En tiempo pero calificación insuficiente ($< 5.0$). Nodos violeta.
-     * *Crítico*: Fuera de tiempo y suspenso en nota. Nodos carmesí.
-   - **Puntos Vivos e Inspector Interactivo**: Al hacer clic en cualquier cante del gráfico, se despliega una tarjeta de telemetría completa con duración exacta, desviación en segundos respecto a los 12:30 min, calificación, notas del preparador, fallos señalados y botón para abrir el tema en el temario.
+1. **Eliminación de `<ZAxis>` y Shape SVG Directo (`DashboardCantoScatterChart.tsx`)**:
+   - Se eliminó `<ZAxis>` conflictivo.
+   - Se sustituyeron los elementos `<Cell>` por una función `shape={(props: any) => ...}` nativa y determinista que dibuja círculos SVG explícitos:
+     * Radio estándar de 5.5px con halo y sombra sutil.
+     * Radio aumentado a 7.5px con aro de selección animado cuando el usuario hace clic.
+     * Color dinámico de acuerdo a la clasificación del cuadrante (*Zona Tribunal*, *Riesgo Tiempo*, *Riesgo Materia*, *Crítico*).
+     * `isAnimationActive={false}` para renderizado instantáneo sin parpadeos ni demoras.
 
-2. **Modo 2: Evolución Cronológica (ComposedChart)**:
-   - Barras de duración coloreadas según conformidad reglamentaria + línea suave de calificación y líneas de referencia oficiales.
+2. **Selector de Zoom y Enfoque (`zoomScope`)**:
+   - `🎯 Ventana Tribunal (8–16m)` (Por defecto): Enfoca la ventana oficial del tribunal con máxima amplitud y legibilidad.
+   - `🌐 Escala Completa`: Muestra el espectro completo (hasta 43m+) con indicación de cantes fuera de margen.
 
-3. **Modo 3: Cadencia y Distribución de Ritmo (Histograma)**:
-   - Desglose en 5 categorías temporales (`< 11:00m`, `11:00–12:00m`, `12:00–13:00m`, `13:00–13:40m`, `> 13:40m`) con porcentaje de cantos, barras de avance y nota media por franja.
-
-4. **Píldoras de Filtro Dinámico**:
-   - Selector rápido para filtrar por cuadrante: *Zona Tribunal*, *Riesgo Tiempo*, *Riesgo Materia* o *Crítico*.
-   - Selector de tema individual y rango temporal (*Todos*, *30d*, *20*, *10*).
-
-#### B. Tarjetas de Signos Vitales (Apple Glass)
-- **Estado de Forma**: Diagnóstico automático del momento competitivo con recomendaciones operativas.
-- **Nota Media**: Calificación reciente con delta frente a la media histórica y tendencia positiva/negativa.
-- **Ritmo de Exposición**: Duración media en minutos y segundos reales con porcentaje de cumplimiento en ventana reglamentaria.
-- **Efectividad Tribunal**: Porcentaje de aptos y ratio de cantos en la Zona Tribunal.
-
-#### C. Hero KPIs Rediseñados (`DashboardHeroKPIs.tsx`)
-- Tarjetas con iluminación ambiental sutil, micropulsos en racha activa, barras de progreso con degradados, contadores tabulares limpios y micro-insignias de estado.
-
----
-
-### 3. Verificación Técnica
-- **Linting (`tsc --noEmit`)**: 0 errores de tipo.
-- **Compilación (`npm run build`)**: Compilación exitosa en 6.44s.
+3. **Verificación Técnica**:
+   - `tsc --noEmit` completado con 0 errores.
+   - `npm run build` completado exitosamente.
+   - Servidor de desarrollo reiniciado.

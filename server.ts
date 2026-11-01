@@ -120,7 +120,16 @@ Return a JSON array of these objects. ONLY valid JSON.`;
     "/api/webhook",
     "/api/webhook/",
     "/api/aerofocus",
-    "/api/sync/aerofocus"
+    "/api/sync/aerofocus",
+    "/api/webhook/touchdown",
+    "/api/aerofocus/touchdown",
+    "/api/touchdown",
+    "/api/webhook/session",
+    "/api/webhook/flight",
+    "/api/sync",
+    "/api/webhook/sync",
+    "/webhook/aerofocus",
+    "/aerofocus"
   ], async (req, res) => {
     // 1. Cabeceras CORS universales obligatorias
     res.setHeader('Access-Control-Allow-Origin', corsHeaders['Access-Control-Allow-Origin']);

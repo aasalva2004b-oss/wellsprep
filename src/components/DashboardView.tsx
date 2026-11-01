@@ -73,6 +73,8 @@ export function DashboardView({
   const [isManagingCantos, setIsManagingCantos] = useState(false);
   const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null);
   const [isLoggingCanto, setIsLoggingCanto] = useState(false);
+  const [cantoModalMode, setCantoModalMode] = useState<"simulator" | "manual">("simulator");
+  const [activeModalTopicId, setActiveModalTopicId] = useState<string | undefined>(undefined);
   const [isSavingCanto, setIsSavingCanto] = useState(false);
 
   // --- ANALYTICS ENGINE ---
@@ -194,17 +196,18 @@ export function DashboardView({
     return groupedResult.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
   }, [rawSessions]);
 
-  // Current Streak
+  // Current Streak (Optimized O(1) Set lookups)
   const currentStreak = useMemo(() => {
+    const sessionDates = new Set(rawSessions.map((s) => s.date));
     let streak = 0;
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
-    for (let i = 0; i < 300; i++) {
+    for (let i = 0; i < 365; i++) {
       const d = new Date(today);
       d.setDate(d.getDate() - i);
       const dateStr = d.toISOString().split("T")[0];
-      if (rawSessions.some((s) => s.date === dateStr)) {
+      if (sessionDates.has(dateStr)) {
         streak++;
       } else if (i > 0) {
         break;
@@ -285,7 +288,7 @@ export function DashboardView({
     return days;
   }, [userProgress]);
 
-  // Cumulative Burn-up
+  // Cumulative Burn-up (Optimized O(N) linear sweep)
   const cumulativeProgress = useMemo(() => {
     const dates = groupedSessions.filter((s) => s.type === "estudio_inicial").map((s) => s.date).sort();
     if (dates.length === 0) return [];
@@ -293,15 +296,17 @@ export function DashboardView({
     const start = new Date(dates[0]);
     const end = new Date();
     const data = [];
-    let accumulated = 0;
+    let dateIdx = 0;
 
     for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 7)) {
       const dStr = d.toISOString().split("T")[0];
-      accumulated = dates.filter((date) => date <= dStr).length;
+      while (dateIdx < dates.length && dates[dateIdx] <= dStr) {
+        dateIdx++;
+      }
       data.push({
         date: dStr.slice(5),
-        estudiados: accumulated,
-        objetivo: Math.min(topics.length, accumulated + 2),
+        estudiados: dateIdx,
+        objetivo: Math.min(topics.length, dateIdx + 2),
       });
     }
     return data;
@@ -330,20 +335,31 @@ export function DashboardView({
     }));
   }, [topics, userProgress]);
 
-  // All Cantos
+  // O(1) Topic Index Map for zero-latency session resolution
+  const topicMap = useMemo(() => {
+    const map = new Map<string, Topic>();
+    allTopics.forEach((t) => {
+      map.set(t.id, t);
+      map.set(String(t.number), t);
+      const suffix = t.id.split("-").pop();
+      if (suffix) map.set(suffix, t);
+    });
+    return map;
+  }, [allTopics]);
+
+  // All Cantos (O(1) lookups)
   const allCantos = useMemo(() => {
     const mapped = (recentSessions || [])
       .filter((s) => s.type === "canto" || s.type === "simulacro")
       .map((s) => {
-        const durMin = s.durationMinutes || s.duration || 0;
-        const durSec = s.cantoSeconds || 0;
+        const durMin = Number(s.durationMinutes) || Number(s.duration) || 0;
+        const durSec = Number(s.cantoSeconds) || Number(s.durationSeconds) || 0;
         const totalMin = durMin + durSec / 60;
         const grade = typeof s.cantoGrade === "number" ? s.cantoGrade : typeof s.grade === "number" ? s.grade : null;
 
         const topic =
-          allTopics.find((t) => t.id === s.topicId) ||
-          allTopics.find((t) => String(t.number) === String(s.topicId)) ||
-          (s.topicId ? allTopics.find((t) => t.id.endsWith(`-${s.topicId}`)) : undefined);
+          topicMap.get(s.topicId) ||
+          (s.topicId ? topicMap.get(s.topicId.split("-").pop() || "") : undefined);
 
         const customTitle = s.topicId ? (userProgress[s.topicId]?.customTitle || userProgress[s.topicId]?.title) : undefined;
         const topicNumber =
@@ -635,10 +651,21 @@ export function DashboardView({
     }
   };
 
-  const handleTodayQuickCanto = (task: RecommendedStudyTask) => {
+  const handleOpenLogCanto = (mode: "simulator" | "manual" = "simulator", targetTopicId?: string) => {
     playSound.click();
-    setSelectedTopicCantoFilter(task.topic.id);
+    setCantoModalMode(mode);
+    if (targetTopicId) {
+      setActiveModalTopicId(targetTopicId);
+    } else if (selectedTopicCantoFilter !== "all") {
+      setActiveModalTopicId(selectedTopicCantoFilter);
+    } else {
+      setActiveModalTopicId(undefined);
+    }
     setIsLoggingCanto(true);
+  };
+
+  const handleTodayQuickCanto = (task: RecommendedStudyTask) => {
+    handleOpenLogCanto("simulator", task.topic.id);
   };
 
   // Handlers
@@ -856,7 +883,7 @@ export function DashboardView({
               setCantoTimeRange={setCantoTimeRange}
               estadoDeForma={estadoDeForma}
               onManageCantos={() => setIsManagingCantos(true)}
-              onLogCanto={() => setIsLoggingCanto(true)}
+              onLogCanto={handleOpenLogCanto}
               onSelectTopic={onSelectTopic}
             />
           )}
@@ -872,13 +899,15 @@ export function DashboardView({
         deletingSessionId={deletingSessionId}
       />
 
-      {/* MODAL: REGISTRO RÁPIDO DE CANTO */}
+      {/* MODAL: REGISTRO RÁPIDO DE CANTO / SIMULADOR */}
       <DashboardQuickCantoModal
         isOpen={isLoggingCanto}
         onClose={() => setIsLoggingCanto(false)}
         allTopics={allTopics}
         onSaveCanto={handleSaveNewCanto}
         isSaving={isSavingCanto}
+        initialTopicId={activeModalTopicId}
+        initialMode={cantoModalMode}
       />
     </div>
   );

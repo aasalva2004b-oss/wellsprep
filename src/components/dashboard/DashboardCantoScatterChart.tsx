@@ -20,6 +20,9 @@ import {
   Calendar,
   Layers,
   ChevronRight,
+  Play,
+  RotateCcw,
+  BookOpen,
 } from "lucide-react";
 import {
   ResponsiveContainer,
@@ -61,7 +64,7 @@ export interface DashboardCantoScatterChartProps {
     aprobadosPorcentaje: number;
   };
   onManageCantos: () => void;
-  onLogCanto: () => void;
+  onLogCanto: (mode?: "simulator" | "manual", topicId?: string) => void;
   onSelectTopic?: (topicId: string) => void;
 }
 
@@ -83,11 +86,25 @@ export const DashboardCantoScatterChart: React.FC<DashboardCantoScatterChartProp
 }) => {
   const [viewMode, setViewMode] = useState<ViewMode>("matrix");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  const [selectedDiscipline, setSelectedDiscipline] = useState<string>("all");
   const [selectedCantoId, setSelectedCantoId] = useState<string | null>(null);
+  const [zoomScope, setZoomScope] = useState<"tribunal" | "full">("tribunal");
 
-  // Filtered chart data based on status filter
+  // Available disciplines in cantes
+  const availableDisciplines = useMemo(() => {
+    const set = new Set<string>();
+    cantosChartData.forEach((d) => {
+      if (d.topicSubject) set.add(d.topicSubject);
+    });
+    return Array.from(set).sort();
+  }, [cantosChartData]);
+
+  // Filtered chart data based on status and discipline filters
   const displayedData = useMemo(() => {
     let data = cantosChartData;
+    if (selectedDiscipline !== "all") {
+      data = data.filter((d) => d.topicSubject === selectedDiscipline);
+    }
     if (statusFilter === "in_time") {
       data = data.filter((d) => d.isOptimal);
     } else if (statusFilter === "passed") {
@@ -96,7 +113,7 @@ export const DashboardCantoScatterChart: React.FC<DashboardCantoScatterChartProp
       data = data.filter((d) => d.mistakes && d.mistakes.trim().length > 0);
     }
     return data;
-  }, [cantosChartData, statusFilter]);
+  }, [cantosChartData, statusFilter, selectedDiscipline]);
 
   // Quadrant distribution metrics
   const quadrantStats = useMemo(() => {
@@ -105,7 +122,7 @@ export const DashboardCantoScatterChart: React.FC<DashboardCantoScatterChartProp
     let riesgoMateria = 0; // In time but grade < 5
     let critico = 0; // Out of time and grade < 5
 
-    cantosChartData.forEach((d) => {
+    displayedData.forEach((d) => {
       const inTime = d.isOptimal;
       const pass = (d.nota || 0) >= 5;
       if (inTime && pass) zonaTribunal++;
@@ -119,9 +136,26 @@ export const DashboardCantoScatterChart: React.FC<DashboardCantoScatterChartProp
       riesgoTiempo,
       riesgoMateria,
       critico,
-      total: cantosChartData.length,
+      total: displayedData.length,
     };
-  }, [cantosChartData]);
+  }, [displayedData]);
+
+  // Pacing calibration telemetry
+  const pacingTelemetry = useMemo(() => {
+    if (displayedData.length === 0) {
+      return { avgDeviationSecs: 0, consistencyPct: 0, tendencyScore: 0 };
+    }
+    const totalDev = displayedData.reduce((acc, d) => acc + (d.deviationSecs || 0), 0);
+    const avgDev = Math.round(totalDev / displayedData.length);
+    const inWindow = displayedData.filter((d) => d.isOptimal).length;
+    const consistencyPct = Math.round((inWindow / displayedData.length) * 100);
+
+    return {
+      avgDeviationSecs: avgDev,
+      consistencyPct,
+      tendencyScore: estadoDeForma.tendenciaNota,
+    };
+  }, [displayedData, estadoDeForma]);
 
   // Rhythm distribution histogram (5 brackets)
   const distributionData = useMemo(() => {
@@ -173,7 +207,7 @@ export const DashboardCantoScatterChart: React.FC<DashboardCantoScatterChartProp
       },
     ];
 
-    cantosChartData.forEach((d) => {
+    displayedData.forEach((d) => {
       const secs = d.totalSecs || d.duracion * 60;
       if (secs < 660) {
         bins[0].count++;
@@ -193,13 +227,13 @@ export const DashboardCantoScatterChart: React.FC<DashboardCantoScatterChartProp
       }
     });
 
-    const total = cantosChartData.length || 1;
+    const total = displayedData.length || 1;
     return bins.map((b) => ({
       ...b,
       percentage: Math.round((b.count / total) * 100),
       avgGrade: b.grades.length > 0 ? (b.grades.reduce((acc, g) => acc + g, 0) / b.grades.length).toFixed(1) : "—",
     }));
-  }, [cantosChartData]);
+  }, [displayedData]);
 
   // Selected Canto details for inspector
   const activeCanto = useMemo(() => {
@@ -207,12 +241,24 @@ export const DashboardCantoScatterChart: React.FC<DashboardCantoScatterChartProp
     return cantosChartData.find((c) => c.id === selectedCantoId) || null;
   }, [selectedCantoId, cantosChartData]);
 
+  // Previous canto for the same topic to show progress comparison
+  const previousCantoForTopic = useMemo(() => {
+    if (!activeCanto) return null;
+    const candidates = allCantos.filter(
+      (c) =>
+        (c.topicId === activeCanto.topicId || c.topicNumber === activeCanto.topicNumber) &&
+        c.id !== activeCanto.id
+    );
+    if (candidates.length === 0) return null;
+    return candidates.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())[0];
+  }, [activeCanto, allCantos]);
+
   // Scatter chart data formatted for Recharts Scatter
   const scatterPoints = useMemo(() => {
     return displayedData.map((d) => {
-      const durMin = d.duracionMinDec || d.duracion;
-      const nota = d.nota !== null ? d.nota : 0;
-      const hasGrade = d.nota !== null;
+      const durMin = Number(d.duracionMinDec) || Number(d.duracion) || 0;
+      const nota = typeof d.nota === "number" && !isNaN(d.nota) ? d.nota : 0;
+      const hasGrade = d.nota !== null && d.nota !== undefined && !isNaN(d.nota);
 
       // Color coding according to tribunal rules
       let color = "#10b981"; // Emerald: Zona Tribunal
@@ -242,9 +288,16 @@ export const DashboardCantoScatterChart: React.FC<DashboardCantoScatterChartProp
   // Dynamic X Domain for scatter
   const xDomain = useMemo(() => {
     if (scatterPoints.length === 0) return [8, 16];
+    if (zoomScope === "tribunal") {
+      return [8, 16];
+    }
     const minVal = Math.min(...scatterPoints.map((p) => p.x));
     const maxVal = Math.max(...scatterPoints.map((p) => p.x));
-    return [Math.max(6, Math.floor(minVal - 1)), Math.min(20, Math.ceil(maxVal + 1))];
+    return [Math.max(0, Math.floor(minVal - 1)), Math.max(16, Math.ceil(maxVal + 2))];
+  }, [scatterPoints, zoomScope]);
+
+  const pointsOutsideTribunal = useMemo(() => {
+    return scatterPoints.filter((p) => p.x < 8 || p.x > 16).length;
   }, [scatterPoints]);
 
   return (
@@ -262,10 +315,10 @@ export const DashboardCantoScatterChart: React.FC<DashboardCantoScatterChartProp
             <h3 className="text-base sm:text-lg font-black text-slate-900 tracking-tight flex flex-wrap items-center gap-2 font-serif">
               <span>Evolución de Cantos & Matriz de Tribunal</span>
               <span className="text-[10px] sm:text-xs font-black uppercase tracking-wider px-2 py-0.5 rounded-full bg-fuchsia-50 text-fuchsia-700 border border-fuchsia-200 font-mono tabular-nums">
-                {allCantos.length} {allCantos.length === 1 ? "canto" : "cantos"}
+                {displayedData.length} {displayedData.length === 1 ? "canto" : "cantos"}
               </span>
             </h3>
-            <p className="text-xs text-slate-500 font-medium mt-0.5 flex items-center gap-1.5">
+            <p className="text-xs text-slate-500 font-medium mt-0.5 flex items-center gap-1.5 flex-wrap">
               <span>Ventana reglamentaria oficial:</span>
               <span className="font-mono font-bold text-emerald-700 bg-emerald-50 px-1.5 py-0.2 rounded border border-emerald-200">
                 11:00 – 13:40 min
@@ -314,17 +367,33 @@ export const DashboardCantoScatterChart: React.FC<DashboardCantoScatterChartProp
             </button>
           </div>
 
+          {/* Discipline selector */}
+          {availableDisciplines.length > 1 && (
+            <select
+              value={selectedDiscipline}
+              onChange={(e) => setSelectedDiscipline(e.target.value)}
+              className="text-xs font-bold bg-white border border-slate-200 hover:border-slate-300 text-slate-800 rounded-xl px-2.5 py-1.5 focus:outline-none focus:ring-2 focus:ring-fuchsia-500/20 max-w-[160px] truncate shadow-2xs cursor-pointer capitalize"
+            >
+              <option value="all">⚖️ Disciplinas (Todas)</option>
+              {availableDisciplines.map((d) => (
+                <option key={d} value={d}>
+                  {d.replace("-", " ")}
+                </option>
+              ))}
+            </select>
+          )}
+
           {/* Topic selector */}
           {uniqueTopicsInCantos.length > 0 && (
             <select
               value={selectedTopicCantoFilter}
               onChange={(e) => setSelectedTopicCantoFilter(e.target.value)}
-              className="text-xs font-bold bg-white border border-slate-200 hover:border-slate-300 text-slate-800 rounded-xl px-2.5 py-1.5 focus:outline-none focus:ring-2 focus:ring-fuchsia-500/20 max-w-[190px] truncate shadow-2xs cursor-pointer"
+              className="text-xs font-bold bg-white border border-slate-200 hover:border-slate-300 text-slate-800 rounded-xl px-2.5 py-1.5 focus:outline-none focus:ring-2 focus:ring-fuchsia-500/20 max-w-[170px] truncate shadow-2xs cursor-pointer"
             >
-              <option value="all">🎯 Todos los temas ({allCantos.length})</option>
+              <option value="all">🎯 Temas (Todos)</option>
               {uniqueTopicsInCantos.map((t) => (
                 <option key={t.id} value={t.id}>
-                  Tema {t.number}: {t.title.length > 18 ? t.title.substring(0, 18) + "..." : t.title} ({t.count})
+                  T.{t.number}: {t.title.length > 16 ? t.title.substring(0, 16) + "..." : t.title} ({t.count})
                 </option>
               ))}
             </select>
@@ -370,21 +439,29 @@ export const DashboardCantoScatterChart: React.FC<DashboardCantoScatterChartProp
             </button>
           </div>
 
-          {/* Action buttons */}
+          {/* Action buttons: Live Simulator + Register + Manage */}
           <div className="flex items-center gap-1.5">
             <button
-              onClick={onManageCantos}
-              className="px-2.5 py-1.5 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-xs font-bold flex items-center gap-1.5 shadow-2xs transition-all active:scale-[0.98]"
+              onClick={() => onLogCanto("simulator")}
+              className="px-3 py-1.5 rounded-xl bg-gradient-to-r from-fuchsia-600 to-indigo-600 hover:from-fuchsia-500 hover:to-indigo-500 text-white text-xs font-black flex items-center gap-1.5 shadow-sm shadow-fuchsia-500/20 transition-all active:scale-[0.98]"
+              title="Abrir cronómetro oficial de tribunal con avisos sonoros y registro de incidencias en vivo"
             >
-              <Sliders size={13} className="text-slate-500" />
-              <span className="hidden sm:inline">Historial</span>
+              <Clock size={13} className="text-white" />
+              <span>Simulador</span>
             </button>
             <button
-              onClick={onLogCanto}
-              className="px-3 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-black flex items-center gap-1.5 shadow-xs transition-all active:scale-[0.98]"
+              onClick={() => onLogCanto("manual")}
+              className="px-2.5 py-1.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-black flex items-center gap-1.5 shadow-xs transition-all active:scale-[0.98]"
             >
               <Plus size={13} className="text-white" />
-              <span>Registrar</span>
+              <span>Manual</span>
+            </button>
+            <button
+              onClick={onManageCantos}
+              className="p-1.5 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-xs font-bold flex items-center justify-center shadow-2xs transition-all active:scale-[0.98]"
+              title="Historial de cantes"
+            >
+              <Sliders size={14} className="text-slate-500" />
             </button>
           </div>
         </div>
@@ -520,8 +597,48 @@ export const DashboardCantoScatterChart: React.FC<DashboardCantoScatterChartProp
         </div>
       </div>
 
+      {/* Pacing Telemetry Strip (New Calibration Ribbon) */}
+      {displayedData.length > 0 && (
+        <div className="mb-3 px-3 py-2 bg-gradient-to-r from-slate-50 via-indigo-50/30 to-purple-50/20 border border-slate-200/70 rounded-xl flex items-center justify-between text-xs font-mono tabular-nums flex-wrap gap-2">
+          <div className="flex items-center gap-2">
+            <Sparkles size={13} className="text-indigo-600 shrink-0" />
+            <span className="text-slate-600 font-sans font-semibold text-[11px]">
+              Calibración de Cronómetro:
+            </span>
+            <span className="font-bold text-slate-900">
+              Desviación media:{" "}
+              <strong
+                className={
+                  Math.abs(pacingTelemetry.avgDeviationSecs) <= 30
+                    ? "text-emerald-700"
+                    : "text-amber-700"
+                }
+              >
+                {pacingTelemetry.avgDeviationSecs >= 0
+                  ? `+${pacingTelemetry.avgDeviationSecs}s`
+                  : `${pacingTelemetry.avgDeviationSecs}s`}
+              </strong>{" "}
+              vs diana (12:30m)
+            </span>
+          </div>
+
+          <div className="flex items-center gap-3 text-[11px]">
+            <span className="text-slate-500 font-sans">
+              Consistencia: <strong className="text-slate-800">{pacingTelemetry.consistencyPct}%</strong>
+            </span>
+            <button
+              onClick={() => onLogCanto("simulator")}
+              className="text-indigo-600 hover:text-indigo-800 font-bold font-sans underline underline-offset-2 flex items-center gap-1"
+            >
+              <span>Abrir simulador con cronómetro</span>
+              <ChevronRight size={11} />
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Quadrants Mini Pills (Only shown in Matrix mode) */}
-      {viewMode === "matrix" && cantosChartData.length > 0 && (
+      {viewMode === "matrix" && displayedData.length > 0 && (
         <div className="flex items-center gap-2 mb-3 px-1 overflow-x-auto no-scrollbar text-[11px] font-bold font-mono">
           <span className="text-[10px] text-slate-400 uppercase tracking-wider font-sans font-black mr-1 shrink-0">
             Cuadrantes:
@@ -562,35 +679,71 @@ export const DashboardCantoScatterChart: React.FC<DashboardCantoScatterChartProp
             <span>Crítico: {quadrantStats.critico}</span>
           </div>
 
-          {statusFilter !== "all" && (
+          {(statusFilter !== "all" || selectedDiscipline !== "all") && (
             <button
-              onClick={() => setStatusFilter("all")}
+              onClick={() => {
+                setStatusFilter("all");
+                setSelectedDiscipline("all");
+              }}
               className="text-[10px] text-slate-500 hover:text-slate-800 underline underline-offset-2 ml-1"
             >
-              Limpiar filtro
+              Limpiar filtros
             </button>
           )}
+
+          {/* Zoom / Scale Toggle */}
+          <div className="flex items-center gap-1.5 sm:ml-auto shrink-0 pl-2">
+            <button
+              onClick={() => setZoomScope("tribunal")}
+              className={cn(
+                "px-2.5 py-1 rounded-xl text-[11px] font-bold border transition-all flex items-center gap-1",
+                zoomScope === "tribunal"
+                  ? "bg-slate-900 text-white border-slate-900 shadow-2xs font-black"
+                  : "bg-white text-slate-600 border-slate-200 hover:bg-slate-50"
+              )}
+              title="Enfocar en la ventana reglamentaria de examen (8 a 16 minutos)"
+            >
+              <span>🎯 Ventana Tribunal (8–16m)</span>
+            </button>
+            <button
+              onClick={() => setZoomScope("full")}
+              className={cn(
+                "px-2.5 py-1 rounded-xl text-[11px] font-bold border transition-all flex items-center gap-1",
+                zoomScope === "full"
+                  ? "bg-slate-900 text-white border-slate-900 shadow-2xs font-black"
+                  : "bg-white text-slate-600 border-slate-200 hover:bg-slate-50"
+              )}
+              title="Mostrar todos los cantes independientemente de su duración"
+            >
+              <span>🌐 Escala Completa</span>
+              {pointsOutsideTribunal > 0 && zoomScope === "tribunal" && (
+                <span className="w-4 h-4 rounded-full bg-amber-500 text-white text-[9px] font-black flex items-center justify-center ml-0.5">
+                  {pointsOutsideTribunal}
+                </span>
+              )}
+            </button>
+          </div>
         </div>
       )}
 
       {/* Main Visual Presentation */}
       <div className="w-full relative z-10">
-        {cantosChartData.length === 0 ? (
+        {displayedData.length === 0 ? (
           <div className="w-full h-full min-h-[260px] flex flex-col items-center justify-center text-center p-6 bg-slate-50/50 rounded-2xl border border-dashed border-slate-200">
             <div className="w-12 h-12 rounded-2xl bg-fuchsia-50 border border-fuchsia-200/60 flex items-center justify-center text-fuchsia-600 mb-2.5 shadow-2xs">
               <Mic size={22} />
             </div>
             <h4 className="text-sm font-black text-slate-800 mb-1">
-              Sin Cantos Registrados en la Oposición
+              Sin Cantos para los filtros seleccionados
             </h4>
             <p className="text-xs text-slate-500 max-w-md mb-3 leading-relaxed font-medium">
-              El tribunal exige estricto control de tiempo (ventana reglamentaria 11:00–13:40 min) y calidad expositiva. Registra tu primer simulacro.
+              Prueba a cambiar el filtro de materia o registra un nuevo cante con el simulador oficial de tribunal.
             </p>
             <button
-              onClick={onLogCanto}
+              onClick={() => onLogCanto("simulator")}
               className="px-4 py-2 rounded-xl bg-slate-900 text-white text-xs font-black hover:bg-slate-800 transition-all flex items-center gap-1.5 shadow-xs active:scale-[0.98]"
             >
-              <Plus size={14} /> Registrar Primer Canto
+              <Clock size={14} /> Iniciar Simulador de Cante
             </button>
           </div>
         ) : viewMode === "matrix" ? (
@@ -707,8 +860,9 @@ export const DashboardCantoScatterChart: React.FC<DashboardCantoScatterChartProp
                     dataKey="x"
                     name="Duración"
                     domain={xDomain}
+                    allowDataOverflow={zoomScope === "tribunal"}
                     unit="m"
-                    tickCount={8}
+                    tickCount={zoomScope === "tribunal" ? 9 : 8}
                     axisLine={{ stroke: "#cbd5e1" }}
                     tickLine={false}
                     tick={{ fontSize: 10, fill: "#64748b", fontWeight: 700 }}
@@ -725,8 +879,6 @@ export const DashboardCantoScatterChart: React.FC<DashboardCantoScatterChartProp
                     tickLine={false}
                     tick={{ fontSize: 10, fill: "#8b5cf6", fontWeight: 700 }}
                   />
-
-                  <ZAxis type="number" dataKey="z" range={[90, 120]} />
 
                   <Tooltip
                     cursor={{ strokeDasharray: "3 3", stroke: "#94a3b8" }}
@@ -811,23 +963,56 @@ export const DashboardCantoScatterChart: React.FC<DashboardCantoScatterChartProp
                   <Scatter
                     name="Cantos"
                     data={scatterPoints}
+                    isAnimationActive={false}
                     onClick={(entry) => {
                       if (entry && entry.id) {
                         setSelectedCantoId(selectedCantoId === entry.id ? null : entry.id);
                       }
                     }}
                     cursor="pointer"
-                  >
-                    {scatterPoints.map((entry, index) => (
-                      <Cell
-                        key={`scatter-cell-${index}`}
-                        fill={entry.nodeColor}
-                        stroke="#fff"
-                        strokeWidth={selectedCantoId === entry.id ? 3 : 2}
-                        className="transition-all hover:opacity-100 duration-150"
-                      />
-                    ))}
-                  </Scatter>
+                    shape={(props: any) => {
+                      const { cx, cy, payload } = props;
+                      if (cx == null || cy == null || isNaN(cx) || isNaN(cy)) return <g />;
+                      if (zoomScope === "tribunal" && (payload?.x < 8 || payload?.x > 16)) {
+                        return <g />;
+                      }
+                      const isSelected = selectedCantoId === payload?.id;
+                      const color = payload?.nodeColor || "#10b981";
+                      return (
+                        <g
+                          className="cursor-pointer"
+                          onClick={() => {
+                            if (payload?.id) {
+                              setSelectedCantoId(selectedCantoId === payload.id ? null : payload.id);
+                            }
+                          }}
+                        >
+                          {isSelected && (
+                            <circle
+                              cx={cx}
+                              cy={cy}
+                              r={12}
+                              fill={color}
+                              fillOpacity={0.25}
+                              stroke={color}
+                              strokeWidth={1.5}
+                            />
+                          )}
+                          <circle
+                            cx={cx}
+                            cy={cy}
+                            r={isSelected ? 7.5 : 5.5}
+                            fill={color}
+                            stroke="#ffffff"
+                            strokeWidth={isSelected ? 2.5 : 1.5}
+                            style={{
+                              filter: "drop-shadow(0 1px 3px rgba(0,0,0,0.3))",
+                            }}
+                          />
+                        </g>
+                      );
+                    }}
+                  />
                 </ScatterChart>
               </ResponsiveContainer>
             </div>
@@ -1108,7 +1293,7 @@ export const DashboardCantoScatterChart: React.FC<DashboardCantoScatterChartProp
 
       {/* Selected Canto Telemetry Inspector Panel */}
       {activeCanto && (
-        <div className="mt-4 p-3.5 sm:p-4 rounded-xl bg-gradient-to-r from-slate-900 to-slate-800 text-white shadow-lg relative z-20 animate-in fade-in slide-in-from-bottom-2 duration-200">
+        <div className="mt-4 p-3.5 sm:p-4 rounded-2xl bg-gradient-to-r from-slate-900 to-slate-800 text-white shadow-xl relative z-20 animate-in fade-in slide-in-from-bottom-2 duration-200 border border-slate-700/60">
           <div className="flex items-center justify-between gap-3 pb-2.5 mb-2.5 border-b border-slate-700/60">
             <div className="flex items-center gap-2.5">
               <div
@@ -1124,6 +1309,14 @@ export const DashboardCantoScatterChart: React.FC<DashboardCantoScatterChartProp
             </div>
 
             <div className="flex items-center gap-1.5">
+              <button
+                onClick={() => onLogCanto("simulator", activeCanto.topicId)}
+                className="px-2.5 py-1 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 text-[11px] font-bold border border-emerald-500/30 flex items-center gap-1 transition-all"
+                title="Cantar este mismo tema en el simulador"
+              >
+                <Clock size={12} />
+                <span>Cantar de nuevo</span>
+              </button>
               {onSelectTopic && activeCanto.topicId && (
                 <button
                   onClick={() => onSelectTopic(activeCanto.topicId)}
@@ -1188,6 +1381,37 @@ export const DashboardCantoScatterChart: React.FC<DashboardCantoScatterChartProp
               </span>
             </div>
           </div>
+
+          {/* Historical comparison for this specific topic */}
+          {previousCantoForTopic && (
+            <div className="mt-2.5 pt-2 border-t border-slate-700/60 bg-white/5 p-2 rounded-xl text-xs font-mono">
+              <span className="text-[10px] uppercase font-bold text-slate-400 block mb-1 font-sans">
+                Evolución respecto a tu cante previo de este tema ({previousCantoForTopic.date}):
+              </span>
+              <div className="flex items-center gap-4 text-xs">
+                <span>
+                  Tiempo previo: {previousCantoForTopic.durationMinutes}m {previousCantoForTopic.durationSeconds || 0}s
+                </span>
+                <span>
+                  Nota previa: {previousCantoForTopic.grade !== undefined && previousCantoForTopic.grade !== null ? `${previousCantoForTopic.grade.toFixed(1)}/10` : "—"}
+                </span>
+                {activeCanto.nota !== null && previousCantoForTopic.grade !== undefined && previousCantoForTopic.grade !== null && (
+                  <span
+                    className={cn(
+                      "font-black px-1.5 py-0.5 rounded-md",
+                      activeCanto.nota >= previousCantoForTopic.grade
+                        ? "bg-emerald-500/20 text-emerald-300"
+                        : "bg-rose-500/20 text-rose-300"
+                    )}
+                  >
+                    {activeCanto.nota >= previousCantoForTopic.grade
+                      ? `+${(activeCanto.nota - previousCantoForTopic.grade).toFixed(1)} pts de mejora`
+                      : `${(activeCanto.nota - previousCantoForTopic.grade).toFixed(1)} pts`}
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
 
           {(activeCanto.mistakes || activeCanto.notes) && (
             <div className="mt-2.5 pt-2 border-t border-slate-700/60 text-xs">

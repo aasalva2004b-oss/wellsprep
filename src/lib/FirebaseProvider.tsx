@@ -2280,114 +2280,371 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
     if (!user) return false;
     const toastId = toast.loading("Aprobando e incorporando evento a tu expediente...");
     try {
-      const event = quarantinedEvents.find(e => e.id === eventId);
-      if (!event) throw new Error("Evento no encontrado en cuarentena");
-
-      const affectedTopicIds = new Set<string>();
-
-      // Mapear frecuencia de cada tema en esta transmisión para identificar sesiones parciales
-      const topicOccurrences = new Map<string, number>();
-      for (const t of (event.topics || [])) {
-        let tid = t.resolvedTopicId;
-        if (tid) {
-          if (tid === "5" || tid === (5 as any)) tid = "constitucional-5";
-          topicOccurrences.set(tid, (topicOccurrences.get(tid) || 0) + 1);
+  // Incorpora un evento de AeroFocus de forma completa y oficial a las sesiones del usuario y actualiza progreso
+  const incorporateAeroFocusEvent = useCallback(
+    async (
+      event: WebhookSyncRecord,
+      source: "aerofocus_auto" | "aerofocus_approved" = "aerofocus_auto",
+      notifyToast: boolean = true
+    ): Promise<boolean> => {
+      if (!user) return false;
+      try {
+        const affectedTopicIds = new Set<string>();
+        const topicOccurrences = new Map<string, number>();
+        for (const t of (event.topics || [])) {
+          let tid = t.resolvedTopicId;
+          if (tid) {
+            if (tid === "5" || tid === (5 as any)) tid = "constitucional-5";
+            topicOccurrences.set(tid, (topicOccurrences.get(tid) || 0) + 1);
+          }
         }
+
+        const topicSeenCount = new Map<string, number>();
+        const newSessionItems: any[] = [];
+        let totalAssignedHours = 0;
+        const topicTitles: string[] = [];
+
+        for (const topic of (event.topics || [])) {
+          let topicId = topic.resolvedTopicId;
+          if (!topicId) continue;
+          if (topicId === "5" || topicId === (5 as any)) topicId = "constitucional-5";
+
+          const countSoFar = (topicSeenCount.get(topicId) || 0) + 1;
+          topicSeenCount.set(topicId, countSoFar);
+          const totalCount = topicOccurrences.get(topicId) || 1;
+          const isLastForTopic = countSoFar === totalCount;
+
+          const durationMins = topic.effectiveMinutes || Math.round((topic.effectiveHours || 0) * 60) || 60;
+          if (durationMins <= 1 && !topic.cantoGrade && Number(topic.cantoGrade || 0) === 0) {
+            continue;
+          }
+
+          const modalityType = topic.modality === 'primer_estudio'
+            ? 'estudio_inicial'
+            : (topic.modality === 'refresco' ? 'refresco' : (topic.modality === 'canto' ? 'canto' : 'repaso'));
+
+          let completesVuelta = false;
+          if ((topic as any).completesVuelta !== undefined) {
+            completesVuelta = Boolean((topic as any).completesVuelta);
+          } else if (modalityType === 'repaso' || modalityType === 'canto') {
+            completesVuelta = isLastForTopic;
+          }
+
+          const effectiveHours = topic.effectiveHours || (durationMins / 60);
+          totalAssignedHours += effectiveHours;
+          if (topic.resolvedTopicTitle && !topicTitles.includes(topic.resolvedTopicTitle)) {
+            topicTitles.push(topic.resolvedTopicTitle);
+          }
+
+          const sessionRef = doc(collection(db, `users/${user.uid}/sessions`));
+          const sessionDoc = cleanForFirestore({
+            userId: user.uid,
+            topicId,
+            topicTitle: topic.resolvedTopicTitle,
+            date: event.date || getLocalDateString(),
+            durationMinutes: durationMins,
+            durationReal: durationMins,
+            difficulty: topic.difficulty !== undefined ? topic.difficulty : (topic.dificultadReal !== undefined ? topic.dificultadReal : 5),
+            dificultadReal: topic.difficulty !== undefined ? topic.difficulty : (topic.dificultadReal !== undefined ? topic.dificultadReal : 5),
+            type: modalityType,
+            modality: topic.modality,
+            notes: topic.notes || (source === 'aerofocus_auto' ? `Aterrizaje sincronizado AeroFocus Pro (Vuelo #${event.flightId || 'N/A'})` : `Aprobado desde Cuarentena AeroFocus (Vuelo #${event.flightId || 'N/A'})`),
+            source,
+            flightId: String(event.flightId || ''),
+            effectiveHours,
+            cantoGrade: topic.cantoGrade,
+            cantoSeconds: topic.cantoSeconds,
+            cantoType: topic.cantoType,
+            mistakes: topic.mistakes,
+            completesVuelta,
+            startPage: topic.startPage !== undefined ? topic.startPage : topic.pageInfo?.startPage,
+            endPage: topic.endPage !== undefined ? topic.endPage : topic.pageInfo?.endPage,
+            pagesCount: topic.pagesCount !== undefined ? topic.pagesCount : topic.pageInfo?.pagesRead,
+            pagesText: topic.pagesText || (topic.startPage && topic.endPage ? `Págs. ${topic.startPage}-${topic.endPage}` : undefined),
+            distractionSeconds: topic.distractionSeconds,
+            summaryLine: topic.summaryLine,
+            createdAt: serverTimestamp(),
+          });
+          await setDoc(sessionRef, sessionDoc);
+          newSessionItems.push({
+            id: sessionRef.id,
+            ...sessionDoc,
+            createdAt: new Date().toISOString()
+          });
+          affectedTopicIds.add(topicId);
+        }
+
+        if (newSessionItems.length > 0) {
+          setRecentSessions(prev => [...newSessionItems, ...(prev || [])]);
+        }
+
+        for (const tid of affectedTopicIds) {
+          await recalculateTopicFromSessions(tid);
+        }
+
+        // ACK al servidor para que no siga como pending
+        fetch("/api/webhook/ack", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ eventId: event.id }),
+        }).catch(() => {});
+
+        // Actualizar en Firestore para que figure como processed (ya incorporado)
+        const updatedRecord = { ...event, status: "processed" as const };
+        await setDoc(doc(db, `users/${user.uid}/quarantine`, event.id), cleanForFirestore(updatedRecord), { merge: true }).catch(() => {});
+
+        // Quitar de la lista de eventos en espera
+        setQuarantinedEvents(prev => prev.filter(e => e.id !== event.id));
+
+        // Emitir confirmación en BroadcastChannel para AeroFocus
+        try {
+          if (typeof window !== "undefined" && "BroadcastChannel" in window) {
+            const bc = new BroadcastChannel("wellsprep_sync_bus");
+            const ackMsg = {
+              type: "AEROFOCUS_SYNC_CONFIRMED",
+              status: "ok",
+              synced: true,
+              quarantined: false,
+              isQuarantined: false,
+              flightId: event.flightId,
+              message: "Aterrizaje sincronizado e incorporado al expediente con éxito"
+            };
+            bc.postMessage(ackMsg);
+            bc.postMessage({ ...ackMsg, type: "WELLSPREP_SYNC_ACK" });
+            bc.close();
+          }
+        } catch {}
+
+        if (notifyToast) {
+          playSound.success();
+          const summaryStr = topicTitles.length > 0 ? topicTitles.slice(0, 2).join(", ") : "Temario";
+          toast.success(`🛬 Aterrizaje incorporado (${totalAssignedHours.toFixed(1)}h)`, {
+            description: `${summaryStr}. Registrado en tus estadísticas oficiales.`,
+          });
+        }
+        return true;
+      } catch (err: any) {
+        console.error("Error al incorporar evento de AeroFocus:", err);
+        return false;
+      }
+    },
+    [user, recalculateTopicFromSessions]
+  );
+
+  // Importación e inserción manual de transmisiones de AeroFocus
+  const addQuarantineEventManually = useCallback(async (rawInput: any): Promise<boolean> => {
+    if (!user) {
+      toast.error("Debes iniciar sesión para importar sesiones.");
+      return false;
+    }
+    try {
+      const parsedRes = parseAeroFocusInput(rawInput);
+      if (!parsedRes.success || !parsedRes.payload) {
+        toast.error(parsedRes.error || "No se pudo interpretar el formato de AeroFocus.");
+        return false;
       }
 
-      const topicSeenCount = new Map<string, number>();
-      const newSessionItems: any[] = [];
+      const rawPayload = parsedRes.payload;
+      let rawTopics: any[] = [];
+      if (Array.isArray(rawPayload)) {
+        rawTopics = rawPayload;
+      } else if (Array.isArray(rawPayload.topics)) {
+        rawTopics = rawPayload.topics;
+      } else if (Array.isArray(rawPayload.sessions)) {
+        rawTopics = rawPayload.sessions;
+      } else if (Array.isArray(rawPayload.items)) {
+        rawTopics = rawPayload.items;
+      } else if (rawPayload.topicId || rawPayload.topicTitle || rawPayload.topicNumber || rawPayload.tema || rawPayload.topic || rawPayload.materia || rawPayload.subject) {
+        rawTopics = [rawPayload];
+      }
 
-      for (const topic of (event.topics || [])) {
-        let topicId = topic.resolvedTopicId;
-        if (!topicId) continue;
-        if (topicId === "5" || topicId === (5 as any)) topicId = "constitucional-5";
+      if (rawTopics.length === 0) {
+        toast.error("No se detectaron temas o sesiones válidas en los datos proporcionados.");
+        return false;
+      }
 
-        const countSoFar = (topicSeenCount.get(topicId) || 0) + 1;
-        topicSeenCount.set(topicId, countSoFar);
-        const totalCount = topicOccurrences.get(topicId) || 1;
-        const isLastForTopic = countSoFar === totalCount;
+      const resolvedTopics: WebhookResolvedTopic[] = [];
 
-        const durationMins = topic.effectiveMinutes || Math.round((topic.effectiveHours || 0) * 60) || 60;
+      // Filtrar temas que sean meras marcas de distracción o pausa
+      const filteredRawTopics = rawTopics.filter(t => {
+        const mod = String(t.modalidad || t.modality || t.type || '').toLowerCase();
+        if (mod === 'distraction' || mod === 'distraccion' || mod === 'pausa' || mod === 'break' || mod === 'descanso') {
+          return false;
+        }
+        const title = String(t.tema || t.topic || t.topicTitle || '').toLowerCase();
+        if (title.includes('distracci') || title.includes('pausa') || title.includes('descanso')) {
+          return false;
+        }
+        return true;
+      });
+
+      const totalFlightMins = Number(
+        rawPayload.minutosEfectivos ??
+        rawPayload.totalEffectiveStudyMinutes ??
+        rawPayload.effectiveMinutes ??
+        rawPayload.dailyTotalEffectiveMinutes ??
+        rawPayload.totalFlightEffectiveMinutes ??
+        (rawPayload.dailyTotalEffectiveHours ? rawPayload.dailyTotalEffectiveHours * 60 : 0)
+      ) || 0;
+
+      const topicsCount = filteredRawTopics.length || 1;
+      const distributedFallbackMins = totalFlightMins > 0 ? Math.max(15, Math.round(totalFlightMins / topicsCount)) : 45;
+
+      for (const t of filteredRawTopics) {
+        const materia = t.materia || t.subject || t.subjectName || t.category || rawPayload.materia || rawPayload.subject || "Constitucional";
+        const modalidad = t.modalidad || t.modality || t.type || rawPayload.modalidad || rawPayload.modality || "repaso";
         
-        // Descartar sesiones fantasmas de 1 minuto procedentes de pings o distracciones en la aprobación
-        if (durationMins <= 1 && !topic.cantoGrade && Number(topic.cantoGrade || 0) === 0) {
+        // Extracción precisa de los minutos del tema
+        const directMins = extractMinutesFromAeroItem(t, 0);
+        const minutos = directMins > 0 ? directMins : distributedFallbackMins;
+        const horas = Math.round((minutos / 60) * 100) / 100;
+
+        // Descartar sesiones fantasmas de 1 minuto procedentes de pings o clics accidentales
+        if (minutos <= 1 && !t.cantoGrade && !t.grade) {
           continue;
         }
 
-        const modalityType = topic.modality === 'primer_estudio'
-          ? 'estudio_inicial'
-          : (topic.modality === 'refresco' ? 'refresco' : (topic.modality === 'canto' ? 'canto' : 'repaso'));
+        const startPage = t.startPage ?? t.pages?.pageStart ?? null;
+        const endPage = t.endPage ?? t.pages?.pageEnd ?? null;
+        const pagesCount = t.pagesCount ?? t.pages?.pagesCount ?? (startPage != null && endPage != null ? Math.max(0, endPage - startPage + 1) : 0);
+        const pagesText = t.pagesText ?? t.pages?.rawText ?? t.paginas ?? (startPage != null && endPage != null ? `Págs. ${startPage}-${endPage}` : undefined);
+        const isCompleted = Boolean(t.completado || t.completed || t.isTopicCompleted || t.status === 'completed');
 
-        // Si hay múltiples repasos del mismo tema en la misma sincronización (repasos partidos),
-        // solo el último completa vuelta por defecto a menos que se indique explícitamente.
-        let completesVuelta = false;
-        if ((topic as any).completesVuelta !== undefined) {
-          completesVuelta = Boolean((topic as any).completesVuelta);
-        } else if (modalityType === 'repaso' || modalityType === 'canto') {
-          completesVuelta = isLastForTopic;
+        const enriched = {
+          ...t,
+          category: materia,
+          materia,
+          modality: modalidad,
+          modalidad,
+          effectiveHours: horas,
+          horasEfectivas: horas,
+          effectiveMinutes: minutos,
+          minutosEfectivos: minutos,
+          startPage,
+          endPage,
+          pagesCount,
+          pagesText,
+          isTopicCompleted: isCompleted,
+          completesVuelta: isCompleted || Boolean(t.completesVuelta)
+        };
+        const resolved = resolveAeroFocusTopic(enriched);
+        if (resolved) {
+          resolvedTopics.push({
+            ...resolved,
+            effectiveMinutes: minutos,
+            effectiveHours: horas,
+            startPage: startPage !== null ? Number(startPage) : resolved.startPage,
+            endPage: endPage !== null ? Number(endPage) : resolved.endPage,
+            pagesCount: pagesCount || resolved.pagesCount,
+            pagesText: pagesText || resolved.pagesText,
+            isTopicCompleted: isCompleted || resolved.isTopicCompleted,
+            completesVuelta: isCompleted || resolved.completesVuelta
+          });
+        } else {
+          const rawTitleStr = t.topicTitle || t.tema || t.topic || t.title || "";
+          const subId = normalizeCategoryToSubjectId(materia) || normalizeCategoryToSubjectId(rawTitleStr);
+          const parsedNum = extractTopicNumber(t.topicNumber) || extractTopicNumber(t.temaNumero) || extractTopicNumber(rawTitleStr) || extractTopicNumber(t.id);
+          const matchedOfficial = parsedNum && subId ? initialTopics.find(it => it.subjectId === subId && it.number === parsedNum) : undefined;
+
+          const finalSubId = matchedOfficial ? matchedOfficial.subjectId : (subId || (parsedNum ? 'constitucional' : 'otros'));
+          const finalNum = matchedOfficial ? matchedOfficial.number : (parsedNum && parsedNum > 0 ? parsedNum : undefined);
+          const finalTopicId = matchedOfficial ? matchedOfficial.id : (finalNum ? `${finalSubId}-${finalNum}` : `pendiente_${Date.now()}`);
+          const finalTitle = matchedOfficial
+            ? `Tema ${matchedOfficial.number} - ${matchedOfficial.title}`
+            : (rawTitleStr || (finalNum ? `Tema ${finalNum} (${finalSubId})` : 'Sesión pendiente de clasificar'));
+
+          const fallbackTopic: WebhookResolvedTopic = {
+            resolvedTopicId: finalTopicId,
+            resolvedSubjectId: finalSubId,
+            resolvedTopicNumber: finalNum,
+            resolvedTopicTitle: finalTitle,
+            effectiveMinutes: minutos,
+            effectiveHours: horas,
+            modality: (modalidad as any) || "repaso",
+            startPage: startPage !== null ? Number(startPage) : undefined,
+            endPage: endPage !== null ? Number(endPage) : undefined,
+            pagesCount: pagesCount || undefined,
+            pagesText: pagesText || undefined,
+            isTopicCompleted: isCompleted,
+            completesVuelta: isCompleted || Boolean(t.completesVuelta),
+            notes: t.notes || "Importado desde AeroFocus Pro",
+            original: t,
+          };
+          if (t.cantoGrade !== undefined || t.grade !== undefined) fallbackTopic.cantoGrade = t.cantoGrade ?? t.grade;
+          if (t.cantoSeconds !== undefined) fallbackTopic.cantoSeconds = t.cantoSeconds;
+          if (t.cantoType !== undefined) fallbackTopic.cantoType = t.cantoType;
+          if (t.mistakes !== undefined) fallbackTopic.mistakes = t.mistakes;
+          if (t.difficulty !== undefined) {
+            fallbackTopic.difficulty = Number(t.difficulty);
+            fallbackTopic.dificultadReal = Number(t.difficulty);
+          }
+          resolvedTopics.push(fallbackTopic);
         }
-
-        const sessionRef = doc(collection(db, `users/${user.uid}/sessions`));
-        const sessionDoc = cleanForFirestore({
-          userId: user.uid,
-          topicId,
-          topicTitle: topic.resolvedTopicTitle,
-          date: event.date || getLocalDateString(),
-          durationMinutes: durationMins,
-          durationReal: durationMins,
-          difficulty: topic.difficulty !== undefined ? topic.difficulty : undefined,
-          dificultadReal: topic.difficulty !== undefined ? topic.difficulty : undefined,
-          type: modalityType,
-          modality: topic.modality,
-          notes: topic.notes || `Aprobado desde Cuarentena AeroFocus (Vuelo #${event.flightId || 'N/A'})`,
-          source: 'aerofocus_approved',
-          flightId: String(event.flightId || ''),
-          effectiveHours: topic.effectiveHours || (durationMins / 60),
-          cantoGrade: topic.cantoGrade,
-          cantoSeconds: topic.cantoSeconds,
-          cantoType: topic.cantoType,
-          mistakes: topic.mistakes,
-          completesVuelta,
-          startPage: topic.startPage !== undefined ? topic.startPage : topic.pageInfo?.startPage,
-          endPage: topic.endPage !== undefined ? topic.endPage : topic.pageInfo?.endPage,
-          pagesCount: topic.pagesCount !== undefined ? topic.pagesCount : topic.pageInfo?.pagesRead,
-          pagesText: topic.pagesText || (topic.startPage && topic.endPage ? `Págs. ${topic.startPage}-${topic.endPage}` : undefined),
-          distractionSeconds: topic.distractionSeconds,
-          summaryLine: topic.summaryLine,
-          createdAt: serverTimestamp(),
-        });
-        await setDoc(sessionRef, sessionDoc);
-        newSessionItems.push({
-          id: sessionRef.id,
-          ...sessionDoc,
-          createdAt: new Date().toISOString()
-        });
-        affectedTopicIds.add(topicId);
       }
 
-      if (newSessionItems.length > 0) {
-        setRecentSessions(prev => [...newSessionItems, ...(prev || [])]);
-      }
+      const totalEffectiveMinutes =
+        Number(rawPayload.totalFlightEffectiveMinutes) ||
+        resolvedTopics.reduce((acc, t) => acc + (t.effectiveMinutes || 0), 0);
+      const totalEffectiveHours =
+        Number(rawPayload.dailyTotalEffectiveHours) ||
+        Number(rawPayload.totalFlightEffectiveHours) ||
+        Math.round((totalEffectiveMinutes / 60) * 100) / 100;
 
-      for (const tid of affectedTopicIds) {
-        await recalculateTopicFromSessions(tid);
-      }
+      const record: WebhookSyncRecord = {
+        id: `af_manual_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+        receivedAt: new Date().toISOString(),
+        date: rawPayload.date || rawPayload.flightDate || getLocalDateString(),
+        source: rawPayload.source || "aerofocus_manual",
+        flightId: String(rawPayload.flightId || rawPayload.id || `vuelo_${Date.now()}`),
+        totalFlightEffectiveMinutes: totalEffectiveMinutes,
+        totalFlightEffectiveHours: totalEffectiveHours,
+        status: "processed",
+        topics: resolvedTopics,
+        summary: rawPayload.summary || {
+          estudioHours: resolvedTopics.filter(t => t.modality === "primer_estudio").reduce((a, b) => a + b.effectiveHours, 0),
+          repasoHours: resolvedTopics.filter(t => t.modality === "repaso").reduce((a, b) => a + b.effectiveHours, 0),
+          refrescoHours: resolvedTopics.filter(t => t.modality === "refresco").reduce((a, b) => a + b.effectiveHours, 0),
+          cantoHours: resolvedTopics.filter(t => t.modality === "canto").reduce((a, b) => a + b.effectiveHours, 0),
+          totalHours: totalEffectiveHours,
+        },
+      };
 
-      await fetch("/api/webhook/ack", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ eventId }),
-      }).catch(() => {});
+      // Guardar en Firestore para sincronización permanente entre pestañas y dispositivos
+      const qDocRef = doc(db, `users/${user.uid}/quarantine`, record.id);
+      await setDoc(qDocRef, cleanForFirestore(record));
 
-      // Eliminar también de Firestore
-      deleteDoc(doc(db, `users/${user.uid}/quarantine`, eventId)).catch(() => {});
-
-      setQuarantinedEvents(prev => prev.filter(e => e.id !== eventId));
-      toast.dismiss(toastId);
-      toast.success("Evento validado e integrado en tu expediente oficial.");
+      // Incorporar automáticamente las sesiones al expediente oficial
+      await incorporateAeroFocusEvent(record, "aerofocus_auto", true);
       return true;
+    } catch (e: any) {
+      console.error("Error adding manual quarantine event:", e);
+      toast.error("Error al procesar la sesión de AeroFocus: " + e.message);
+      return false;
+    }
+  }, [user, incorporateAeroFocusEvent]);
+
+  // Aprobación manual y explícita por parte del estudiante
+  const approveQuarantineEvent = useCallback(async (eventId: string): Promise<boolean> => {
+    if (!user) return false;
+    const toastId = toast.loading("Aprobando e incorporando evento a tu expediente...");
+    try {
+      const event = quarantinedEvents.find(e => e.id === eventId);
+      if (!event) throw new Error("Evento no encontrado en cuarentena");
+
+      const success = await incorporateAeroFocusEvent(event, "aerofocus_approved", false);
+      toast.dismiss(toastId);
+      if (success) {
+        toast.success("Evento validado e integrado en tu expediente oficial.");
+      } else {
+        toast.error("Error al integrar el evento.");
+      }
+      return success;
     } catch (err: any) {
+      toast.dismiss(toastId);
+      toast.error("Error al aprobar evento: " + err.message);
+      return false;
+    }
+  }, [user, quarantinedEvents, incorporateAeroFocusEvent]);
       toast.dismiss(toastId);
       toast.error("Error al aprobar evento: " + err.message);
       return false;
