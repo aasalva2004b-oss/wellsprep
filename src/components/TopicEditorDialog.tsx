@@ -447,13 +447,31 @@ export function TopicEditorDialog({
 
   const handleDeleteSession = async (ids: string[]) => {
     try {
-      for (const id of ids) {
+      const cleanIds = (Array.isArray(ids) ? ids : [ids])
+        .map((id) => String(id).replace(/^group-[^-]+-/, "").trim())
+        .filter(Boolean);
+
+      if (cleanIds.length === 0) {
+        setSessionToDelete(null);
+        return;
+      }
+
+      // 1. Desalojo optimista instantáneo en el estado local de la ficha del tema
+      setSessions((prev) =>
+        prev.filter((s) => {
+          const sCleanId = String(s.id).replace(/^group-[^-]+-/, "").trim();
+          return !cleanIds.includes(s.id) && !cleanIds.includes(sCleanId);
+        })
+      );
+      setSessionToDelete(null);
+
+      // 2. Borrado definitivo en base de datos y recálculo
+      for (const id of cleanIds) {
         await deleteStudySession(topicId, id);
       }
-      toast.success("Sesión eliminada");
-      setSessionToDelete(null);
-    } catch (e) {
-      toast.error("Error eliminando sesión");
+    } catch (e: any) {
+      console.error("Error al eliminar sesión:", e);
+      toast.error("Error eliminando sesión: " + (e?.message || e));
     }
   };
 

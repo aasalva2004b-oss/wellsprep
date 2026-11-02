@@ -885,6 +885,7 @@ export function DashboardView({
               onManageCantos={() => setIsManagingCantos(true)}
               onLogCanto={handleOpenLogCanto}
               onSelectTopic={onSelectTopic}
+              onDeleteCanto={handleDeleteCanto}
             />
           )}
         </div>

@@ -264,11 +264,26 @@ export function useTopicEditor({ topic, topicId, progress, onClose }: UseTopicEd
   // Delete session handler
   const handleDeleteSession = async (ids: string[]) => {
     try {
-      for (const id of ids) {
+      const cleanIds = (Array.isArray(ids) ? ids : [ids])
+        .map((id) => String(id).replace(/^group-[^-]+-/, "").trim())
+        .filter(Boolean);
+
+      if (cleanIds.length === 0) {
+        setSessionToDelete(null);
+        return;
+      }
+
+      setSessions((prev) =>
+        prev.filter((s) => {
+          const sCleanId = String(s.id).replace(/^group-[^-]+-/, "").trim();
+          return !cleanIds.includes(s.id) && !cleanIds.includes(sCleanId);
+        })
+      );
+      setSessionToDelete(null);
+
+      for (const id of cleanIds) {
         await deleteStudySession(topicId, id);
       }
-      setSessionToDelete(null);
-      toast.success("Sesión eliminada correctamente");
     } catch (e: any) {
       toast.error("Error al eliminar la sesión: " + e.message);
     }

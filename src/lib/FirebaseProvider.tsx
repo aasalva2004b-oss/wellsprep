@@ -1,4 +1,5 @@
 import { getLocalDateString, safeParseDate } from './utils';
+import { playSound } from './sound';
 import {
   createContext,
   useContext,
@@ -132,7 +133,7 @@ interface FirebaseContextType {
     updatedData: Partial<any>,
     previousSession: any
   ) => Promise<void>;
-  deleteStudySession: (topicId: string, sessionId: string) => Promise<void>;
+  deleteStudySession: (arg1: string, arg2?: string) => Promise<void>;
   quickUpdateSessionDifficulty: (
     sessionId: string,
     difficulty: number,
@@ -196,6 +197,7 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
   );
   const [isSyncingWebhooks, setIsSyncingWebhooks] = useState(false);
   const inFlightSessionLocks = useRef<Set<string>>(new Set());
+  const deletedSessionIds = useRef<Set<string>>(new Set());
   const [aerofocusBetaEnabled, setAerofocusBetaEnabledState] = useState<boolean>(() => {
     return localStorage.getItem("aerofocus_beta_enabled") !== "false";
   });
@@ -226,9 +228,22 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!user) return;
 
-    // Multi-database real-time sessions and progress maps
-    const sessionsMap = new Map<string, any>();
-    const progressMap = new Map<string, TopicProgressData>();
+    // Database-scoped real-time maps to cleanly handle deletions across namedDb and defaultDb
+    const dbSessions: {
+      namedDb: Map<string, any>;
+      defaultDb: Map<string, any>;
+    } = {
+      namedDb: new Map(),
+      defaultDb: new Map(),
+    };
+
+    const dbProgress: {
+      namedDb: Map<string, TopicProgressData>;
+      defaultDb: Map<string, TopicProgressData>;
+    } = {
+      namedDb: new Map(),
+      defaultDb: new Map(),
+    };
 
     const normalizeSession = (id: string, data: any, originDb: string) => {
       let canonicalTopicId = data.topicId;
@@ -260,9 +275,19 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
       };
     };
 
-    const handleSessionsSnapshot = (snapshot: any, originDb: string) => {
-      let hasNewDefaultDbSessions = false;
+    const handleSessionsSnapshot = (snapshot: any, originDb: "namedDb" | "defaultDb") => {
+      const currentMap = new Map<string, any>();
+
       snapshot.forEach((docSnap: any) => {
+        // If explicitly deleted by user, purge and do not process
+        if (deletedSessionIds.current.has(docSnap.id)) {
+          deleteDoc(doc(db, `users/${user.uid}/sessions`, docSnap.id)).catch(() => {});
+          if (defaultDb) {
+            deleteDoc(doc(defaultDb, `users/${user.uid}/sessions`, docSnap.id)).catch(() => {});
+          }
+          return;
+        }
+
         const s = normalizeSession(docSnap.id, docSnap.data(), originDb);
 
         // Surgical shield: Reject phantom cante from AeroFocus or 8.5 grade/30s
@@ -281,24 +306,32 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
 
         if (isPhantomAero || isPhantomDirect || isPhantomOneMin) {
           deleteDoc(doc(db, `users/${user.uid}/sessions`, docSnap.id)).catch(() => {});
+          if (defaultDb) {
+            deleteDoc(doc(defaultDb, `users/${user.uid}/sessions`, docSnap.id)).catch(() => {});
+          }
           return;
         }
 
-        sessionsMap.set(docSnap.id, s);
+        currentMap.set(docSnap.id, s);
+      });
 
-        // If session originates from defaultDb and is missing in db, auto-replicate to named db
-        if (originDb === "defaultDb") {
-          hasNewDefaultDbSessions = true;
-          setDoc(doc(db, `users/${user.uid}/sessions`, docSnap.id), cleanForFirestore({
-            ...docSnap.data(),
-            topicId: s.topicId,
-            userId: user.uid,
-            updatedAt: serverTimestamp(),
-          }), { merge: true }).catch(() => {});
+      // Update the database-specific slice
+      dbSessions[originDb] = currentMap;
+
+      // Merge: defaultDb first, namedDb takes priority
+      const mergedSessions = new Map<string, any>();
+      dbSessions.defaultDb.forEach((s, id) => {
+        if (!deletedSessionIds.current.has(id)) {
+          mergedSessions.set(id, s);
+        }
+      });
+      dbSessions.namedDb.forEach((s, id) => {
+        if (!deletedSessionIds.current.has(id)) {
+          mergedSessions.set(id, s);
         }
       });
 
-      const sList = Array.from(sessionsMap.values());
+      const sList = Array.from(mergedSessions.values());
       // Sort sessions by date descending
       sList.sort((a, b) => {
         const dateCmp = (b.date || "").localeCompare(a.date || "");
@@ -312,7 +345,9 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
       setLoading(false);
     };
 
-    const handleProgressSnapshot = (snapshot: any, originDb: string) => {
+    const handleProgressSnapshot = (snapshot: any, originDb: "namedDb" | "defaultDb") => {
+      const currentMap = new Map<string, TopicProgressData>();
+
       snapshot.forEach((docSnap: any) => {
         const rawData = { ...docSnap.data() };
         let tId = docSnap.id;
@@ -341,36 +376,20 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
           }).catch(() => {});
         }
 
-        const existing: any = progressMap.get(tId) || {};
-        // Intelligent deep merge
-        const merged: TopicProgressData = {
-          ...existing,
+        currentMap.set(tId, {
           ...rawData,
           topicId: tId,
-          vueltas: Math.max(Number(rawData.vueltas) || 0, Number(existing.vueltas) || 0),
-          studyTimeHours: Math.max(Number(rawData.studyTimeHours) || 0, Number(existing.studyTimeHours) || 0),
-          mejorTiempoCantoMinutos: rawData.mejorTiempoCantoMinutos ?? existing.mejorTiempoCantoMinutos,
-          mejorTiempoCantoSegundos: rawData.mejorTiempoCantoSegundos ?? existing.mejorTiempoCantoSegundos,
-          ultimoCantoMinutos: rawData.ultimoCantoMinutos ?? existing.ultimoCantoMinutos,
-          ultimoCantoSegundos: rawData.ultimoCantoSegundos ?? existing.ultimoCantoSegundos,
-          ultimoCantoFecha: rawData.ultimoCantoFecha || existing.ultimoCantoFecha,
-          ultimoCantoNota: rawData.ultimoCantoNota ?? existing.ultimoCantoNota,
-          firstStudyDate: existing.firstStudyDate || rawData.firstStudyDate,
-          lastReviewDate: rawData.lastReviewDate || existing.lastReviewDate,
-        };
-        progressMap.set(tId, merged);
-
-        if (originDb === "defaultDb") {
-          setDoc(doc(db, `users/${user.uid}/progress`, tId), cleanForFirestore({
-            ...merged,
-            userId: user.uid,
-            updatedAt: serverTimestamp(),
-          }), { merge: true }).catch(() => {});
-        }
+        });
       });
 
+      dbProgress[originDb] = currentMap;
+
+      const mergedProgress = new Map<string, TopicProgressData>();
+      dbProgress.defaultDb.forEach((v, k) => mergedProgress.set(k, v));
+      dbProgress.namedDb.forEach((v, k) => mergedProgress.set(k, v));
+
       const pObj: Record<string, TopicProgressData> = {};
-      progressMap.forEach((v, k) => {
+      mergedProgress.forEach((v, k) => {
         pObj[k] = v;
       });
       setUserProgress(pObj);
@@ -786,7 +805,11 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
         progressUpdate.mejorTiempoCantoSegundos = deleteField();
       }
 
-      if (earliestDate) progressUpdate.firstStudyDate = earliestDate;
+      if (earliestDate) {
+        progressUpdate.firstStudyDate = earliestDate;
+      } else {
+        progressUpdate.firstStudyDate = deleteField();
+      }
       if (latestDate) {
         progressUpdate.lastReviewDate = latestDate;
         let daysOffset = 30;
@@ -795,6 +818,9 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
         const nextReviewDateObj = new Date(latestDate);
         nextReviewDateObj.setDate(nextReviewDateObj.getDate() + daysOffset);
         progressUpdate.nextReviewDate = getLocalDateString(nextReviewDateObj);
+      } else {
+        progressUpdate.lastReviewDate = deleteField();
+        progressUpdate.nextReviewDate = deleteField();
       }
       progressUpdate.srsRepetitions = vueltasCount;
       progressUpdate.srsInterval = 30;
@@ -824,6 +850,11 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
           delete (cleanTopic as any).ultimoCantoFecha;
           delete (cleanTopic as any).mejorTiempoCantoMinutos;
           delete (cleanTopic as any).mejorTiempoCantoSegundos;
+          if (!earliestDate) {
+            delete (cleanTopic as any).firstStudyDate;
+            delete (cleanTopic as any).lastReviewDate;
+            delete (cleanTopic as any).nextReviewDate;
+          }
           copy[targetTopicId] = cleanTopic;
         }
         return copy;
@@ -833,14 +864,69 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  const deleteStudySession = async (topicId: string, sessionId: string) => {
+  const deleteStudySession = async (arg1: string, arg2?: string) => {
     if (!user) return;
     try {
-      await deleteDoc(doc(db, `users/${user.uid}/sessions`, sessionId));
-      if (topicId) {
-        await recalculateTopicFromSessions(topicId);
+      let targetSessionId = "";
+      let targetTopicId = "";
+
+      if (arg2) {
+        // Called with 2 arguments: (topicId, sessionId) or (sessionId, topicId)
+        const sByArg2 = recentSessions.find((s) => s.id === arg2);
+        const sByArg1 = recentSessions.find((s) => s.id === arg1);
+        if (sByArg2) {
+          targetSessionId = arg2;
+          targetTopicId = arg1 || sByArg2.topicId;
+        } else if (sByArg1) {
+          targetSessionId = arg1;
+          targetTopicId = arg2 || sByArg1.topicId;
+        } else {
+          targetSessionId = arg2;
+          targetTopicId = arg1;
+        }
+      } else {
+        // Called with 1 argument: (sessionId)
+        targetSessionId = arg1;
+        const found = recentSessions.find((s) => s.id === arg1);
+        if (found) targetTopicId = found.topicId;
       }
-      toast.success("Sesión eliminada y horas recalculadas.");
+
+      // Strip any synthetic prefix e.g. "group-repaso-"
+      targetSessionId = String(targetSessionId).replace(/^group-[^-]+-/, "");
+
+      if (!targetSessionId) {
+        console.warn("deleteStudySession called without valid sessionId");
+        return;
+      }
+
+      // Mark as deleted in session cache to prevent resurrection from delayed snapshots
+      deletedSessionIds.current.add(targetSessionId);
+
+      // 1. Immediate optimistic UI eviction (0ms latency)
+      setRecentSessions((prev) => (prev || []).filter((s) => s.id !== targetSessionId));
+
+      // 2. Delete from named Firestore database
+      await deleteDoc(doc(db, `users/${user.uid}/sessions`, targetSessionId));
+
+      // 3. Delete from defaultDb if present
+      if (defaultDb) {
+        await deleteDoc(doc(defaultDb, `users/${user.uid}/sessions`, targetSessionId)).catch(() => {});
+      }
+
+      // 4. Evict from localStorage backup
+      try {
+        const backupKey = `wp_sessions_backup_${user.uid}`;
+        const stored = JSON.parse(localStorage.getItem(backupKey) || "[]");
+        const filtered = stored.filter((s: any) => s.id !== targetSessionId);
+        localStorage.setItem(backupKey, JSON.stringify(filtered));
+      } catch {}
+
+      // 5. Recalculate topic progress and telemetry
+      if (targetTopicId) {
+        await recalculateTopicFromSessions(targetTopicId);
+      }
+
+      toast.success("Sesión eliminada y estadísticas actualizadas.");
     } catch (e: any) {
       console.error("Error deleting session:", e);
       toast.error("Error al eliminar sesión: " + e.message);
@@ -2275,11 +2361,6 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
     }
   }, [user, webhookToken]);
 
-  // Aprobación manual y explícita por parte del estudiante (salida de cuarentena)
-  const approveQuarantineEvent = useCallback(async (eventId: string): Promise<boolean> => {
-    if (!user) return false;
-    const toastId = toast.loading("Aprobando e incorporando evento a tu expediente...");
-    try {
   // Incorpora un evento de AeroFocus de forma completa y oficial a las sesiones del usuario y actualiza progreso
   const incorporateAeroFocusEvent = useCallback(
     async (
@@ -2431,198 +2512,6 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
     [user, recalculateTopicFromSessions]
   );
 
-  // Importación e inserción manual de transmisiones de AeroFocus
-  const addQuarantineEventManually = useCallback(async (rawInput: any): Promise<boolean> => {
-    if (!user) {
-      toast.error("Debes iniciar sesión para importar sesiones.");
-      return false;
-    }
-    try {
-      const parsedRes = parseAeroFocusInput(rawInput);
-      if (!parsedRes.success || !parsedRes.payload) {
-        toast.error(parsedRes.error || "No se pudo interpretar el formato de AeroFocus.");
-        return false;
-      }
-
-      const rawPayload = parsedRes.payload;
-      let rawTopics: any[] = [];
-      if (Array.isArray(rawPayload)) {
-        rawTopics = rawPayload;
-      } else if (Array.isArray(rawPayload.topics)) {
-        rawTopics = rawPayload.topics;
-      } else if (Array.isArray(rawPayload.sessions)) {
-        rawTopics = rawPayload.sessions;
-      } else if (Array.isArray(rawPayload.items)) {
-        rawTopics = rawPayload.items;
-      } else if (rawPayload.topicId || rawPayload.topicTitle || rawPayload.topicNumber || rawPayload.tema || rawPayload.topic || rawPayload.materia || rawPayload.subject) {
-        rawTopics = [rawPayload];
-      }
-
-      if (rawTopics.length === 0) {
-        toast.error("No se detectaron temas o sesiones válidas en los datos proporcionados.");
-        return false;
-      }
-
-      const resolvedTopics: WebhookResolvedTopic[] = [];
-
-      // Filtrar temas que sean meras marcas de distracción o pausa
-      const filteredRawTopics = rawTopics.filter(t => {
-        const mod = String(t.modalidad || t.modality || t.type || '').toLowerCase();
-        if (mod === 'distraction' || mod === 'distraccion' || mod === 'pausa' || mod === 'break' || mod === 'descanso') {
-          return false;
-        }
-        const title = String(t.tema || t.topic || t.topicTitle || '').toLowerCase();
-        if (title.includes('distracci') || title.includes('pausa') || title.includes('descanso')) {
-          return false;
-        }
-        return true;
-      });
-
-      const totalFlightMins = Number(
-        rawPayload.minutosEfectivos ??
-        rawPayload.totalEffectiveStudyMinutes ??
-        rawPayload.effectiveMinutes ??
-        rawPayload.dailyTotalEffectiveMinutes ??
-        rawPayload.totalFlightEffectiveMinutes ??
-        (rawPayload.dailyTotalEffectiveHours ? rawPayload.dailyTotalEffectiveHours * 60 : 0)
-      ) || 0;
-
-      const topicsCount = filteredRawTopics.length || 1;
-      const distributedFallbackMins = totalFlightMins > 0 ? Math.max(15, Math.round(totalFlightMins / topicsCount)) : 45;
-
-      for (const t of filteredRawTopics) {
-        const materia = t.materia || t.subject || t.subjectName || t.category || rawPayload.materia || rawPayload.subject || "Constitucional";
-        const modalidad = t.modalidad || t.modality || t.type || rawPayload.modalidad || rawPayload.modality || "repaso";
-        
-        // Extracción precisa de los minutos del tema
-        const directMins = extractMinutesFromAeroItem(t, 0);
-        const minutos = directMins > 0 ? directMins : distributedFallbackMins;
-        const horas = Math.round((minutos / 60) * 100) / 100;
-
-        // Descartar sesiones fantasmas de 1 minuto procedentes de pings o clics accidentales
-        if (minutos <= 1 && !t.cantoGrade && !t.grade) {
-          continue;
-        }
-
-        const startPage = t.startPage ?? t.pages?.pageStart ?? null;
-        const endPage = t.endPage ?? t.pages?.pageEnd ?? null;
-        const pagesCount = t.pagesCount ?? t.pages?.pagesCount ?? (startPage != null && endPage != null ? Math.max(0, endPage - startPage + 1) : 0);
-        const pagesText = t.pagesText ?? t.pages?.rawText ?? t.paginas ?? (startPage != null && endPage != null ? `Págs. ${startPage}-${endPage}` : undefined);
-        const isCompleted = Boolean(t.completado || t.completed || t.isTopicCompleted || t.status === 'completed');
-
-        const enriched = {
-          ...t,
-          category: materia,
-          materia,
-          modality: modalidad,
-          modalidad,
-          effectiveHours: horas,
-          horasEfectivas: horas,
-          effectiveMinutes: minutos,
-          minutosEfectivos: minutos,
-          startPage,
-          endPage,
-          pagesCount,
-          pagesText,
-          isTopicCompleted: isCompleted,
-          completesVuelta: isCompleted || Boolean(t.completesVuelta)
-        };
-        const resolved = resolveAeroFocusTopic(enriched);
-        if (resolved) {
-          resolvedTopics.push({
-            ...resolved,
-            effectiveMinutes: minutos,
-            effectiveHours: horas,
-            startPage: startPage !== null ? Number(startPage) : resolved.startPage,
-            endPage: endPage !== null ? Number(endPage) : resolved.endPage,
-            pagesCount: pagesCount || resolved.pagesCount,
-            pagesText: pagesText || resolved.pagesText,
-            isTopicCompleted: isCompleted || resolved.isTopicCompleted,
-            completesVuelta: isCompleted || resolved.completesVuelta
-          });
-        } else {
-          const rawTitleStr = t.topicTitle || t.tema || t.topic || t.title || "";
-          const subId = normalizeCategoryToSubjectId(materia) || normalizeCategoryToSubjectId(rawTitleStr);
-          const parsedNum = extractTopicNumber(t.topicNumber) || extractTopicNumber(t.temaNumero) || extractTopicNumber(rawTitleStr) || extractTopicNumber(t.id);
-          const matchedOfficial = parsedNum && subId ? initialTopics.find(it => it.subjectId === subId && it.number === parsedNum) : undefined;
-
-          const finalSubId = matchedOfficial ? matchedOfficial.subjectId : (subId || (parsedNum ? 'constitucional' : 'otros'));
-          const finalNum = matchedOfficial ? matchedOfficial.number : (parsedNum && parsedNum > 0 ? parsedNum : undefined);
-          const finalTopicId = matchedOfficial ? matchedOfficial.id : (finalNum ? `${finalSubId}-${finalNum}` : `pendiente_${Date.now()}`);
-          const finalTitle = matchedOfficial
-            ? `Tema ${matchedOfficial.number} - ${matchedOfficial.title}`
-            : (rawTitleStr || (finalNum ? `Tema ${finalNum} (${finalSubId})` : 'Sesión pendiente de clasificar'));
-
-          const fallbackTopic: WebhookResolvedTopic = {
-            resolvedTopicId: finalTopicId,
-            resolvedSubjectId: finalSubId,
-            resolvedTopicNumber: finalNum,
-            resolvedTopicTitle: finalTitle,
-            effectiveMinutes: minutos,
-            effectiveHours: horas,
-            modality: (modalidad as any) || "repaso",
-            startPage: startPage !== null ? Number(startPage) : undefined,
-            endPage: endPage !== null ? Number(endPage) : undefined,
-            pagesCount: pagesCount || undefined,
-            pagesText: pagesText || undefined,
-            isTopicCompleted: isCompleted,
-            completesVuelta: isCompleted || Boolean(t.completesVuelta),
-            notes: t.notes || "Importado desde AeroFocus Pro",
-            original: t,
-          };
-          if (t.cantoGrade !== undefined || t.grade !== undefined) fallbackTopic.cantoGrade = t.cantoGrade ?? t.grade;
-          if (t.cantoSeconds !== undefined) fallbackTopic.cantoSeconds = t.cantoSeconds;
-          if (t.cantoType !== undefined) fallbackTopic.cantoType = t.cantoType;
-          if (t.mistakes !== undefined) fallbackTopic.mistakes = t.mistakes;
-          if (t.difficulty !== undefined) {
-            fallbackTopic.difficulty = Number(t.difficulty);
-            fallbackTopic.dificultadReal = Number(t.difficulty);
-          }
-          resolvedTopics.push(fallbackTopic);
-        }
-      }
-
-      const totalEffectiveMinutes =
-        Number(rawPayload.totalFlightEffectiveMinutes) ||
-        resolvedTopics.reduce((acc, t) => acc + (t.effectiveMinutes || 0), 0);
-      const totalEffectiveHours =
-        Number(rawPayload.dailyTotalEffectiveHours) ||
-        Number(rawPayload.totalFlightEffectiveHours) ||
-        Math.round((totalEffectiveMinutes / 60) * 100) / 100;
-
-      const record: WebhookSyncRecord = {
-        id: `af_manual_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-        receivedAt: new Date().toISOString(),
-        date: rawPayload.date || rawPayload.flightDate || getLocalDateString(),
-        source: rawPayload.source || "aerofocus_manual",
-        flightId: String(rawPayload.flightId || rawPayload.id || `vuelo_${Date.now()}`),
-        totalFlightEffectiveMinutes: totalEffectiveMinutes,
-        totalFlightEffectiveHours: totalEffectiveHours,
-        status: "processed",
-        topics: resolvedTopics,
-        summary: rawPayload.summary || {
-          estudioHours: resolvedTopics.filter(t => t.modality === "primer_estudio").reduce((a, b) => a + b.effectiveHours, 0),
-          repasoHours: resolvedTopics.filter(t => t.modality === "repaso").reduce((a, b) => a + b.effectiveHours, 0),
-          refrescoHours: resolvedTopics.filter(t => t.modality === "refresco").reduce((a, b) => a + b.effectiveHours, 0),
-          cantoHours: resolvedTopics.filter(t => t.modality === "canto").reduce((a, b) => a + b.effectiveHours, 0),
-          totalHours: totalEffectiveHours,
-        },
-      };
-
-      // Guardar en Firestore para sincronización permanente entre pestañas y dispositivos
-      const qDocRef = doc(db, `users/${user.uid}/quarantine`, record.id);
-      await setDoc(qDocRef, cleanForFirestore(record));
-
-      // Incorporar automáticamente las sesiones al expediente oficial
-      await incorporateAeroFocusEvent(record, "aerofocus_auto", true);
-      return true;
-    } catch (e: any) {
-      console.error("Error adding manual quarantine event:", e);
-      toast.error("Error al procesar la sesión de AeroFocus: " + e.message);
-      return false;
-    }
-  }, [user, incorporateAeroFocusEvent]);
-
   // Aprobación manual y explícita por parte del estudiante
   const approveQuarantineEvent = useCallback(async (eventId: string): Promise<boolean> => {
     if (!user) return false;
@@ -2645,11 +2534,6 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
       return false;
     }
   }, [user, quarantinedEvents, incorporateAeroFocusEvent]);
-      toast.dismiss(toastId);
-      toast.error("Error al aprobar evento: " + err.message);
-      return false;
-    }
-  }, [user, quarantinedEvents]);
 
   // Aprobar todas las sesiones retenidas en cuarentena en un solo clic
   const approveAllQuarantineEvents = useCallback(async (): Promise<{ approvedCount: number }> => {

@@ -300,14 +300,32 @@ export const TopicHistoryCard: React.FC<TopicHistoryCardProps> = ({
                 <span className="text-xs font-black text-slate-800">¿Eliminar registro de sesión?</span>
                 <div className="flex items-center gap-2">
                   <button
-                    onClick={() => setSessionToDelete(null)}
-                    className="px-2.5 py-1 text-xs font-bold text-slate-600 hover:bg-slate-100 rounded-lg transition-colors"
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      e.preventDefault();
+                      setSessionToDelete(null);
+                    }}
+                    className="px-2.5 py-1 text-xs font-bold text-slate-600 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
                   >
                     Cancelar
                   </button>
                   <button
-                    onClick={() => onDeleteSession(parentSession?.originalIds || [subSession.id])}
-                    className="px-2.5 py-1 text-xs font-black text-white bg-rose-600 hover:bg-rose-700 rounded-lg transition-colors shadow-xs active:scale-95"
+                    type="button"
+                    onClick={async (e) => {
+                      e.stopPropagation();
+                      e.preventDefault();
+                      const rawIds = parentSession?.originalIds 
+                        || subSession.originalIds 
+                        || (subSession.subSessions ? subSession.subSessions.map((s: any) => s.id) : null)
+                        || [subSession.id];
+                      const cleanIds = (Array.isArray(rawIds) ? rawIds : [rawIds])
+                        .map((id: string) => String(id).replace(/^group-[^-]+-/, ""))
+                        .filter(Boolean);
+                      await onDeleteSession(cleanIds);
+                      setSessionToDelete(null);
+                    }}
+                    className="px-2.5 py-1 text-xs font-black text-white bg-rose-600 hover:bg-rose-700 rounded-lg transition-colors shadow-xs active:scale-95 cursor-pointer"
                   >
                     Eliminar
                   </button>
@@ -507,14 +525,31 @@ export const TopicHistoryCard: React.FC<TopicHistoryCardProps> = ({
                         </span>
                         <div className="flex items-center gap-2.5">
                           <button
-                            onClick={() => setSessionToDelete(null)}
-                            className="px-3 py-1 text-xs font-bold text-slate-600 hover:bg-slate-100 rounded-lg transition-colors"
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              e.preventDefault();
+                              setSessionToDelete(null);
+                            }}
+                            className="px-3 py-1 text-xs font-bold text-slate-600 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
                           >
                             Cancelar
                           </button>
                           <button
-                            onClick={() => onDeleteSession(session.originalIds)}
-                            className="px-3 py-1 text-xs font-black text-white bg-rose-600 hover:bg-rose-700 rounded-lg transition-colors shadow-xs active:scale-95"
+                            type="button"
+                            onClick={async (e) => {
+                              e.stopPropagation();
+                              e.preventDefault();
+                              const rawIds = session.originalIds 
+                                || (session.subSessions ? session.subSessions.map((s: any) => s.id) : null)
+                                || [session.id];
+                              const cleanIds = (Array.isArray(rawIds) ? rawIds : [rawIds])
+                                .map((id: string) => String(id).replace(/^group-[^-]+-/, ""))
+                                .filter(Boolean);
+                              await onDeleteSession(cleanIds);
+                              setSessionToDelete(null);
+                            }}
+                            className="px-3 py-1 text-xs font-black text-white bg-rose-600 hover:bg-rose-700 rounded-lg transition-colors shadow-xs active:scale-95 cursor-pointer"
                           >
                             Eliminar Todo
                           </button>

@@ -23,6 +23,7 @@ import {
   Play,
   RotateCcw,
   BookOpen,
+  Trash2,
 } from "lucide-react";
 import {
   ResponsiveContainer,
@@ -66,6 +67,7 @@ export interface DashboardCantoScatterChartProps {
   onManageCantos: () => void;
   onLogCanto: (mode?: "simulator" | "manual", topicId?: string) => void;
   onSelectTopic?: (topicId: string) => void;
+  onDeleteCanto?: (topicId: string, sessionId: string) => Promise<void>;
 }
 
 type ViewMode = "matrix" | "timeline" | "distribution";
@@ -83,6 +85,7 @@ export const DashboardCantoScatterChart: React.FC<DashboardCantoScatterChartProp
   onManageCantos,
   onLogCanto,
   onSelectTopic,
+  onDeleteCanto,
 }) => {
   const [viewMode, setViewMode] = useState<ViewMode>("matrix");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
@@ -1324,6 +1327,21 @@ export const DashboardCantoScatterChart: React.FC<DashboardCantoScatterChartProp
                 >
                   <span>Abrir Tema</span>
                   <ChevronRight size={12} />
+                </button>
+              )}
+              {onDeleteCanto && (
+                <button
+                  onClick={async () => {
+                    if (confirm(`¿Eliminar el cante #${activeCanto.cantoNum} del Tema ${activeCanto.topicNumber} de tu expediente?`)) {
+                      await onDeleteCanto(activeCanto.topicId, activeCanto.id);
+                      setSelectedCantoId(null);
+                    }
+                  }}
+                  className="px-2.5 py-1 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 text-[11px] font-bold border border-rose-500/30 flex items-center gap-1 transition-all active:scale-95"
+                  title="Eliminar este cante del expediente"
+                >
+                  <Trash2 size={12} />
+                  <span>Eliminar</span>
                 </button>
               )}
               <button

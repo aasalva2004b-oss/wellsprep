@@ -1304,7 +1304,7 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                           <button
                             onClick={() => {
                               if (confirm("¿Deseas eliminar esta sesión de tu expediente?")) {
-                                deleteStudySession(session.id);
+                                deleteStudySession(session.topicId || "", session.id);
                               }
                             }}
                             className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors"
