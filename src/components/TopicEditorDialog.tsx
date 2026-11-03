@@ -108,6 +108,19 @@ export function TopicEditorDialog({
   const [sessionToDelete, setSessionToDelete] = useState<string | null>(null);
   const [saveSuccess, setSaveSuccess] = useState(false);
 
+  // Global Escape key listener to close dialog
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        if (!sessionToEdit && !sessionToDelete) {
+          onClose();
+        }
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onClose, sessionToEdit, sessionToDelete]);
+
   // Synchronize and deduplicate sessions for this specific topic
   useEffect(() => {
     const matched = recentSessions.filter((s) => sessionMatchesTopic(s, topic));
@@ -477,7 +490,12 @@ export function TopicEditorDialog({
   };
 
   return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/60 backdrop-blur-xl p-0 sm:p-4 md:p-6 animate-in fade-in duration-200">
+    <div 
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+      className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/60 backdrop-blur-xl p-0 sm:p-4 md:p-6 animate-in fade-in duration-200"
+    >
       <motion.div
         initial={{ scale: 0.97, opacity: 0, y: 10 }}
         animate={{ scale: 1, opacity: 1, y: 0 }}

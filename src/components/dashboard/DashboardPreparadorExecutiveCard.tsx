@@ -35,10 +35,21 @@ export const DashboardPreparadorExecutiveCard: React.FC<DashboardPreparadorExecu
   const assignedIds = defaultDay === "historial" ? [] : (schedule[defaultDay] || []);
 
   const topicMap = useMemo(() => {
-    const map = new Map<string, typeof initialTopics[0]>();
+    const map = new Map<string, any>();
     initialTopics.forEach((t) => map.set(t.id, t));
+    Object.entries(userProgress || {}).forEach(([id, data]: [string, any]) => {
+      if (data.isCustom && !data.isDeleted) {
+        map.set(id, {
+          id,
+          subjectId: data.subjectId || "custom",
+          number: data.number || 999,
+          title: data.customTitle || "Tema Personalizado",
+          difficulty: data.difficulty || 5,
+        });
+      }
+    });
     return map;
-  }, []);
+  }, [userProgress]);
 
   const assignedTopics = useMemo(() => {
     return assignedIds

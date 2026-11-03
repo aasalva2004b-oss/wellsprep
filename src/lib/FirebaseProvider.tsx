@@ -120,14 +120,28 @@ interface FirebaseContextType {
   ) => Promise<void>;
   updateUserSettings: (data: Partial<UserSettingsData>) => Promise<void>;
   resetProgress: () => Promise<void>;
-  addStudySession: (
+  addStudySession: ((
     topicId: string,
-    durationMinutes: number, // planned duration
+    durationMinutes: number,
     difficulty: number,
     type: "estudio_inicial" | "repaso" | "refresco" | "canto" | "simulacro",
     date?: string,
     extraData?: any
-  ) => Promise<void>;
+  ) => Promise<void>) & ((
+    sessionData: {
+      topicId: string;
+      durationMinutes?: number;
+      difficulty?: number;
+      type?: "estudio_inicial" | "repaso" | "refresco" | "canto" | "simulacro";
+      date?: string;
+      completesVuelta?: boolean;
+      notes?: string;
+      cantoGrade?: number;
+      cantoSeconds?: number;
+      mistakes?: string;
+      [key: string]: any;
+    }
+  ) => Promise<void>);
   updateStudySession: (
     sessionId: string,
     updatedData: Partial<any>,
@@ -435,18 +449,42 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
   }, [user]);
 
   const addStudySession = async (
-    topicId: string,
-    durationMinutes: number,
-    difficulty: number,
-    type: "estudio_inicial" | "repaso" | "refresco" | "canto" | "simulacro",
-    providedDate?: string,
-    extraData?: any
+    arg1: any,
+    arg2?: number,
+    arg3?: number,
+    arg4?: "estudio_inicial" | "repaso" | "refresco" | "canto" | "simulacro",
+    arg5?: string,
+    arg6?: any
   ) => {
     if (!user) {
       toast.error("Debes iniciar sesión para registrar una sesión.");
       return;
     }
-    if (!topicId || typeof topicId !== "string" || !topicId.trim()) {
+
+    let topicId: string;
+    let durationMinutes: number;
+    let difficulty: number;
+    let type: "estudio_inicial" | "repaso" | "refresco" | "canto" | "simulacro";
+    let providedDate: string | undefined;
+    let extraData: any;
+
+    if (arg1 && typeof arg1 === "object") {
+      topicId = String(arg1.topicId || "").trim();
+      durationMinutes = Number(arg1.durationMinutes || arg1.duration || 0);
+      difficulty = Number(arg1.difficulty || 5);
+      type = (arg1.type || "repaso") as "estudio_inicial" | "repaso" | "refresco" | "canto" | "simulacro";
+      providedDate = arg1.date;
+      extraData = arg1;
+    } else {
+      topicId = String(arg1 || "").trim();
+      durationMinutes = Number(arg2 || 0);
+      difficulty = Number(arg3 || 5);
+      type = (arg4 || "repaso") as "estudio_inicial" | "repaso" | "refresco" | "canto" | "simulacro";
+      providedDate = arg5;
+      extraData = arg6;
+    }
+
+    if (!topicId) {
       toast.error("Error: ID de tema no válido.");
       return;
     }

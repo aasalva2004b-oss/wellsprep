@@ -49,26 +49,70 @@ import { calculateTopicCycle } from "../lib/oposicionCycle";
 import { buildSubjectTelemetryIndex, FastTopicTelemetry } from "../lib/performanceCache";
 import { playSound } from "../lib/sound";
 
-export function TemarioView() {
+interface TemarioViewProps {
+  initialSelectedTopicId?: string | null;
+  initialSubjectId?: string | null;
+  onTopicModalClose?: () => void;
+}
+
+export function TemarioView({
+  initialSelectedTopicId,
+  initialSubjectId,
+  onTopicModalClose,
+}: TemarioViewProps = {}) {
   const { userProgress, user, userSettings, recentSessions = [], addStudySession } = useFirebase();
   const activeSubjectsIds = userSettings?.activeSubjects || initialSubjects.map(s => s.id);
   const activeSubjects = initialSubjects.filter(s => activeSubjectsIds.includes(s.id));
   const [selectedSubjectId, setSelectedSubjectId] = useState<string>(
-    userSettings?.defaultSubject || (activeSubjectsIds.length > 0 ? activeSubjectsIds[0] : initialSubjects[0].id)
+    initialSubjectId || userSettings?.defaultSubject || (activeSubjectsIds.length > 0 ? activeSubjectsIds[0] : initialSubjects[0].id)
   );
 
   useEffect(() => {
-    if (userSettings?.defaultSubject && activeSubjectsIds.includes(userSettings.defaultSubject)) {
+    if (initialSubjectId && activeSubjectsIds.includes(initialSubjectId)) {
+      setSelectedSubjectId(initialSubjectId);
+    }
+  }, [initialSubjectId, activeSubjectsIds]);
+
+  useEffect(() => {
+    if (userSettings?.defaultSubject && activeSubjectsIds.includes(userSettings.defaultSubject) && !initialSubjectId) {
       setSelectedSubjectId(userSettings.defaultSubject);
     }
-  }, [userSettings?.defaultSubject]);
+  }, [userSettings?.defaultSubject, initialSubjectId]);
 
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<
     "all" | "due_today" | "en_refrescos" | "studied" | "pending"
   >("all");
-  const [selectedTopicId, setSelectedTopicId] = useState<string | null>(null);
+  const [selectedTopicId, setSelectedTopicId] = useState<string | null>(initialSelectedTopicId || null);
   const [viewMode, setViewMode] = useState<"grid" | "table">("grid");
+
+  useEffect(() => {
+    if (initialSelectedTopicId) {
+      setSelectedTopicId(initialSelectedTopicId);
+      const found = initialTopics.find(t => t.id === initialSelectedTopicId);
+      if (found?.subjectId && found.subjectId !== selectedSubjectId) {
+        setSelectedSubjectId(found.subjectId);
+      }
+    }
+  }, [initialSelectedTopicId]);
+
+  // Unified list of all topics (static + custom)
+  const allAvailableTopics = useMemo(() => {
+    const customList = Object.entries(userProgress || {})
+      .filter(([id, data]: [string, any]) => data.isCustom && !data.isDeleted)
+      .map(([id, data]: [string, any], index: number) => ({
+        id,
+        subjectId: data.subjectId || "custom",
+        number: data.number || 999,
+        title: data.customTitle || "Tema Personalizado",
+        pages: data.pages || 0,
+        difficulty: data.difficulty || 5,
+        tiempoEstudioHoras: data.studyTimeHours || 0,
+        fechasRepasos: [],
+        notas: data.notas || "",
+      } as unknown as Topic));
+    return [...initialTopics, ...customList];
+  }, [userProgress]);
 
   const handleAddCustomTopic = async () => {
     if (!user) return;
@@ -784,11 +828,20 @@ export function TemarioView() {
       </div>
 
       {/* TOPIC EDITOR SHEET MODAL */}
-      {selectedTopicId && subjectTopics.find((t) => t.id === selectedTopicId) && (
-        <TopicEditorDialog
-          topic={subjectTopics.find((t) => t.id === selectedTopicId)!}
-          onClose={() => setSelectedTopicId(null)}
-        />
+      {selectedTopicId && (
+        (() => {
+          const activeTopic = allAvailableTopics.find((t) => t.id === selectedTopicId) || subjectTopics.find((t) => t.id === selectedTopicId);
+          if (!activeTopic) return null;
+          return (
+            <TopicEditorDialog
+              topic={activeTopic}
+              onClose={() => {
+                setSelectedTopicId(null);
+                onTopicModalClose?.();
+              }}
+            />
+          );
+        })()
       )}
     </div>
   );

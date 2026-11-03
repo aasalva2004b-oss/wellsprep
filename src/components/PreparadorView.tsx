@@ -131,14 +131,32 @@ export function PreparadorView() {
   const [prepNotes, setPrepNotes] = useState("");
   const [isSavingFeedback, setIsSavingFeedback] = useState(false);
 
-  // Topic lookup map
+  // Merge static topics with user custom topics
+  const allTopics = useMemo(() => {
+    const customList = Object.entries(userProgress || {})
+      .filter(([id, data]: [string, any]) => data.isCustom && !data.isDeleted)
+      .map(([id, data]: [string, any]) => ({
+        id,
+        subjectId: data.subjectId || "custom",
+        number: data.number || 999,
+        title: data.customTitle || "Tema Personalizado",
+        pages: data.pages || 0,
+        difficulty: data.difficulty || 5,
+        tiempoEstudioHoras: data.studyTimeHours || 0,
+        fechasRepasos: [],
+        notas: data.notas || "",
+      } as unknown as Topic));
+    return [...initialTopics, ...customList];
+  }, [userProgress]);
+
+  // Topic lookup map with full coverage
   const topicMap = useMemo(() => {
     const map = new Map<string, Topic>();
-    for (const t of initialTopics) {
+    for (const t of allTopics) {
       map.set(t.id, t);
     }
     return map;
-  }, []);
+  }, [allTopics]);
 
   // Assigned topics for current active cante day (Lunes or Jueves)
   const currentCanteDayKey = activeView === "jueves" ? "jueves" : "lunes";
@@ -296,7 +314,7 @@ export function PreparadorView() {
   // Count of topics with high decay or overdue review
   const ebbinghausAlertCount = useMemo(() => {
     let count = 0;
-    for (const topic of initialTopics) {
+    for (const topic of allTopics) {
       const prog = userProgress[topic.id];
       const sessions = recentSessions.filter((s) => sessionMatchesTopic(s, topic));
       if (!prog && sessions.length === 0) continue;
@@ -311,7 +329,7 @@ export function PreparadorView() {
       }
     }
     return count;
-  }, [userProgress, recentSessions]);
+  }, [allTopics, userProgress, recentSessions]);
 
   // Handlers for managing schedule
   const handleAddTopic = (topicId: string) => {
@@ -418,9 +436,9 @@ export function PreparadorView() {
     }
   };
 
-  // Filter topics in the picker modal
+  // Filter topics in the picker modal (including custom topics)
   const pickerFilteredTopics = useMemo(() => {
-    const list = initialTopics.filter((t) => t.subjectId === pickerSubjectId);
+    const list = allTopics.filter((t) => t.subjectId === pickerSubjectId);
     if (!pickerSearch.trim()) return list;
     const q = pickerSearch.toLowerCase().trim();
     return list.filter((t) => 
@@ -428,7 +446,7 @@ export function PreparadorView() {
       (t.fullTitle && t.fullTitle.toLowerCase().includes(q)) ||
       t.number.toString().includes(q)
     );
-  }, [pickerSubjectId, pickerSearch]);
+  }, [allTopics, pickerSubjectId, pickerSearch]);
 
   // All historical sessions with preparador / cantos (with deduplication safeguard)
   const preparadorSessions = useMemo(() => {

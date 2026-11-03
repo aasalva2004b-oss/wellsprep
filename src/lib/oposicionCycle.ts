@@ -64,9 +64,20 @@ export function calculateTopicCycle(
   const todayStr = getLocalDateString();
   const todayDate = new Date(todayStr);
 
+  // Normalización para concordancia infalible de identificadores
+  const cleanTarget = String(topicId || "").toLowerCase().trim();
+  const cleanTargetShort = cleanTarget.replace(/^(constitucional|penal|civil|procesal|administrativo|laboral|mercantil|const)[-_]/i, "");
+
   // Filtrar y ordenar sesiones cronológicamente
   const topicSessions = (sessions || [])
-    .filter((s) => s.topicId === topicId)
+    .filter((s) => {
+      if (!s) return false;
+      const sTopic = String(s.topicId || "").toLowerCase().trim();
+      if (sTopic === cleanTarget) return true;
+      const sTopicShort = sTopic.replace(/^(constitucional|penal|civil|procesal|administrativo|laboral|mercantil|const)[-_]/i, "");
+      if (cleanTargetShort !== "" && sTopicShort === cleanTargetShort) return true;
+      return false;
+    })
     .sort((a, b) => {
       const dateCmp = (a.date || "").localeCompare(b.date || "");
       if (dateCmp !== 0) return dateCmp;

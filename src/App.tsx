@@ -58,7 +58,20 @@ export default function App() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, []);
 
+  const [selectedTopicIdForTemario, setSelectedTopicIdForTemario] = useState<string | null>(null);
+  const [selectedSubjectIdForTemario, setSelectedSubjectIdForTemario] = useState<string | null>(null);
+
   const handleSelectTopicFromPalette = (topicId: string) => {
+    const topic = initialTopics.find((t) => t.id === topicId);
+    if (topic?.subjectId) {
+      setSelectedSubjectIdForTemario(topic.subjectId);
+    }
+    setSelectedTopicIdForTemario(topicId);
+    setActiveTab("temario");
+  };
+
+  const handleSelectSubjectFromPalette = (subjectId: string) => {
+    setSelectedSubjectIdForTemario(subjectId);
     setActiveTab("temario");
   };
 
@@ -250,7 +263,11 @@ export default function App() {
                 transition={{ duration: 0.2, ease: [0.23, 1, 0.32, 1] }}
                 className="w-full h-full absolute inset-0"
               >
-                <TemarioView />
+                <TemarioView
+                  initialSelectedTopicId={selectedTopicIdForTemario}
+                  initialSubjectId={selectedSubjectIdForTemario}
+                  onTopicModalClose={() => setSelectedTopicIdForTemario(null)}
+                />
               </motion.div>
             )}
             {activeTab === "preparador" && (
@@ -335,6 +352,7 @@ export default function App() {
         isOpen={isCommandPaletteOpen}
         onClose={() => setIsCommandPaletteOpen(false)}
         onSelectTopic={handleSelectTopicFromPalette}
+        onSelectSubject={handleSelectSubjectFromPalette}
         onNavigateTab={(tab) => setActiveTab(tab)}
       />
 

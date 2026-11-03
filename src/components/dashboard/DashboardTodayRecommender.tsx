@@ -70,7 +70,7 @@ export const DashboardTodayRecommender: React.FC<DashboardTodayRecommenderProps>
               </span>
             </div>
             <p className="text-xs text-slate-400 font-medium">
-              Priorizado según el método de preparadores (Refrescos $\rightarrow$ Repasos SRS $\rightarrow$ Cantes $\rightarrow$ Nuevo Tema)
+              Priorizado según el método de preparadores (Refrescos → Repasos SRS → Cantes → Nuevo Tema)
             </p>
           </div>
         </div>
