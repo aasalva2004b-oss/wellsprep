@@ -1,6 +1,6 @@
 {
-  "summary":  "Plan maestro actualizado con la corrección definitiva del Scatter Chart: Eliminación del componente ZAxis conflictivo (que causaba radius = NaN), inyección de renderizado SVG nativo vía shape callback con radio garantizado (5.5px/7.5px) y selector de escala dinámica (Ventana Tribunal 8-16m vs Escala Completa).",
-  "updatedAt":  "2026-11-01T11:53:47.072288148Z",
+  "summary":  "Plan de arquitectura, organización visual y optimización de flujos de trabajo para WellsPrep Oposiciones. Establece el Planificador Semanal y Preparador (L/J) como centro neurálgico de la aplicación, reestructura la barra lateral con accesos directos rápidos y unifica las métricas de curva del olvido (Ebbinghaus), vueltas y telemetría de cantes.",
+  "updatedAt":  "2026-11-02T12:41:37.021321671Z",
   "requestFeedback":  true,
   "userFacing":  true
 }

@@ -394,7 +394,7 @@ export function processIncomingAeroFocusPayload(
     dailyTotalEffectiveMinutes: calculatedEffectiveMinutes,
     totalFlightEffectiveMinutes: calculatedEffectiveMinutes,
     totalFlightEffectiveHours: calculatedEffectiveHours,
-    status: 'quarantined',
+    status: 'pending',
     topics: resolvedTopics,
     pageBreakdown: pageBreakdown.length > 0 ? pageBreakdown : undefined,
     tasksBreakdown: tasksBreakdown.length > 0 ? tasksBreakdown : undefined,

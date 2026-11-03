@@ -400,7 +400,7 @@ export default async function handler(req: any, res: any) {
       dailyTotalEffectiveHours: calculatedHours,
       totalFlightEffectiveMinutes: calculatedMins,
       totalFlightEffectiveHours: calculatedHours,
-      status: 'quarantined',
+      status: 'pending',
       topics: resolvedTopics,
       rawPayload: payload,
       pilotCallsign: payload.pilotCallsign || payload.callsignName || 'Piloto AeroFocus',
@@ -419,9 +419,10 @@ export default async function handler(req: any, res: any) {
       transactionId: transactionId || flightId,
       processedTopics: resolvedTopics.length,
       effectiveHours: calculatedHours,
-      quarantined: true,
+      quarantined: false,
+      isQuarantined: false,
       recordId: record.id,
-      message: `Registradas ${calculatedHours}h netas en Bandeja de Cuarentena de WellsPrep`
+      message: `Aterrizaje sincronizado con éxito. ${calculatedHours}h netas incorporadas en WellsPrep`
     });
   } catch (err: any) {
     console.error('[AeroFocus Serverless Webhook] Catch-all error:', err);

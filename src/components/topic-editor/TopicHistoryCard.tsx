@@ -40,6 +40,7 @@ export const TopicHistoryCard: React.FC<TopicHistoryCardProps> = ({
   const [isMerging, setIsMerging] = useState(false);
   const [mergeCompletesVuelta, setMergeCompletesVuelta] = useState(true);
   const [mergeDifficulty, setMergeDifficulty] = useState<number>(5);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   // Extract all individual flat sessions
   const flatSessions: any[] = [];
@@ -312,22 +313,28 @@ export const TopicHistoryCard: React.FC<TopicHistoryCardProps> = ({
                   </button>
                   <button
                     type="button"
+                    disabled={Boolean(deletingId)}
                     onClick={async (e) => {
                       e.stopPropagation();
                       e.preventDefault();
-                      const rawIds = parentSession?.originalIds 
-                        || subSession.originalIds 
-                        || (subSession.subSessions ? subSession.subSessions.map((s: any) => s.id) : null)
-                        || [subSession.id];
-                      const cleanIds = (Array.isArray(rawIds) ? rawIds : [rawIds])
-                        .map((id: string) => String(id).replace(/^group-[^-]+-/, ""))
-                        .filter(Boolean);
-                      await onDeleteSession(cleanIds);
-                      setSessionToDelete(null);
+                      try {
+                        setDeletingId(subSession.id);
+                        const rawIds = parentSession?.originalIds 
+                          || subSession.originalIds 
+                          || (subSession.subSessions ? subSession.subSessions.map((s: any) => s.id) : null)
+                          || [subSession.id];
+                        const cleanIds = (Array.isArray(rawIds) ? rawIds : [rawIds])
+                          .map((id: string) => String(id).replace(/^group-[a-zA-Z0-9_]+-/, "").trim())
+                          .filter(Boolean);
+                        await onDeleteSession(cleanIds);
+                      } finally {
+                        setDeletingId(null);
+                        setSessionToDelete(null);
+                      }
                     }}
-                    className="px-2.5 py-1 text-xs font-black text-white bg-rose-600 hover:bg-rose-700 rounded-lg transition-colors shadow-xs active:scale-95 cursor-pointer"
+                    className="px-2.5 py-1 text-xs font-black text-white bg-rose-600 hover:bg-rose-700 disabled:opacity-50 rounded-lg transition-colors shadow-xs active:scale-95 cursor-pointer flex items-center gap-1"
                   >
-                    Eliminar
+                    {deletingId === subSession.id ? "Eliminando..." : "Eliminar"}
                   </button>
                 </div>
               </motion.div>
@@ -537,21 +544,27 @@ export const TopicHistoryCard: React.FC<TopicHistoryCardProps> = ({
                           </button>
                           <button
                             type="button"
+                            disabled={Boolean(deletingId)}
                             onClick={async (e) => {
                               e.stopPropagation();
                               e.preventDefault();
-                              const rawIds = session.originalIds 
-                                || (session.subSessions ? session.subSessions.map((s: any) => s.id) : null)
-                                || [session.id];
-                              const cleanIds = (Array.isArray(rawIds) ? rawIds : [rawIds])
-                                .map((id: string) => String(id).replace(/^group-[^-]+-/, ""))
-                                .filter(Boolean);
-                              await onDeleteSession(cleanIds);
-                              setSessionToDelete(null);
+                              try {
+                                setDeletingId(session.id);
+                                const rawIds = session.originalIds 
+                                  || (session.subSessions ? session.subSessions.map((s: any) => s.id) : null)
+                                  || [session.id];
+                                const cleanIds = (Array.isArray(rawIds) ? rawIds : [rawIds])
+                                  .map((id: string) => String(id).replace(/^group-[a-zA-Z0-9_]+-/, "").trim())
+                                  .filter(Boolean);
+                                await onDeleteSession(cleanIds);
+                              } finally {
+                                setDeletingId(null);
+                                setSessionToDelete(null);
+                              }
                             }}
-                            className="px-3 py-1 text-xs font-black text-white bg-rose-600 hover:bg-rose-700 rounded-lg transition-colors shadow-xs active:scale-95 cursor-pointer"
+                            className="px-3 py-1 text-xs font-black text-white bg-rose-600 hover:bg-rose-700 disabled:opacity-50 rounded-lg transition-colors shadow-xs active:scale-95 cursor-pointer flex items-center gap-1"
                           >
-                            Eliminar Todo
+                            {deletingId === session.id ? "Eliminando..." : "Eliminar Todo"}
                           </button>
                         </div>
                       </motion.div>

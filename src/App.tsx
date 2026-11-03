@@ -1,7 +1,7 @@
 import { useState, useEffect, ReactNode } from "react";
 import { 
   BookOpen, LogOut, PanelLeftClose, PanelLeftOpen, ActivitySquare, Award,
-  Search, Mic, Command, Shield, Sparkles, SlidersHorizontal, RefreshCw, Settings
+  Search, Mic, Command, Shield, Sparkles, SlidersHorizontal, RefreshCw, Settings, Calendar
 } from "lucide-react";
 import { cn } from "./lib/utils";
 import { TemarioView } from "./components/TemarioView";
@@ -20,7 +20,7 @@ import { motion, AnimatePresence } from "motion/react";
 import { useAeroFocusSync } from "./hooks/useAeroFocusSync";
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<"dashboard" | "temario" | "preparador">("temario");
+  const [activeTab, setActiveTab] = useState<"dashboard" | "temario" | "preparador">("preparador");
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isSyncCenterOpen, setIsSyncCenterOpen] = useState(false);
@@ -115,16 +115,16 @@ export default function App() {
 
           <nav className="flex-1 px-3.5 py-2 space-y-1.5 overflow-y-auto min-w-[16rem] no-scrollbar">
             <NavItem
+              icon={<Calendar size={17} strokeWidth={2.3} />}
+              label="Planificador & Preparador (L/J)"
+              active={activeTab === "preparador"}
+              onClick={() => { playSound.click(); setActiveTab("preparador"); }}
+            />
+            <NavItem
               icon={<BookOpen size={17} strokeWidth={2.3} />}
               label="Temario Oficial"
               active={activeTab === "temario"}
               onClick={() => { playSound.click(); setActiveTab("temario"); }}
-            />
-            <NavItem
-              icon={<Award size={17} strokeWidth={2.3} />}
-              label="Preparador (L/J)"
-              active={activeTab === "preparador"}
-              onClick={() => { playSound.click(); setActiveTab("preparador"); }}
             />
             <NavItem
               icon={<ActivitySquare size={17} strokeWidth={2.3} />}
@@ -275,6 +275,17 @@ export default function App() {
         className="md:hidden fixed bottom-4 left-3 right-3 max-w-md mx-auto bg-white/85 backdrop-blur-2xl border border-slate-200/80 rounded-[1.75rem] flex items-center justify-between p-1.5 z-50 shadow-[0_12px_36px_-6px_rgba(15,23,42,0.14)] ring-1 ring-black/[0.04]"
       >
         <MobileNavItem
+          icon={<Calendar size={18} strokeWidth={activeTab === "preparador" && !isSyncCenterOpen && !isSettingsOpen ? 2.5 : 2} />}
+          label="Preparador"
+          active={activeTab === "preparador" && !isSyncCenterOpen && !isSettingsOpen}
+          onClick={() => {
+            playSound.click();
+            setIsSyncCenterOpen(false);
+            setIsSettingsOpen(false);
+            setActiveTab("preparador");
+          }}
+        />
+        <MobileNavItem
           icon={<BookOpen size={18} strokeWidth={activeTab === "temario" && !isSyncCenterOpen && !isSettingsOpen ? 2.5 : 2} />}
           label="Temario"
           active={activeTab === "temario" && !isSyncCenterOpen && !isSettingsOpen}
@@ -283,17 +294,6 @@ export default function App() {
             setIsSyncCenterOpen(false);
             setIsSettingsOpen(false);
             setActiveTab("temario");
-          }}
-        />
-        <MobileNavItem
-          icon={<Award size={18} strokeWidth={activeTab === "preparador" && !isSyncCenterOpen && !isSettingsOpen ? 2.5 : 2} />}
-          label="Preparador"
-          active={activeTab === "preparador" && !isSyncCenterOpen && !isSettingsOpen}
-          onClick={() => {
-            playSound.click();
-            setIsSyncCenterOpen(false);
-            setIsSettingsOpen(false);
-            setActiveTab("preparador");
           }}
         />
         <MobileNavItem

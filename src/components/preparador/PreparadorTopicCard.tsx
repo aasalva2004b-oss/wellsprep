@@ -1,7 +1,8 @@
 import React, { useState } from "react";
 import { 
   Star, Timer, Brain, Sparkles, Trash2, 
-  ChevronDown, ChevronUp, AlertCircle, CheckCircle2 
+  ChevronDown, ChevronUp, AlertCircle, CheckCircle2,
+  Zap
 } from "lucide-react";
 import { Topic, Subject } from "../../types";
 import { TopicPreparationEvaluation, WINDOW_MIN_SECS, WINDOW_MAX_SECS } from "../../lib/preparationScore";
@@ -21,6 +22,7 @@ interface PreparadorTopicCardProps {
   reviewsCount: number;
   onRemove: (topicId: string) => void;
   onOpenFeedback: (topic: Topic) => void;
+  onQuickReview?: (topicId: string, durationMinutes: number) => void;
 }
 
 export const PreparadorTopicCard: React.FC<PreparadorTopicCardProps> = ({
@@ -36,8 +38,10 @@ export const PreparadorTopicCard: React.FC<PreparadorTopicCardProps> = ({
   reviewsCount,
   onRemove,
   onOpenFeedback,
+  onQuickReview,
 }) => {
   const [showPlan, setShowPlan] = useState(false);
+  const [isReviewing, setIsReviewing] = useState(false);
 
   // Gauge calculations for the 10:00 (600s) to 15:00 (900s) scale
   const minGaugeSecs = 600;
@@ -47,6 +51,16 @@ export const PreparadorTopicCard: React.FC<PreparadorTopicCardProps> = ({
   const windowMinPct = ((WINDOW_MIN_SECS - minGaugeSecs) / (maxGaugeSecs - minGaugeSecs)) * 100; // ~36.6%
   const windowMaxPct = ((WINDOW_MAX_SECS - minGaugeSecs) / (maxGaugeSecs - minGaugeSecs)) * 100; // ~73.3%
   const optimalPct = 50; // 750s / (900 - 600) = 50%
+
+  const handleQuickReview = async (mins: number) => {
+    if (!onQuickReview) return;
+    setIsReviewing(true);
+    try {
+      await onQuickReview(topic.id, mins);
+    } finally {
+      setIsReviewing(false);
+    }
+  };
 
   return (
     <div
@@ -62,14 +76,19 @@ export const PreparadorTopicCard: React.FC<PreparadorTopicCardProps> = ({
       )}
     >
       <div>
-        {/* Top Header Row: Subject/Topic badge + Dual Score + Remove Button */}
+        {/* Top Header Row: Clean unboxed metadata (Zero-Pill discipline) + Dual Score + Remove Button */}
         <div className="flex items-start justify-between gap-3 mb-2.5">
-          <div className="flex items-center gap-2 flex-wrap">
-            <span className="text-[10px] font-black uppercase tracking-wider px-2 py-0.5 rounded-lg bg-slate-100 text-slate-700 border border-slate-200/60">
-              {subject?.name.split(" ")[0] || "Bloque"} · Tema {topic.number}
+          <div className="flex items-center gap-1.5 flex-wrap text-[11px] font-bold text-slate-500">
+            <span className="text-slate-800 font-black">
+              {subject?.name.split(" ")[0] || "Bloque"}
             </span>
-            <span className="text-[10px] font-mono font-bold text-slate-400 bg-slate-50 px-1.5 py-0.5 rounded-md border border-slate-100">
-              V{vueltas} · {reviewsCount} {reviewsCount === 1 ? "sesión" : "sesiones"}
+            <span>·</span>
+            <span className="text-slate-900 font-bold font-mono">Tema {topic.number}</span>
+            <span>·</span>
+            <span className="font-mono tabular-nums text-slate-500">V{vueltas}</span>
+            <span>·</span>
+            <span className="font-mono tabular-nums text-slate-400">
+              {reviewsCount} {reviewsCount === 1 ? "repaso" : "repasos"}
             </span>
             {evaluation.isReadyForTribunal && (
               <span className="inline-flex items-center gap-1 text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-700 border border-emerald-200">
@@ -100,7 +119,7 @@ export const PreparadorTopicCard: React.FC<PreparadorTopicCardProps> = ({
 
               {evaluation.isDecayed && (
                 <span
-                  className="text-[9px] font-black text-rose-600 bg-rose-50 px-1 py-0.2 rounded-sm border border-rose-200/60"
+                  className="text-[9px] font-black text-rose-600 bg-rose-50 px-1 py-0.2 rounded-sm border border-rose-200/60 font-mono tabular-nums"
                   title={`Pico histórico: ${evaluation.peakScore.toFixed(1)}/10. Desgaste: -${evaluation.scoreDecay.toFixed(1)} pts`}
                 >
                   -{evaluation.scoreDecay.toFixed(1)}
@@ -141,7 +160,7 @@ export const PreparadorTopicCard: React.FC<PreparadorTopicCardProps> = ({
             <div className="mt-1 flex items-baseline gap-1">
               <span
                 className={cn(
-                  "text-xs font-black font-mono",
+                  "text-xs font-black font-mono tabular-nums",
                   !hasCanto
                     ? "text-slate-400 font-normal"
                     : evaluation.timeZone === "perfect"
@@ -154,7 +173,7 @@ export const PreparadorTopicCard: React.FC<PreparadorTopicCardProps> = ({
                 {hasCanto ? `${lastCantoMins}:${lastCantoSecs.toString().padStart(2, "0")}` : "Sin cante"}
               </span>
               {hasCanto && (
-                <span className="text-[9px] font-mono font-bold text-slate-400">
+                <span className="text-[9px] font-mono font-bold text-slate-400 tabular-nums">
                   ({evaluation.timeDevianceFormatted})
                 </span>
               )}
@@ -170,7 +189,7 @@ export const PreparadorTopicCard: React.FC<PreparadorTopicCardProps> = ({
             <div className="mt-1 flex items-baseline gap-1">
               <span
                 className={cn(
-                  "text-xs font-black font-mono",
+                  "text-xs font-black font-mono tabular-nums",
                   evaluation.retentionPct >= 80
                     ? "text-emerald-600"
                     : evaluation.retentionPct >= 65
@@ -180,7 +199,7 @@ export const PreparadorTopicCard: React.FC<PreparadorTopicCardProps> = ({
               >
                 {evaluation.retentionPct}%
               </span>
-              <span className="text-[9px] text-slate-400 font-medium">
+              <span className="text-[9px] text-slate-400 font-mono tabular-nums">
                 {daysSinceTouch !== null ? `${daysSinceTouch}d` : "—"}
               </span>
             </div>
@@ -195,7 +214,7 @@ export const PreparadorTopicCard: React.FC<PreparadorTopicCardProps> = ({
             <div className="mt-1 flex items-baseline gap-1">
               <span
                 className={cn(
-                  "text-xs font-black font-mono",
+                  "text-xs font-black font-mono tabular-nums",
                   lastGrade === null
                     ? "text-slate-400 font-normal"
                     : lastGrade >= 8.5
@@ -209,7 +228,7 @@ export const PreparadorTopicCard: React.FC<PreparadorTopicCardProps> = ({
               >
                 {lastGrade !== null ? lastGrade.toFixed(1) : "Pendiente"}
               </span>
-              {lastGrade !== null && <span className="text-[9px] font-bold text-slate-400">/ 10</span>}
+              {lastGrade !== null && <span className="text-[9px] font-bold text-slate-400 font-mono">/10</span>}
             </div>
           </div>
         </div>
@@ -235,7 +254,7 @@ export const PreparadorTopicCard: React.FC<PreparadorTopicCardProps> = ({
               />
             )}
           </div>
-          <div className="flex justify-between text-[8px] text-slate-400 font-mono mt-0.5">
+          <div className="flex justify-between text-[8px] text-slate-400 font-mono mt-0.5 tabular-nums">
             <span>10:00</span>
             <span className="text-emerald-700 font-bold">11:50 - 13:40</span>
             <span>15:00</span>
@@ -263,8 +282,24 @@ export const PreparadorTopicCard: React.FC<PreparadorTopicCardProps> = ({
         </div>
       </div>
 
-      {/* Footer Primary Action: Quick Canto / Preparador Rating */}
+      {/* Footer Primary Actions: 1-Click Repaso Rápido + Registrar Nota / Cante */}
       <div className="pt-2 border-t border-slate-100 flex items-center gap-2">
+        {onQuickReview && (
+          <button
+            type="button"
+            disabled={isReviewing}
+            onClick={() => {
+              playSound.click();
+              handleQuickReview(45);
+            }}
+            className="py-2 px-3 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200/80 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1 active:scale-98 disabled:opacity-50"
+            title="Registrar repaso de 45 minutos hoy (frena curva de olvido)"
+          >
+            <Zap size={12} className="text-emerald-600 fill-emerald-600" />
+            <span>{isReviewing ? "..." : "+45m Hoy"}</span>
+          </button>
+        )}
+
         <button
           type="button"
           onClick={() => {

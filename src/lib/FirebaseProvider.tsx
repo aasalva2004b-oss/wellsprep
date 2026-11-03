@@ -709,8 +709,12 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
           (s.topicId === "constitucional-5" || s.topicId === "5") &&
           Number(s.cantoGrade) === 8.5 && Number(s.cantoSeconds) === 30;
 
-        if (isPhantomAero || isPhantomDirect) {
-          deleteDoc(doc(db, `users/${user.uid}/sessions`, docSnap.id)).catch(() => {});
+        // Explicitly ignore sessions that have been deleted by the student
+        if (deletedSessionIds.current.has(docSnap.id)) {
+          return;
+        }
+        const sCleanId = String(docSnap.id).replace(/^group-[a-zA-Z0-9_]+-/, "").trim();
+        if (deletedSessionIds.current.has(sCleanId)) {
           return;
         }
 
@@ -864,6 +868,27 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
     }
   };
 
+  const isLikelyTopicId = (val: string) => {
+    if (!val || typeof val !== "string") return false;
+    const clean = val.toLowerCase().trim();
+    return (
+      clean.includes("constitucional") ||
+      clean.includes("civil") ||
+      clean.includes("penal") ||
+      clean.includes("procesal") ||
+      clean.includes("mercantil") ||
+      clean.includes("administrativo") ||
+      clean.includes("laboral") ||
+      clean.startsWith("const-") ||
+      clean.startsWith("civ-") ||
+      clean.startsWith("pen-") ||
+      clean.startsWith("proc-") ||
+      clean.startsWith("merc-") ||
+      clean.startsWith("adm-") ||
+      /^[a-z]+-\d+$/.test(clean)
+    );
+  };
+
   const deleteStudySession = async (arg1: string, arg2?: string) => {
     if (!user) return;
     try {
@@ -871,18 +896,26 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
       let targetTopicId = "";
 
       if (arg2) {
-        // Called with 2 arguments: (topicId, sessionId) or (sessionId, topicId)
-        const sByArg2 = recentSessions.find((s) => s.id === arg2);
-        const sByArg1 = recentSessions.find((s) => s.id === arg1);
-        if (sByArg2) {
-          targetSessionId = arg2;
-          targetTopicId = arg1 || sByArg2.topicId;
-        } else if (sByArg1) {
-          targetSessionId = arg1;
-          targetTopicId = arg2 || sByArg1.topicId;
-        } else {
+        // Called with 2 arguments: can be (topicId, sessionId) or (sessionId, topicId)
+        if (isLikelyTopicId(arg1) && !isLikelyTopicId(arg2)) {
           targetSessionId = arg2;
           targetTopicId = arg1;
+        } else if (isLikelyTopicId(arg2) && !isLikelyTopicId(arg1)) {
+          targetSessionId = arg1;
+          targetTopicId = arg2;
+        } else {
+          const sByArg2 = recentSessions.find((s) => s.id === arg2);
+          const sByArg1 = recentSessions.find((s) => s.id === arg1);
+          if (sByArg2) {
+            targetSessionId = arg2;
+            targetTopicId = arg1 || sByArg2.topicId;
+          } else if (sByArg1) {
+            targetSessionId = arg1;
+            targetTopicId = arg2 || sByArg1.topicId;
+          } else {
+            targetSessionId = arg2;
+            targetTopicId = arg1;
+          }
         }
       } else {
         // Called with 1 argument: (sessionId)
@@ -892,41 +925,72 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
       }
 
       // Strip any synthetic prefix e.g. "group-repaso-"
-      targetSessionId = String(targetSessionId).replace(/^group-[^-]+-/, "");
+      const cleanSessionId = String(targetSessionId).replace(/^group-[a-zA-Z0-9_]+-/, "").trim();
 
-      if (!targetSessionId) {
+      if (!cleanSessionId) {
         console.warn("deleteStudySession called without valid sessionId");
         return;
       }
 
-      // Mark as deleted in session cache to prevent resurrection from delayed snapshots
+      const idsToDelete = cleanSessionId.split(",").map((id) => id.trim()).filter(Boolean);
+      if (idsToDelete.length === 0) return;
+
+      // 1. Mark as deleted in session cache to prevent resurrection
+      idsToDelete.forEach((sId) => {
+        deletedSessionIds.current.add(sId);
+      });
       deletedSessionIds.current.add(targetSessionId);
+      deletedSessionIds.current.add(cleanSessionId);
 
-      // 1. Immediate optimistic UI eviction (0ms latency)
-      setRecentSessions((prev) => (prev || []).filter((s) => s.id !== targetSessionId));
+      // Persist in localStorage to prevent historical resurrection on future reloads
+      try {
+        const storedKey = `wp_deleted_session_ids_${user.uid}`;
+        const stored = JSON.parse(localStorage.getItem(storedKey) || "[]");
+        const updated = Array.from(new Set([...stored, ...idsToDelete, cleanSessionId])).slice(-500);
+        localStorage.setItem(storedKey, JSON.stringify(updated));
+      } catch {}
 
-      // 2. Delete from named Firestore database
-      await deleteDoc(doc(db, `users/${user.uid}/sessions`, targetSessionId));
+      // 2. Immediate optimistic UI eviction (0ms latency)
+      setRecentSessions((prev) =>
+        (prev || []).filter((s) => {
+          const sClean = String(s.id).replace(/^group-[a-zA-Z0-9_]+-/, "").trim();
+          return !idsToDelete.includes(s.id) && !idsToDelete.includes(sClean) && s.id !== targetSessionId;
+        })
+      );
 
-      // 3. Delete from defaultDb if present
-      if (defaultDb) {
-        await deleteDoc(doc(defaultDb, `users/${user.uid}/sessions`, targetSessionId)).catch(() => {});
+      // 3. Delete across all user study & cante subcollections in both namedDb and defaultDb
+      const userSubcollections = [
+        "sessions",
+        "cantos",
+        "cantes",
+        "cante_sessions",
+        "preparador_sessions",
+        "study_sessions"
+      ];
+
+      for (const sId of idsToDelete) {
+        for (const col of userSubcollections) {
+          deleteDoc(doc(db, `users/${user.uid}/${col}`, sId)).catch(() => {});
+          if (defaultDb) {
+            deleteDoc(doc(defaultDb, `users/${user.uid}/${col}`, sId)).catch(() => {});
+          }
+        }
       }
 
       // 4. Evict from localStorage backup
       try {
         const backupKey = `wp_sessions_backup_${user.uid}`;
         const stored = JSON.parse(localStorage.getItem(backupKey) || "[]");
-        const filtered = stored.filter((s: any) => s.id !== targetSessionId);
+        const filtered = stored.filter((s: any) => !idsToDelete.includes(s.id) && s.id !== cleanSessionId);
         localStorage.setItem(backupKey, JSON.stringify(filtered));
       } catch {}
 
-      // 5. Recalculate topic progress and telemetry
+      // 5. Recalculate topic progress and telemetry accurately
       if (targetTopicId) {
         await recalculateTopicFromSessions(targetTopicId);
       }
 
-      toast.success("Sesión eliminada y estadísticas actualizadas.");
+      toast.success("Registro eliminado y expediente actualizado.");
     } catch (e: any) {
       console.error("Error deleting session:", e);
       toast.error("Error al eliminar sesión: " + e.message);
@@ -1396,6 +1460,15 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
               const isCanteCol = subCol === "cantos" || subCol === "cantes" || subCol === "cante_sessions" || subCol === "preparador_sessions";
 
               for (const d of sSnap.docs) {
+                // Skip if deleted by student
+                if (deletedSessionIds.current.has(d.id)) {
+                  continue;
+                }
+                const dClean = String(d.id).replace(/^group-[a-zA-Z0-9_]+-/, "").trim();
+                if (deletedSessionIds.current.has(dClean)) {
+                  continue;
+                }
+
                 const sData = d.data();
                 let sTopicId = sData.topicId;
                 if (sTopicId === "5" || sTopicId === 5) {
@@ -2511,6 +2584,33 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
     },
     [user, recalculateTopicFromSessions]
   );
+
+  // Auto-incorporación transparente: en cuanto aterriza un vuelo de AeroFocus, se integra automáticamente al expediente
+  const isAutoIncorporating = useRef(false);
+  useEffect(() => {
+    if (!user || isAutoIncorporating.current) return;
+    const pendingToIncorporate = quarantinedEvents.filter(
+      (e: any) =>
+        (e.status === "pending" || e.status === "quarantined") &&
+        !isTestArtifact(e) &&
+        Array.isArray(e.topics) &&
+        e.topics.length > 0
+    );
+    if (pendingToIncorporate.length === 0) return;
+
+    isAutoIncorporating.current = true;
+    (async () => {
+      try {
+        for (const ev of pendingToIncorporate) {
+          await incorporateAeroFocusEvent(ev, "aerofocus_auto", true);
+        }
+      } catch (err) {
+        console.warn("Auto-incorporate event error:", err);
+      } finally {
+        isAutoIncorporating.current = false;
+      }
+    })();
+  }, [user, quarantinedEvents, isTestArtifact, incorporateAeroFocusEvent]);
 
   // Aprobación manual y explícita por parte del estudiante
   const approveQuarantineEvent = useCallback(async (eventId: string): Promise<boolean> => {

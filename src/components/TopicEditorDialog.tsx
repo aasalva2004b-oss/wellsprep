@@ -459,8 +459,9 @@ export function TopicEditorDialog({
       // 1. Desalojo optimista instantáneo en el estado local de la ficha del tema
       setSessions((prev) =>
         prev.filter((s) => {
-          const sCleanId = String(s.id).replace(/^group-[^-]+-/, "").trim();
-          return !cleanIds.includes(s.id) && !cleanIds.includes(sCleanId);
+          const sCleanId = String(s.id).replace(/^group-[a-zA-Z0-9_]+-/, "").trim();
+          const hasOriginalMatch = Array.isArray(s.originalIds) && s.originalIds.some((origId: string) => cleanIds.includes(origId));
+          return !cleanIds.includes(s.id) && !cleanIds.includes(sCleanId) && !hasOriginalMatch;
         })
       );
       setSessionToDelete(null);

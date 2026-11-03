@@ -9,7 +9,7 @@ import { useFirebase } from "../lib/FirebaseProvider";
 import { initialSubjects, initialTopics } from "../data/initialData";
 import { Topic } from "../types";
 import { calculateTopicCycle } from "../lib/oposicionCycle";
-import { getLocalDateString, safeParseDate, cn } from "../lib/utils";
+import { getLocalDateString, safeParseDate, cn, formatTime, formatMinutesToHours } from "../lib/utils";
 import { getLatestCantoForTopic, isCantoSession, sessionMatchesTopic, getCantoDuration } from "../lib/cantoUtils";
 import { 
   evaluateTopicPreparation, 
@@ -27,8 +27,9 @@ import { db } from "../lib/firebase";
 import { playSound } from "../lib/sound";
 import { PreparadorTopicCard } from "./preparador/PreparadorTopicCard";
 import { PreparadorQuickFeedbackModal } from "./preparador/PreparadorQuickFeedbackModal";
+import { WeeklyPlannerStrip, ActivePlannerView } from "./preparador/WeeklyPlannerStrip";
+import { PreparadorEbbinghausQueue } from "./preparador/PreparadorEbbinghausQueue";
 
-type DayOption = "lunes" | "jueves" | "historial";
 type SortOption = "menor_nota" | "mayor_nota" | "orden_numero";
 
 interface PreparadorSchedule {
@@ -46,9 +47,13 @@ const LOCAL_STORAGE_KEY = "wellsprep_preparador_schedule_v2";
 export function PreparadorView() {
   const { user, userProgress, recentSessions, addStudySession } = useFirebase();
 
-  // Active day: Lunes or Jueves (defaults according to strict 22:00h rule) or Historial
-  const [activeDay, setActiveDay] = useState<DayOption>(() => {
+  // Active view in the planner cockpit
+  const [activeView, setActiveView] = useState<ActivePlannerView>(() => {
     return getDefaultPreparadorDay();
+  });
+
+  const [selectedDayDate, setSelectedDayDate] = useState<string>(() => {
+    return getLocalDateString();
   });
 
   // Schedule status message (e.g., "Activo hasta las 22:00h")
@@ -135,8 +140,11 @@ export function PreparadorView() {
     return map;
   }, []);
 
-  // Assigned topics for current day
-  const assignedTopicIds = activeDay === "historial" ? [] : (schedule[activeDay] || []);
+  // Assigned topics for current active cante day (Lunes or Jueves)
+  const currentCanteDayKey = activeView === "jueves" ? "jueves" : "lunes";
+  const assignedTopicIds = (activeView === "lunes" || activeView === "jueves")
+    ? (schedule[currentCanteDayKey] || [])
+    : [];
 
   const assignedTopics = useMemo(() => {
     return assignedTopicIds
@@ -228,18 +236,15 @@ export function PreparadorView() {
   const sortedTopicsAnalysis = useMemo(() => {
     const list = [...topicsAnalysis];
     if (sortOption === "menor_nota") {
-      // Urgent focus first (lowest scores first)
       return list.sort((a, b) => a.evaluation.overallScore - b.evaluation.overallScore);
     }
     if (sortOption === "mayor_nota") {
-      // Strongest first
       return list.sort((a, b) => b.evaluation.overallScore - a.evaluation.overallScore);
     }
-    // By topic number
     return list.sort((a, b) => a.topic.number - b.topic.number);
   }, [topicsAnalysis, sortOption]);
 
-  // Overall KPIs for the day
+  // Overall KPIs for the active cante day
   const kpis = useMemo(() => {
     const total = topicsAnalysis.length;
     if (total === 0) {
@@ -267,7 +272,6 @@ export function PreparadorView() {
     const enAjuste = topicsAnalysis.filter((t) => t.evaluation.overallScore >= 4.5 && t.evaluation.overallScore < 7.2).length;
     const enRiesgo = topicsAnalysis.filter((t) => t.evaluation.overallScore < 4.5).length;
 
-    // Total estimated time in minutes (based on actual cantes or 12:30 default)
     const totalSecs = topicsAnalysis.reduce((acc, t) => {
       return acc + (t.hasCanto ? t.lastCantoTotalSecs : OPTIMAL_CANTO_SECS);
     }, 0);
@@ -289,64 +293,113 @@ export function PreparadorView() {
     };
   }, [topicsAnalysis]);
 
-  // Handler to add topic to day
+  // Count of topics with high decay or overdue review
+  const ebbinghausAlertCount = useMemo(() => {
+    let count = 0;
+    for (const topic of initialTopics) {
+      const prog = userProgress[topic.id];
+      const sessions = recentSessions.filter((s) => sessionMatchesTopic(s, topic));
+      if (!prog && sessions.length === 0) continue;
+      const sorted = [...sessions].sort(
+        (a, b) => safeParseDate(b.date).getTime() - safeParseDate(a.date).getTime()
+      );
+      const lastDate = sorted[0]?.date || prog?.lastReviewDate || prog?.firstStudyDate;
+      if (!lastDate) continue;
+      const daysSince = Math.max(0, Math.floor((new Date().getTime() - safeParseDate(lastDate).getTime()) / (1000 * 3600 * 24)));
+      if (daysSince >= 28) {
+        count++;
+      }
+    }
+    return count;
+  }, [userProgress, recentSessions]);
+
+  // Handlers for managing schedule
   const handleAddTopic = (topicId: string) => {
-    if (activeDay === "historial") return;
-    const currentList = schedule[activeDay] || [];
+    const dayKey = (activeView === "jueves" ? "jueves" : "lunes") as "lunes" | "jueves";
+    const currentList = schedule[dayKey] || [];
     if (!currentList.includes(topicId)) {
       const updated = {
         ...schedule,
-        [activeDay]: [...currentList, topicId]
+        [dayKey]: [...currentList, topicId]
       };
       saveSchedule(updated);
-      toast.success("Tema añadido a la sesión");
-    } else {
-      toast.info("Este tema ya está asignado para este día");
+      playSound.success();
+      toast.success(`Tema añadido a la sesión del ${dayKey === "lunes" ? "Lunes" : "Jueves"}`);
     }
   };
 
-  // Handler to remove topic from day
+  const handleAddTopicToDay = async (topicId: string, targetDay: "lunes" | "jueves") => {
+    const currentList = schedule[targetDay] || [];
+    if (!currentList.includes(topicId)) {
+      const updated = {
+        ...schedule,
+        [targetDay]: [...currentList, topicId]
+      };
+      await saveSchedule(updated);
+      playSound.success();
+      toast.success(`Tema añadido a la sesión del ${targetDay === "lunes" ? "Lunes" : "Jueves"}`);
+    } else {
+      toast.info(`El tema ya estaba asignado al ${targetDay === "lunes" ? "Lunes" : "Jueves"}`);
+    }
+  };
+
   const handleRemoveTopic = (topicId: string) => {
-    if (activeDay === "historial") return;
-    const currentList = schedule[activeDay] || [];
+    const dayKey = (activeView === "jueves" ? "jueves" : "lunes") as "lunes" | "jueves";
+    const currentList = schedule[dayKey] || [];
     const updated = {
       ...schedule,
-      [activeDay]: currentList.filter((id) => id !== topicId)
+      [dayKey]: currentList.filter((id) => id !== topicId)
     };
     saveSchedule(updated);
-    toast.success("Tema retirado de la sesión");
+    playSound.click();
+    toast.info("Tema quitado de la sesión");
   };
 
-  // Quick preset loader (e.g. Constitucional 3, 16, 17)
   const handleLoadUserExample = () => {
-    const exampleIds = ["constitucional-3", "constitucional-16", "constitucional-17"];
-    saveSchedule({
+    const dayKey = (activeView === "jueves" ? "jueves" : "lunes") as "lunes" | "jueves";
+    const updated = {
       ...schedule,
-      jueves: exampleIds
-    });
-    setActiveDay("jueves");
-    toast.success("Temas cargados para el Jueves: 3, 16 y 17 de Constitucional");
+      [dayKey]: ["constitucional-3", "constitucional-16", "constitucional-17"]
+    };
+    saveSchedule(updated);
+    playSound.success();
+    toast.success("Ejemplo cargado: Temas 3, 16 y 17 de Constitucional");
   };
 
-  // Save preparador feedback / cante session with double-submit guard
+  // 1-Click Quick Review Handler
+  const handleQuickReview = async (topicId: string, durationMinutes: number) => {
+    try {
+      const topic = topicMap.get(topicId);
+      const difficulty = topic?.difficulty || 5;
+      await addStudySession(topicId, durationMinutes, difficulty, "repaso");
+      playSound.success();
+      toast.success(`⚡ Repaso de ${durationMinutes} min registrado`, {
+        description: `Curva de retención neuronal renovada para Tema ${topic?.number || ""}.`,
+      });
+    } catch (e: any) {
+      toast.error("Error al registrar repaso: " + (e?.message || e));
+    }
+  };
+
+  // Save preparador feedback
   const handleSavePreparadorFeedback = async (data: {
-    topicId: string;
+    grade: number;
     durationMinutes: number;
     durationSeconds: number;
-    grade: number;
     notes: string;
   }) => {
-    if (isSavingFeedback) return;
+    if (!feedbackTopic) return;
+    setIsSavingFeedback(true);
     try {
-      setIsSavingFeedback(true);
+      const totalSecs = data.durationMinutes * 60 + data.durationSeconds;
       await addStudySession(
-        data.topicId,
+        feedbackTopic.id,
         data.durationMinutes,
-        feedbackTopic?.difficulty || 5,
+        feedbackTopic.difficulty || 5,
         "canto",
         getLocalDateString(),
         {
-          cantoSeconds: data.durationSeconds,
+          cantoSeconds: totalSecs,
           cantoGrade: data.grade,
           cantoType: "preparador",
           mistakes: data.notes,
@@ -392,29 +445,42 @@ export function PreparadorView() {
     return unique;
   }, [recentSessions]);
 
+  // Sessions for selected study date
+  const selectedDaySessions = useMemo(() => {
+    if (activeView !== "dia_estudio" || !selectedDayDate) return [];
+    return recentSessions.filter((s) => (s.date || "").startsWith(selectedDayDate));
+  }, [activeView, selectedDayDate, recentSessions]);
+
+  const selectedDayTotalMinutes = useMemo(() => {
+    return selectedDaySessions.reduce(
+      (acc, s) => acc + (s.durationMinutes || s.duration || 0),
+      0
+    );
+  }, [selectedDaySessions]);
+
   return (
     <div className="flex flex-col h-full bg-[#F5F5F7] overflow-hidden">
-      {/* SLIM STICKY HEADER (Compact on mobile) */}
-      <div className="bg-white/95 backdrop-blur-2xl border-b border-slate-200/70 px-3.5 py-2.5 sm:px-6 sm:py-3.5 sticky top-0 z-20 shrink-0 shadow-[0_2px_12px_rgba(0,0,0,0.03)]">
+      {/* SLIM STICKY HEADER */}
+      <div className="bg-white/95 backdrop-blur-2xl border-b border-slate-200/70 px-4 py-3 sm:px-6 sticky top-0 z-20 shrink-0 shadow-[0_2px_12px_rgba(0,0,0,0.03)]">
         <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2.5 max-w-[100rem] mx-auto">
           {/* Title Row */}
-          <div className="flex items-center justify-between sm:justify-start gap-2.5">
-            <div className="flex items-center gap-2">
-              <div className="w-7 h-7 sm:w-8 sm:h-8 rounded-lg bg-slate-900 text-white flex items-center justify-center shrink-0 shadow-2xs">
-                <Award size={15} strokeWidth={2.2} />
+          <div className="flex items-center justify-between sm:justify-start gap-3">
+            <div className="flex items-center gap-2.5">
+              <div className="w-8 h-8 rounded-xl bg-slate-900 text-white flex items-center justify-center shrink-0 shadow-xs">
+                <Award size={16} strokeWidth={2.2} />
               </div>
-              <h1 className="text-sm sm:text-lg font-black text-slate-900 tracking-tight font-serif truncate">
-                Panel del Preparador (L/J)
-              </h1>
+              <div>
+                <h1 className="text-base sm:text-lg font-black text-slate-900 tracking-tight font-serif truncate">
+                  Centro de Mando del Preparador & Agenda
+                </h1>
+                <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider hidden sm:block">
+                  Sesiones L/J · Curva Ebbinghaus · Telemetría 12:30
+                </p>
+              </div>
             </div>
 
-            <span className="hidden md:inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-indigo-50 text-indigo-700 border border-indigo-200/80 shrink-0">
-              <Target size={11} className="text-indigo-600" />
-              <span>Meta: 12:30 min</span>
-            </span>
-
             {/* Mobile Add Topics Button */}
-            {activeDay !== "historial" && (
+            {(activeView === "lunes" || activeView === "jueves") && (
               <button
                 onClick={() => setIsPickerOpen(true)}
                 className="sm:hidden px-2.5 py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold transition-all shadow-xs flex items-center gap-1 shrink-0 active:scale-95"
@@ -425,62 +491,58 @@ export function PreparadorView() {
             )}
           </div>
 
-          {/* DAY SEGMENTED CONTROLLER (LUNES / JUEVES / HISTORIAL) */}
+          {/* Quick Actions & Cante Day Switcher */}
           <div className="flex items-center gap-2">
-            <div className="flex bg-slate-200/70 p-1 rounded-xl border border-slate-300/40 flex-1 sm:flex-initial">
+            <div className="flex bg-slate-100 p-1 rounded-xl border border-slate-200/60 flex-1 sm:flex-initial">
               <button
-                onClick={() => setActiveDay("lunes")}
+                type="button"
+                onClick={() => {
+                  playSound.click();
+                  setActiveView("lunes");
+                }}
                 className={cn(
-                  "flex-1 sm:flex-initial px-3 sm:px-4 py-1 sm:py-1.5 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-1.5",
-                  activeDay === "lunes"
+                  "px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-1.5",
+                  activeView === "lunes"
                     ? "bg-white text-slate-900 shadow-xs"
                     : "text-slate-600 hover:text-slate-900"
                 )}
               >
                 <Calendar size={12} />
                 <span>Lunes</span>
-                <span className="text-[10px] px-1.5 py-0.2 rounded-md bg-slate-100 font-bold">
+                <span className="text-[10px] font-mono font-bold px-1.5 py-0.2 rounded-md bg-slate-100">
                   {(schedule.lunes || []).length}
                 </span>
               </button>
 
               <button
-                onClick={() => setActiveDay("jueves")}
+                type="button"
+                onClick={() => {
+                  playSound.click();
+                  setActiveView("jueves");
+                }}
                 className={cn(
-                  "flex-1 sm:flex-initial px-3 sm:px-4 py-1 sm:py-1.5 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-1.5",
-                  activeDay === "jueves"
+                  "px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-1.5",
+                  activeView === "jueves"
                     ? "bg-white text-slate-900 shadow-xs"
                     : "text-slate-600 hover:text-slate-900"
                 )}
               >
                 <Calendar size={12} />
                 <span>Jueves</span>
-                <span className="text-[10px] px-1.5 py-0.2 rounded-md bg-slate-100 font-bold">
+                <span className="text-[10px] font-mono font-bold px-1.5 py-0.2 rounded-md bg-slate-100">
                   {(schedule.jueves || []).length}
-                </span>
-              </button>
-
-              <button
-                onClick={() => setActiveDay("historial")}
-                className={cn(
-                  "flex-1 sm:flex-initial px-3 sm:px-4 py-1 sm:py-1.5 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-1.5",
-                  activeDay === "historial"
-                    ? "bg-white text-slate-900 shadow-xs"
-                    : "text-slate-600 hover:text-slate-900"
-                )}
-              >
-                <Award size={12} />
-                <span>Historial</span>
-                <span className="text-[10px] px-1.5 py-0.2 rounded-md bg-slate-100 font-bold">
-                  {preparadorSessions.length}
                 </span>
               </button>
             </div>
 
             {/* Desktop Add Topics Button */}
-            {activeDay !== "historial" && (
+            {(activeView === "lunes" || activeView === "jueves") && (
               <button
-                onClick={() => setIsPickerOpen(true)}
+                type="button"
+                onClick={() => {
+                  playSound.click();
+                  setIsPickerOpen(true);
+                }}
                 className="hidden sm:flex px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold transition-all shadow-xs items-center gap-1.5 shrink-0 active:scale-95"
               >
                 <Plus size={14} strokeWidth={2.5} />
@@ -491,12 +553,216 @@ export function PreparadorView() {
         </div>
       </div>
 
-      {/* MAIN SCROLLABLE CONTENT AREA (Silky-smooth touch scroll enabled) */}
+      {/* MAIN SCROLLABLE CONTENT */}
       <div className="flex-1 min-h-0 overflow-y-auto overscroll-y-contain touch-pan-y -webkit-overflow-scrolling-touch p-3 sm:p-6 md:p-8 pb-44 sm:pb-36 max-w-[100rem] mx-auto w-full">
-        {/* Status banner and Overview Benchmark Cards inside scrollable body */}
-        {activeDay !== "historial" && (
-          <div className="space-y-2 sm:space-y-3 mb-4 sm:mb-5">
-            {/* Status explanation & Meta banner (Slim on mobile) */}
+        {/* INTERACTIVE WEEKLY PLANNER RIBBON STRIP AT THE TOP */}
+        <WeeklyPlannerStrip
+          activeView={activeView}
+          onSelectView={(view, selectedDate) => {
+            setActiveView(view);
+            if (selectedDate) setSelectedDayDate(selectedDate);
+          }}
+          lunesTopicsCount={(schedule.lunes || []).length}
+          juevesTopicsCount={(schedule.jueves || []).length}
+          ebbinghausAlertCount={ebbinghausAlertCount}
+          totalCantosCount={preparadorSessions.length}
+          selectedDateStr={selectedDayDate}
+          recentSessions={recentSessions}
+        />
+
+        {/* VIEW 1: EBBINGHAUS QUEUE */}
+        {activeView === "ebbinghaus" && (
+          <PreparadorEbbinghausQueue
+            userProgress={userProgress}
+            recentSessions={recentSessions}
+            onAssignToDay={handleAddTopicToDay}
+            onQuickReview={handleQuickReview}
+            assignedLunesIds={schedule.lunes || []}
+            assignedJuevesIds={schedule.jueves || []}
+          />
+        )}
+
+        {/* VIEW 2: STUDY DAY DETAIL (Martes, Miércoles, etc.) */}
+        {activeView === "dia_estudio" && (
+          <div className="space-y-4">
+            <div className="bg-white rounded-2xl p-5 border border-slate-200/80 shadow-2xs">
+              <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-2xl bg-indigo-50 border border-indigo-100 flex items-center justify-center text-indigo-600 font-bold">
+                    <Calendar size={18} />
+                  </div>
+                  <div>
+                    <h3 className="text-base font-black font-serif text-slate-900 tracking-tight">
+                      Jornada de Estudio ({selectedDayDate})
+                    </h3>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      {selectedDaySessions.length} {selectedDaySessions.length === 1 ? "sesión registrada" : "sesiones registradas"} · {formatMinutesToHours(selectedDayTotalMinutes)} netos de estudio.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setActiveView("lunes")}
+                    className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-xl transition-all"
+                  >
+                    Ver Cante Lunes
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setActiveView("jueves")}
+                    className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-xl transition-all"
+                  >
+                    Ver Cante Jueves
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {selectedDaySessions.length === 0 ? (
+              <div className="bg-white rounded-3xl p-12 text-center border border-slate-200/70 shadow-sm">
+                <Clock size={36} className="text-slate-300 mx-auto mb-3" />
+                <h3 className="text-base font-bold text-slate-800">No hay sesiones registradas en esta fecha</h3>
+                <p className="text-xs text-slate-500 max-w-md mx-auto mt-1 mb-4">
+                  Las sesiones importadas de AeroFocus Pro o registradas manualmente aparecerán aquí desglosadas por tema y dificultad.
+                </p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+                {selectedDaySessions.map((session, idx) => {
+                  const topic = topicMap.get(session.topicId);
+                  const durMins = session.durationMinutes || session.duration || 0;
+                  return (
+                    <div
+                      key={session.id || idx}
+                      className="bg-white rounded-2xl p-4 border border-slate-200/80 shadow-2xs flex items-center justify-between gap-3"
+                    >
+                      <div>
+                        <div className="flex items-center gap-2 mb-1">
+                          <span className="text-[10px] font-black uppercase tracking-wider px-2 py-0.5 bg-slate-100 text-slate-700 rounded-md font-mono">
+                            Tema {topic?.number || session.topicId}
+                          </span>
+                          <span className="text-[10px] font-bold text-slate-400 capitalize">
+                            {session.type || "Estudio"}
+                          </span>
+                        </div>
+                        <h4 className="text-xs font-bold text-slate-900 truncate">
+                          {topic?.title || `Tema ${session.topicId}`}
+                        </h4>
+                      </div>
+
+                      <div className="text-right shrink-0">
+                        <div className="text-sm font-black text-slate-900 font-mono tabular-nums">
+                          {durMins} min
+                        </div>
+                        <div className="text-[10px] text-slate-400 font-bold">
+                          Dif. {session.difficulty || 5}/10
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* VIEW 3: HISTORIAL */}
+        {activeView === "historial" && (
+          <div className="space-y-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <h2 className="text-lg font-black text-slate-900 font-serif">
+                  Histórico de Evaluaciones con el Preparador
+                </h2>
+                <p className="text-xs text-slate-500">
+                  Registro de cantes oficiales, calificaciones obtenidas y correcciones del preparador.
+                </p>
+              </div>
+            </div>
+
+            {preparadorSessions.length === 0 ? (
+              <div className="bg-white rounded-3xl p-12 text-center border border-slate-200/70 shadow-sm">
+                <Award size={36} className="text-slate-300 mx-auto mb-3" />
+                <h3 className="text-base font-bold text-slate-800">No hay cantes registrados con el preparador todavía</h3>
+                <p className="text-xs text-slate-500 max-w-md mx-auto mt-1 mb-4">
+                  Cuando cantes un tema el Lunes o el Jueves, pulsa en &quot;Registrar Nota / Cante&quot; en la tarjeta del tema para registrar el feedback y notas.
+                </p>
+                <button
+                  onClick={() => setActiveView(getDefaultPreparadorDay())}
+                  className="px-4 py-2 bg-slate-900 text-white rounded-xl text-xs font-bold hover:bg-slate-800 transition-all"
+                >
+                  Ir a preparar la sesión activa ({getDefaultPreparadorDay()})
+                </button>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {preparadorSessions.map((session, idx) => {
+                  const topic = topicMap.get(session.topicId) 
+                    || initialTopics.find((t) => String(t.number) === String(session.topicId) || sessionMatchesTopic(session, t));
+                  const dur = getCantoDuration(session);
+                  const grade = session.cantoGrade ?? session.grade ?? null;
+
+                  return (
+                    <div 
+                      key={session.id || idx}
+                      className="bg-white rounded-2xl p-5 border border-slate-200/80 shadow-sm hover:shadow-md transition-shadow flex flex-col justify-between"
+                    >
+                      <div>
+                        <div className="flex items-center justify-between gap-2 mb-2">
+                          <span className="text-[10px] font-black uppercase tracking-wider px-2 py-0.5 bg-slate-100 rounded-md text-slate-600 font-mono">
+                            {session.date || "Fecha no registrada"}
+                          </span>
+                          {grade !== null && (
+                            <span className={cn(
+                              "text-xs font-black px-2.5 py-0.5 rounded-full border font-mono tabular-nums",
+                              grade >= 8.5 ? "bg-emerald-50 text-emerald-700 border-emerald-200" :
+                              grade >= 7.0 ? "bg-indigo-50 text-indigo-700 border-indigo-200" :
+                              grade >= 5.0 ? "bg-amber-50 text-amber-700 border-amber-200" :
+                              "bg-rose-50 text-rose-700 border-rose-200"
+                            )}>
+                              Nota: {grade.toFixed(1)} / 10
+                            </span>
+                          )}
+                        </div>
+
+                        <h3 className="font-bold text-slate-900 text-sm mb-1">
+                          {topic ? (topic.number === 999 ? "Tema Extra" : `Tema ${topic.number}: ${topic.title}`) : `Tema ${session.topicId}`}
+                        </h3>
+
+                        <div className="flex items-center gap-3 text-xs text-slate-500 mt-2 mb-3">
+                          <span className="flex items-center gap-1 font-semibold text-slate-700 font-mono tabular-nums">
+                            <Clock size={13} className="text-indigo-600" />
+                            {dur.formatted}
+                          </span>
+                          <span>·</span>
+                          <span className="text-[11px] text-slate-400 font-mono">
+                            Meta: 12m 30s ({dur.totalSecs > OPTIMAL_CANTO_SECS ? `+${dur.totalSecs - OPTIMAL_CANTO_SECS}s` : `-${OPTIMAL_CANTO_SECS - dur.totalSecs}s`})
+                          </span>
+                        </div>
+
+                        {session.mistakes && (
+                          <div className="p-3 bg-amber-50/70 border border-amber-100 rounded-xl text-xs text-amber-900">
+                            <span className="font-bold block mb-0.5 text-[10px] uppercase tracking-wider text-amber-700">
+                              Observaciones del Preparador:
+                            </span>
+                            {session.mistakes}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* VIEW 4 & 5: LUNES O JUEVES SESIÓN OFICIAL */}
+        {(activeView === "lunes" || activeView === "jueves") && (
+          <div className="space-y-4">
+            {/* Status explanation & Meta banner */}
             <div className="flex flex-wrap items-center justify-between gap-1.5 p-2 sm:p-3 bg-white rounded-2xl border border-slate-200/80 shadow-2xs">
               <div className="flex items-center gap-1.5 text-[11px] sm:text-xs font-semibold text-slate-700">
                 <Clock size={12} className="text-slate-500 shrink-0" />
@@ -508,86 +774,9 @@ export function PreparadorView() {
               </div>
             </div>
 
-            {/* MOBILE COMPACT KPI STRIP (< sm screens) */}
-            <div className="sm:hidden bg-white rounded-2xl p-2.5 border border-slate-200/70 shadow-2xs">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2 overflow-x-auto no-scrollbar py-0.5">
-                  <div className="flex items-baseline gap-1 bg-slate-50 px-2 py-1 rounded-lg border border-slate-100 shrink-0">
-                    <span className="text-[9px] font-bold uppercase text-slate-400">Nota:</span>
-                    <span className={cn(
-                      "text-xs font-black tabular-nums",
-                      kpis.avgScore === null ? "text-slate-400" :
-                      kpis.avgScore >= 8.5 ? "text-emerald-700" :
-                      kpis.avgScore >= 7.0 ? "text-indigo-700" :
-                      kpis.avgScore >= 5.0 ? "text-amber-700" : "text-rose-600"
-                    )}>
-                      {kpis.avgScore !== null ? `${kpis.avgScore.toFixed(1)}` : "—"}
-                    </span>
-                  </div>
-
-                  <div className="flex items-center gap-1 bg-slate-50 px-2 py-1 rounded-lg border border-slate-100 shrink-0 text-[10px] font-bold text-slate-700">
-                    <span className="text-emerald-600 font-black">{kpis.listosTribunal}L</span>
-                    <span>·</span>
-                    <span className="text-amber-600 font-black">{kpis.enAjuste}A</span>
-                    <span>·</span>
-                    <span className="text-rose-600 font-black">{kpis.enRiesgo}R</span>
-                  </div>
-
-                  <div className="flex items-center gap-1 bg-cyan-50/70 px-2 py-1 rounded-lg border border-cyan-100/60 shrink-0 text-[10px] font-bold text-cyan-800">
-                    <Brain size={10} className="text-cyan-600" />
-                    <span>{kpis.avgRetention !== null ? `${kpis.avgRetention}%` : "—"}</span>
-                  </div>
-
-                  <div className="flex items-center gap-1 bg-amber-50/70 px-2 py-1 rounded-lg border border-amber-100/60 shrink-0 text-[10px] font-bold text-amber-800">
-                    <Timer size={10} className="text-amber-600" />
-                    <span>~{kpis.totalMinutes}m</span>
-                  </div>
-                </div>
-
-                <button
-                  type="button"
-                  onClick={() => setShowMobileKpiDetails(prev => !prev)}
-                  className="p-1 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-slate-700 transition-colors shrink-0 ml-1"
-                  title="Expandir / Contraer diagnóstico"
-                >
-                  {showMobileKpiDetails ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
-                </button>
-              </div>
-
-              {/* Collapsible Mobile Detailed Grid */}
-              {showMobileKpiDetails && (
-                <div className="grid grid-cols-2 gap-2 mt-2 pt-2 border-t border-slate-100 animate-in fade-in duration-200">
-                  <div className="p-2 bg-slate-50 rounded-xl">
-                    <div className="text-[9px] font-bold text-slate-400 uppercase">Nota Proyectada</div>
-                    <div className="text-sm font-black text-slate-900 mt-0.5">
-                      {kpis.avgScore !== null ? `${kpis.avgScore.toFixed(1)} / 10` : "—"}
-                    </div>
-                  </div>
-                  <div className="p-2 bg-slate-50 rounded-xl">
-                    <div className="text-[9px] font-bold text-slate-400 uppercase">Diagnóstico</div>
-                    <div className="text-xs font-bold text-slate-800 mt-0.5">
-                      <span className="text-emerald-600 font-black">{kpis.listosTribunal}</span> Listos · <span className="text-amber-600 font-black">{kpis.enAjuste}</span> Ajuste
-                    </div>
-                  </div>
-                  <div className="p-2 bg-slate-50 rounded-xl">
-                    <div className="text-[9px] font-bold text-slate-400 uppercase">Curva Ebbinghaus</div>
-                    <div className="text-xs font-bold text-slate-800 mt-0.5">
-                      {kpis.avgRetention !== null ? `${kpis.avgRetention}% retención` : "—"}
-                    </div>
-                  </div>
-                  <div className="p-2 bg-slate-50 rounded-xl">
-                    <div className="text-[9px] font-bold text-slate-400 uppercase">Duración Cante</div>
-                    <div className="text-xs font-bold text-slate-800 mt-0.5">
-                      ~{kpis.totalMinutes} min ({kpis.total} temas)
-                    </div>
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* DESKTOP & TABLET BENCHMARK CARDS (hidden on mobile, visible on sm and up) */}
-            <div className="hidden sm:grid sm:grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-3">
-              {/* 1. Nota Media de Preparación Proyectada (1-10) */}
+            {/* BENCHMARK KPI CARDS */}
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-3">
+              {/* 1. Nota Media de Preparación Proyectada */}
               <div className="bg-white rounded-2xl p-3 sm:p-3.5 border border-slate-200/70 shadow-2xs flex items-center gap-2.5 sm:gap-3">
                 <div className="w-8 h-8 sm:w-10 sm:h-10 rounded-xl bg-indigo-50 border border-indigo-100 flex items-center justify-center shrink-0 text-indigo-600">
                   <Award size={16} strokeWidth={2.2} />
@@ -639,7 +828,7 @@ export function PreparadorView() {
                   <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400 truncate">
                     Curva Ebbinghaus
                   </div>
-                  <div className="text-sm sm:text-lg font-black text-slate-900">
+                  <div className="text-sm sm:text-lg font-black text-slate-900 font-mono tabular-nums">
                     {kpis.avgRetention !== null ? `${kpis.avgRetention}%` : "—"}
                     <span className="text-[10px] sm:text-xs font-normal text-slate-500 ml-1">retención</span>
                   </div>
@@ -655,111 +844,19 @@ export function PreparadorView() {
                   <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400 truncate">
                     Cante Total Estimado
                   </div>
-                  <div className="text-sm sm:text-lg font-black text-slate-900">
+                  <div className="text-sm sm:text-lg font-black text-slate-900 font-mono tabular-nums">
                     ~{kpis.totalMinutes}m
                     <span className="text-[10px] sm:text-xs font-normal text-slate-500 ml-1">({kpis.total} temas)</span>
                   </div>
                 </div>
               </div>
             </div>
-          </div>
-        )}
-        {activeDay === "historial" ? (
-          /* HISTORIAL VIEW */
-          <div className="space-y-4">
-            <div className="flex items-center justify-between">
-              <div>
-                <h2 className="text-lg font-black text-slate-900 font-serif">
-                  Histórico de Evaluaciones con el Preparador
-                </h2>
-                <p className="text-xs text-slate-500">
-                  Registro de cantes oficiales, calificaciones obtenidas y correcciones del preparador.
-                </p>
-              </div>
-            </div>
 
-            {preparadorSessions.length === 0 ? (
-              <div className="bg-white rounded-3xl p-12 text-center border border-slate-200/70 shadow-sm">
-                <Award size={36} className="text-slate-300 mx-auto mb-3" />
-                <h3 className="text-base font-bold text-slate-800">No hay cantes registrados con el preparador todavía</h3>
-                <p className="text-xs text-slate-500 max-w-md mx-auto mt-1 mb-4">
-                  Cuando cantes un tema el Lunes o el Jueves, pulsa en &quot;Registrar Cante / Nota Preparador&quot; en la tarjeta del tema para registrar el feedback y notas.
-                </p>
-                <button
-                  onClick={() => setActiveDay(getDefaultPreparadorDay())}
-                  className="px-4 py-2 bg-slate-900 text-white rounded-xl text-xs font-bold hover:bg-slate-800 transition-all"
-                >
-                  Ir a preparar la sesión activa ({getDefaultPreparadorDay()})
-                </button>
-              </div>
-            ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {preparadorSessions.map((session, idx) => {
-                  const topic = topicMap.get(session.topicId) 
-                    || initialTopics.find((t) => String(t.number) === String(session.topicId) || sessionMatchesTopic(session, t));
-                  const dur = getCantoDuration(session);
-                  const grade = session.cantoGrade ?? session.grade ?? null;
-
-                  return (
-                    <div 
-                      key={session.id || idx}
-                      className="bg-white rounded-2xl p-5 border border-slate-200/80 shadow-sm hover:shadow-md transition-shadow flex flex-col justify-between"
-                    >
-                      <div>
-                        <div className="flex items-center justify-between gap-2 mb-2">
-                          <span className="text-[10px] font-black uppercase tracking-wider px-2 py-0.5 bg-slate-100 rounded-md text-slate-600">
-                            {session.date || "Fecha no registrada"}
-                          </span>
-                          {grade !== null && (
-                            <span className={cn(
-                              "text-xs font-black px-2.5 py-0.5 rounded-full border",
-                              grade >= 8.5 ? "bg-emerald-50 text-emerald-700 border-emerald-200" :
-                              grade >= 7.0 ? "bg-indigo-50 text-indigo-700 border-indigo-200" :
-                              grade >= 5.0 ? "bg-amber-50 text-amber-700 border-amber-200" :
-                              "bg-rose-50 text-rose-700 border-rose-200"
-                            )}>
-                              Nota: {grade.toFixed(1)} / 10
-                            </span>
-                          )}
-                        </div>
-
-                        <h3 className="font-bold text-slate-900 text-sm mb-1">
-                          {topic ? (topic.number === 999 ? "Tema Extra" : `Tema ${topic.number}: ${topic.title}`) : `Tema ${session.topicId}`}
-                        </h3>
-
-                        <div className="flex items-center gap-3 text-xs text-slate-500 mt-2 mb-3">
-                          <span className="flex items-center gap-1 font-semibold text-slate-700">
-                            <Clock size={13} className="text-indigo-600" />
-                            {dur.formatted}
-                          </span>
-                          <span>·</span>
-                          <span className="text-[11px] text-slate-400">
-                            Meta óptima: 12m 30s ({dur.totalSecs > OPTIMAL_CANTO_SECS ? `+${dur.totalSecs - OPTIMAL_CANTO_SECS}s` : `-${OPTIMAL_CANTO_SECS - dur.totalSecs}s`})
-                          </span>
-                        </div>
-
-                        {session.mistakes && (
-                          <div className="p-3 bg-amber-50/70 border border-amber-100 rounded-xl text-xs text-amber-900">
-                            <span className="font-bold block mb-0.5 text-[10px] uppercase tracking-wider text-amber-700">
-                              Observaciones del Preparador:
-                            </span>
-                            {session.mistakes}
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        ) : (
-          /* ASSIGNED TOPICS CARDS LIST */
-          <div className="space-y-4">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 sm:gap-3">
+            {/* ASSIGNED TOPICS HEADER & SORTING */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 sm:gap-3 pt-2">
               <div>
                 <h2 className="text-base sm:text-lg font-black text-slate-900 font-serif flex items-center gap-2">
-                  <span>Temas Asignados ({activeDay === "lunes" ? "Lunes" : "Jueves"})</span>
+                  <span>Temas Asignados ({activeView === "lunes" ? "Lunes" : "Jueves"})</span>
                   <span className="text-xs px-2 py-0.5 bg-slate-200/80 text-slate-700 rounded-lg font-sans font-bold">
                     {assignedTopics.length}
                   </span>
@@ -816,11 +913,12 @@ export function PreparadorView() {
               )}
             </div>
 
+            {/* TOPIC CARDS GRID */}
             {assignedTopics.length === 0 ? (
               <div className="bg-white rounded-3xl p-12 text-center border border-slate-200/70 shadow-sm">
                 <BookOpen size={36} className="text-slate-300 mx-auto mb-3" />
                 <h3 className="text-base font-bold text-slate-800">
-                  No hay temas asignados para el {activeDay === "lunes" ? "Lunes" : "Jueves"}
+                  No hay temas asignados para el {activeView === "lunes" ? "Lunes" : "Jueves"}
                 </h3>
                 <p className="text-xs text-slate-500 max-w-md mx-auto mt-1 mb-5">
                   Añade los temas que vas a cantar en tu próxima sesión para ver al instante su nota objetiva (1-10), calibración de tiempo y retención.
@@ -857,6 +955,7 @@ export function PreparadorView() {
                     vueltas={item.vueltas}
                     reviewsCount={item.reviewsCount}
                     onRemove={handleRemoveTopic}
+                    onQuickReview={handleQuickReview}
                     onOpenFeedback={(topic) => {
                       setFeedbackTopic(topic);
                       setPrepGrade(item.lastGrade ?? 7.5);
@@ -885,7 +984,7 @@ export function PreparadorView() {
               <div className="p-5 border-b border-slate-100 flex items-center justify-between">
                 <div>
                   <h3 className="text-lg font-black font-serif text-slate-900">
-                    Añadir Temas para el {activeDay === "lunes" ? "Lunes" : "Jueves"}
+                    Añadir Temas para el {activeView === "lunes" ? "Lunes" : "Jueves"}
                   </h3>
                   <p className="text-xs text-slate-500">
                     Selecciona los temas oficiales del programa para llevar a tu próxima sesión.
@@ -937,7 +1036,8 @@ export function PreparadorView() {
               {/* Topics List */}
               <div className="flex-1 overflow-y-auto p-4 space-y-2">
                 {pickerFilteredTopics.map((topic) => {
-                  const isAssigned = (schedule[activeDay as "lunes" | "jueves"] || []).includes(topic.id);
+                  const dayKey = (activeView === "jueves" ? "jueves" : "lunes") as "lunes" | "jueves";
+                  const isAssigned = (schedule[dayKey] || []).includes(topic.id);
                   const prog = userProgress[topic.id];
                   const vueltas = prog?.vueltas || 0;
 
@@ -994,7 +1094,7 @@ export function PreparadorView() {
               {/* Footer */}
               <div className="p-4 border-t border-slate-100 flex items-center justify-between bg-slate-50/50">
                 <span className="text-xs text-slate-500 font-medium">
-                  {(schedule[activeDay as "lunes" | "jueves"] || []).length} temas asignados para el {activeDay}
+                  {(schedule[activeView === "jueves" ? "jueves" : "lunes"] || []).length} temas asignados para el {activeView === "jueves" ? "Jueves" : "Lunes"}
                 </span>
                 <button
                   onClick={() => setIsPickerOpen(false)}
