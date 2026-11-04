@@ -35,7 +35,9 @@ export default async function handler(req: any, res: any) {
     const limit = parseInt(req.query?.limit || '50', 10);
 
     let filtered = events;
-    if (statusFilter) {
+    if (statusFilter === 'pending' || statusFilter === 'quarantined' || statusFilter === 'unprocessed') {
+      filtered = filtered.filter((e) => e.status === 'quarantined' || e.status === 'pending');
+    } else if (statusFilter) {
       filtered = filtered.filter((e) => e.status === statusFilter);
     }
 

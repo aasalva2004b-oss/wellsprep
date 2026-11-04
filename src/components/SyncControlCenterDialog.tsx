@@ -336,7 +336,14 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
         const success = await addQuarantineEventManually(text.trim());
         if (success) {
           toast.success("✅ Cierre de AeroFocus importado a cuarentena.");
+          setSearchQuery("");
+          setSubjectFilter("all");
+          setSourceFilter("all");
+          setDifficultyFilter("all");
           setActiveTab("quarantine");
+          if (fetchQuarantinedEvents) {
+            fetchQuarantinedEvents();
+          }
           return;
         }
       }
@@ -470,7 +477,14 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
         toast.success("✅ Cierre importado y depositado en cuarentena.");
         setIsPasteModalOpen(false);
         setPasteJsonText("");
+        setSearchQuery("");
+        setSubjectFilter("all");
+        setSourceFilter("all");
+        setDifficultyFilter("all");
         setActiveTab("quarantine");
+        if (fetchQuarantinedEvents) {
+          fetchQuarantinedEvents();
+        }
       }
     } catch (e: any) {
       toast.error("Error al procesar el texto: " + e.message);

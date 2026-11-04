@@ -9,9 +9,10 @@ export interface ParsedAeroFocusResult {
 
 /**
  * Parsea cualquier tipo de entrada procedente de AeroFocus Pro:
- * - JSON estándar (Schema 2.0.0 o 1.0.0)
- * - JSON dentro de bloques Markdown (```json ... ```)
+ * - JSON estándar (Schema 2.2.0, 2.0.0 o 1.0.0)
+ * - JSON dentro de bloques Markdown (```json ... ```) o texto circundante
  * - Arrays de objetos
+ * - Estructuras con tasksBreakdown, sessions, studySessions, pageBreakdown, etc.
  * - Texto en bruto copiado de resúmenes de sesión o cierres diarios
  */
 export function parseAeroFocusInput(input: any): ParsedAeroFocusResult {
@@ -38,7 +39,7 @@ export function parseAeroFocusInput(input: any): ParsedAeroFocusResult {
     text = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
   }
 
-  // 3. Intento de parseo JSON estándar
+  // 3. Intento de parseo JSON estándar directo
   if ((text.startsWith('{') && text.endsWith('}')) || (text.startsWith('[') && text.endsWith(']'))) {
     try {
       const parsed = JSON.parse(text);
@@ -52,8 +53,25 @@ export function parseAeroFocusInput(input: any): ParsedAeroFocusResult {
         const parsed = JSON.parse(sanitized);
         return { success: true, payload: parsed, isTextParsed: false };
       } catch {
-        // Fallback a parser de texto
+        // Fallback
       }
+    }
+  }
+
+  // 3b. Intento de extraer JSON embebido en texto si contiene llaves o corchetes
+  const jsonMatch = text.match(/(\{[\s\S]*\}|\[[\s\S]*\])/);
+  if (jsonMatch) {
+    try {
+      const parsed = JSON.parse(jsonMatch[1]);
+      return { success: true, payload: parsed, isTextParsed: false };
+    } catch {
+      try {
+        const sanitized = jsonMatch[1]
+          .replace(/,\s*([\]}])/g, '$1')
+          .replace(/'/g, '"');
+        const parsed = JSON.parse(sanitized);
+        return { success: true, payload: parsed, isTextParsed: false };
+      } catch {}
     }
   }
 
@@ -80,8 +98,9 @@ export function parseAeroFocusPlainText(rawText: string): any {
   let detectedDate: string | null = null;
   let detectedFlightId: string | null = null;
   let currentSubject: string = 'Constitucional';
+  let totalMinutesAccumulated = 0;
 
-  // Buscar fecha global (ej. 23/10/2026 o 2026-10-23)
+  // Buscar fecha global (ej. 23/10/2026 o 2026-10-23 o 23-10-2026)
   const dateMatch = rawText.match(/(\d{4}[-/]\d{1,2}[-/]\d{1,2})|(\d{1,2}[-/]\d{1,2}[-/]\d{4})/);
   if (dateMatch) {
     const rawD = dateMatch[0];
@@ -101,9 +120,20 @@ export function parseAeroFocusPlainText(rawText: string): any {
     detectedFlightId = flightMatch[1];
   }
 
-  for (const line of lines) {
-    // Descartar explícitamente líneas de distracciones, pausas, descansos, checklists o métricas de vuelo
-    if (/\b(?:distracci[oó]n(?:es)?|distractions?|pausa|descanso|break|checklist|touchdown|landing|takeoff|vuelo|flight|callsign|aircraft)\b/i.test(line)) {
+  // Buscar minutos totales globales si vienen expresados
+  const totalDurationMatch = rawText.match(/(?:tiempo\s*total|total\s*tiempo|tiempo\s*neto|duraci[oó]n|efectivo)\s*[:=]?\s*(\d+(?:[.,]\d+)?)\s*(?:horas?|h|hrs?)?(?:\s*(\d+)\s*(?:minutos?|mins?|m\b))?/i);
+  if (totalDurationMatch) {
+    const hrs = totalDurationMatch[1] && (rawText.toLowerCase().includes('h') || rawText.toLowerCase().includes('hora')) ? parseFloat(totalDurationMatch[1].replace(',', '.')) : 0;
+    const mins = totalDurationMatch[2] ? parseInt(totalDurationMatch[2], 10) : (hrs === 0 && totalDurationMatch[1] ? parseInt(totalDurationMatch[1], 10) : 0);
+    totalMinutesAccumulated = Math.round(hrs * 60) + mins;
+  }
+
+  for (const rawLine of lines) {
+    // Limpiar viñetas comunes de markdown y listas
+    const line = rawLine.replace(/^[-*•\d+.]\s*/, '').trim();
+
+    // Descartar solo si la línea es EXCLUSIVAMENTE una marca de distracción, pausa o descanso sin temas
+    if (/^(?:distracci[oó]n(?:es)?|distractions?|pausa|descanso|break|checklist|touchdown|landing|takeoff)\b/i.test(line) && !line.match(/(?:tema|t\d+|civil|penal|const|procesal|dpc|dpp)/i)) {
       continue;
     }
 
@@ -116,10 +146,7 @@ export function parseAeroFocusPlainText(rawText: string): any {
 
     // Buscar si la línea contiene un tema
     const topicNum = extractTopicNumber(line);
-    if (!topicNum) {
-      continue;
-    }
-
+    
     // Extraer materia de la línea o usar la del contexto
     const lineSubId = normalizeCategoryToSubjectId(line);
     const materia = lineSubId || currentSubject;
@@ -130,7 +157,7 @@ export function parseAeroFocusPlainText(rawText: string): any {
       .replace(/\[(?:total|vuelo|efectivo|distracci[oó]n|pausa)[^\]]*\]/gi, '');
 
     // Extraer duración
-    let minutes = 60;
+    let minutes = 45;
     const hoursMatch = cleanLineForDuration.match(/(\d+(?:[.,]\d+)?)\s*(?:horas?|h|hrs?)/i);
     const minsMatch = cleanLineForDuration.match(/(\d+)\s*(?:minutos?|mins?|m\b)/i);
     
@@ -142,10 +169,8 @@ export function parseAeroFocusPlainText(rawText: string): any {
       minutes = parseInt(minsMatch[1], 10);
     }
 
-    // Descartar sesiones fantasmas de 1 minuto o menos (artefactos de pings / clics accidentales)
-    if (minutes <= 1 && !line.match(/(?:canto|cante|oral|simulacro)/i)) {
-      continue;
-    }
+    // Asegurar mínimo de 1 minuto para nunca descartar por completo
+    if (minutes <= 0) minutes = 45;
 
     // Extraer modalidad
     let modalidad = 'repaso';
@@ -177,25 +202,71 @@ export function parseAeroFocusPlainText(rawText: string): any {
       cantoGrade = parseFloat(gradeMatch[1].replace(',', '.'));
     }
 
+    if (topicNum) {
+      topics.push({
+        topicNumber: topicNum,
+        temaNumero: topicNum,
+        materia,
+        category: materia,
+        topicTitle: `Tema ${topicNum}`,
+        effectiveMinutes: minutes,
+        minutosEfectivos: minutes,
+        effectiveHours: Math.round((minutes / 60) * 100) / 100,
+        horasEfectivas: Math.round((minutes / 60) * 100) / 100,
+        modality: modalidad,
+        modalidad,
+        startPage,
+        endPage,
+        pagesText,
+        cantoGrade,
+        notes: line,
+        isTopicCompleted: true,
+        completesVuelta: modalidad === 'repaso' || modalidad === 'canto'
+      });
+    } else if (lineSubId && (hoursMatch || minsMatch)) {
+      // Línea con asignatura y tiempo pero sin número explícito de tema
+      topics.push({
+        topicNumber: 1,
+        temaNumero: 1,
+        materia: lineSubId,
+        category: lineSubId,
+        topicTitle: `Tema 1 (${lineSubId})`,
+        effectiveMinutes: minutes,
+        minutosEfectivos: minutes,
+        effectiveHours: Math.round((minutes / 60) * 100) / 100,
+        horasEfectivas: Math.round((minutes / 60) * 100) / 100,
+        modality: modalidad,
+        modalidad,
+        startPage,
+        endPage,
+        pagesText,
+        cantoGrade,
+        notes: line,
+        isTopicCompleted: true,
+        completesVuelta: false
+      });
+    }
+  }
+
+  // Fallback si no se detectó ningún tema explícito pero hay texto con mención de estudio
+  if (topics.length === 0) {
+    const fallbackMins = totalMinutesAccumulated > 0 ? totalMinutesAccumulated : 60;
+    const fallbackSub = normalizeCategoryToSubjectId(rawText) || currentSubject || 'constitucional';
     topics.push({
-      topicNumber: topicNum,
-      temaNumero: topicNum,
-      materia,
-      category: materia,
-      topicTitle: `Tema ${topicNum}`,
-      effectiveMinutes: minutes,
-      minutosEfectivos: minutes,
-      effectiveHours: Math.round((minutes / 60) * 100) / 100,
-      horasEfectivas: Math.round((minutes / 60) * 100) / 100,
-      modality: modalidad,
-      modalidad,
-      startPage,
-      endPage,
-      pagesText,
-      cantoGrade,
-      notes: line,
-      isTopicCompleted: true,
-      completesVuelta: modalidad === 'repaso' || modalidad === 'canto'
+      topicNumber: 1,
+      temaNumero: 1,
+      materia: fallbackSub,
+      category: fallbackSub,
+      topicTitle: `Sesión AeroFocus (${fallbackSub})`,
+      effectiveMinutes: fallbackMins,
+      minutosEfectivos: fallbackMins,
+      effectiveHours: Math.round((fallbackMins / 60) * 100) / 100,
+      horasEfectivas: Math.round((fallbackMins / 60) * 100) / 100,
+      modality: 'repaso',
+      modalidad: 'repaso',
+      notes: rawText.slice(0, 200),
+      isTopicCompleted: false,
+      completesVuelta: false
     });
   }
 

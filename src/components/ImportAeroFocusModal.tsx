@@ -82,26 +82,19 @@ export function ImportAeroFocusModal({ isOpen, onClose, onSuccess }: ImportAeroF
   const handleSubmitRaw = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!rawText.trim()) {
-      toast.error("Por favor pega el contenido JSON de AeroFocus.");
+      toast.error("Por favor pega el contenido copiado de AeroFocus (JSON o reporte de texto).");
       return;
     }
 
     try {
       setIsSubmitting(true);
-      let parsed: any;
-      try {
-        parsed = JSON.parse(rawText.trim());
-      } catch (err: any) {
-        throw new Error("El texto introducido no es un JSON válido. Comprueba el formato.");
-      }
-
-      const ok = await addQuarantineEventManually(parsed);
+      const ok = await addQuarantineEventManually(rawText.trim());
       if (ok) {
         if (onSuccess) onSuccess();
         onClose();
       }
     } catch (err: any) {
-      toast.error(err.message || "Error procesando el JSON.");
+      toast.error(err.message || "Error procesando el contenido.");
     } finally {
       setIsSubmitting(false);
     }

@@ -217,16 +217,30 @@ export function processIncomingAeroFocusPayload(
     } catch {}
   }
 
-  // 2. Filtro estricto de Pings de Diagnóstico (NO alterar DB ni estadísticas para pings de comprobación)
+  // 2. Filtro estricto de Pings de Diagnóstico (Solo para comprobaciones puras sin tiempo ni temas)
+  const hasStudyData = Boolean(
+    (Array.isArray(payload.topics) && payload.topics.length > 0) ||
+    (Array.isArray(payload.tasksBreakdown) && payload.tasksBreakdown.length > 0) ||
+    (Array.isArray(payload.tasks) && payload.tasks.length > 0) ||
+    (Array.isArray(payload.sessions) && payload.sessions.length > 0) ||
+    (Array.isArray(payload.items) && payload.items.length > 0) ||
+    (Array.isArray(payload.pageBreakdown) && payload.pageBreakdown.length > 0) ||
+    Number(payload.dailyTotalEffectiveMinutes || payload.minutosEfectivos || payload.totalEffectiveStudyMinutes || payload.effectiveMinutes || payload.totalFlightEffectiveMinutes || 0) > 0 ||
+    Number(payload.dailyTotalEffectiveHours || payload.horasEfectivas || payload.effectiveHours || 0) > 0 ||
+    payload.topicId || payload.topicTitle || payload.tema
+  );
+
   const isDiagnosticPing =
-    payload.isDiagnosticPing === true ||
-    payload.isTestPing === true ||
-    headers['x-test-ping'] === 'true' ||
-    headers['X-Test-Ping'] === 'true' ||
-    payload.event === 'test_connection' ||
-    payload.event === 'ping' ||
-    payload.event === 'test_ping' ||
-    (payload.isTest === true && !payload.dailyTotalEffectiveMinutes && !payload.minutosEfectivos && !payload.totalEffectiveStudyMinutes);
+    !hasStudyData && (
+      payload.isDiagnosticPing === true ||
+      payload.isTestPing === true ||
+      headers['x-test-ping'] === 'true' ||
+      headers['X-Test-Ping'] === 'true' ||
+      payload.event === 'test_connection' ||
+      payload.event === 'ping' ||
+      payload.event === 'test_ping' ||
+      (payload.isTest === true && !hasStudyData)
+    );
 
   if (isDiagnosticPing) {
     return {
