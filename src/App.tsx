@@ -13,6 +13,7 @@ import { Toaster, toast } from "sonner";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { SyncControlCenterDialog } from "./components/SyncControlCenterDialog";
 import { CommandPalette } from "./components/CommandPalette";
+import { WeeklyPlannerView } from "./components/planner/WeeklyPlannerView";
 import { playSound } from "./lib/sound";
 import { Topic } from "./types";
 import { initialTopics } from "./data/initialData";
@@ -20,7 +21,7 @@ import { motion, AnimatePresence } from "motion/react";
 import { useAeroFocusSync } from "./hooks/useAeroFocusSync";
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<"dashboard" | "temario" | "preparador">("preparador");
+  const [activeTab, setActiveTab] = useState<"planificador" | "preparador" | "temario" | "dashboard">("planificador");
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isSyncCenterOpen, setIsSyncCenterOpen] = useState(false);
@@ -129,7 +130,13 @@ export default function App() {
           <nav className="flex-1 px-3.5 py-2 space-y-1.5 overflow-y-auto min-w-[16rem] no-scrollbar">
             <NavItem
               icon={<Calendar size={17} strokeWidth={2.3} />}
-              label="Planificador & Preparador (L/J)"
+              label="Planificador Semanal"
+              active={activeTab === "planificador"}
+              onClick={() => { playSound.click(); setActiveTab("planificador"); }}
+            />
+            <NavItem
+              icon={<Award size={17} strokeWidth={2.3} />}
+              label="Preparador & Cantes (L/J)"
               active={activeTab === "preparador"}
               onClick={() => { playSound.click(); setActiveTab("preparador"); }}
             />
@@ -239,6 +246,23 @@ export default function App() {
 
         <div className="flex-1 min-h-0 overflow-hidden flex flex-col relative w-full h-full bg-transparent">
           <AnimatePresence mode="wait">
+            {activeTab === "planificador" && (
+              <motion.div
+                key="planificador"
+                initial={{ opacity: 0, scale: 0.99 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.99 }}
+                transition={{ duration: 0.2, ease: [0.23, 1, 0.32, 1] }}
+                className="w-full h-full absolute inset-0 overflow-y-auto p-3 sm:p-6 md:p-8"
+              >
+                <WeeklyPlannerView
+                  allTopics={initialTopics}
+                  onOpenPreparadorSession={(day) => {
+                    setActiveTab("preparador");
+                  }}
+                />
+              </motion.div>
+            )}
             {activeTab === "dashboard" && (
               <motion.div
                 key="dashboard"
@@ -292,7 +316,18 @@ export default function App() {
         className="md:hidden fixed bottom-4 left-3 right-3 max-w-md mx-auto bg-white/85 backdrop-blur-2xl border border-slate-200/80 rounded-[1.75rem] flex items-center justify-between p-1.5 z-50 shadow-[0_12px_36px_-6px_rgba(15,23,42,0.14)] ring-1 ring-black/[0.04]"
       >
         <MobileNavItem
-          icon={<Calendar size={18} strokeWidth={activeTab === "preparador" && !isSyncCenterOpen && !isSettingsOpen ? 2.5 : 2} />}
+          icon={<Calendar size={18} strokeWidth={activeTab === "planificador" && !isSyncCenterOpen && !isSettingsOpen ? 2.5 : 2} />}
+          label="Semana"
+          active={activeTab === "planificador" && !isSyncCenterOpen && !isSettingsOpen}
+          onClick={() => {
+            playSound.click();
+            setIsSyncCenterOpen(false);
+            setIsSettingsOpen(false);
+            setActiveTab("planificador");
+          }}
+        />
+        <MobileNavItem
+          icon={<Award size={18} strokeWidth={activeTab === "preparador" && !isSyncCenterOpen && !isSettingsOpen ? 2.5 : 2} />}
           label="Preparador"
           active={activeTab === "preparador" && !isSyncCenterOpen && !isSettingsOpen}
           onClick={() => {

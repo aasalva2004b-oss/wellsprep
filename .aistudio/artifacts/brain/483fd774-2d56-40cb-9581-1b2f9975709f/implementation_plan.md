@@ -1,124 +1,62 @@
-# WellsPrep: Arquitectura y Reorganización Integral 100% Operativa
+# Plan de Implementación: Planificador Semanal de Judicatura — Fase 2: Perfeccionamiento y Mejora Continua
 
-Reorganización visual, estructural y del código de WellsPrep Oposiciones para convertir el **Planificador Semanal con Sesiones del Preparador (Lunes/Jueves)** en el centro neurálgico de estudio diario, unificar la navegación en una barra lateral con accesos directos de alta velocidad, y priorizar la toma de decisiones basada en la curva del olvido (Ebbinghaus), vueltas completas y telemetría de cantes.
+## 1. Resumen de la Fase 2 y Objetivos Alcanzados
 
----
+En esta segunda fase, se ha elevado el sistema de organización y planificación semanal de **Wells Prep** a un estándar superior de calidad UX/UI, inteligencia preventiva y sincronización con el historial de estudio y AeroFocus Pro.
 
-## Decisiones Críticas y Preferencias del Opositor
+### Logros Implementados:
 
-> [!IMPORTANT]
-> Confirmadas las 3 directrices operativas seleccionadas por el opositor:
-> 1. **Centro neurálgico del día a día**: Planificador semanal con calendario interactivo y sesiones del preparador (Lunes y Jueves) como vista inicial por defecto.
-> 2. **Organización visual y de navegación**: Barra lateral unificada con secciones claras, jerarquía sin píldoras decorativas y accesos directos rápidos (`Cmd+K`, registro rápido, cronómetro).
-> 3. **Estrategia de telemetría y progreso**: Priorización de repasos por curva de retención (Ebbinghaus), cómputo riguroso de vueltas y telemetría quirúrgica de cantes ante el tribunal (ventana óptima 11–13:40 min).
+1. **Balance Semanal de Rendimiento (Previsto vs Real)**:
+   - Integración directa de la telemetría de sesiones reales (`recentSessions` de WellsPrep y AeroFocus) dentro de `buildWeekPlan`.
+   - Comparativa visual en tiempo real de **Horas Previstas** vs **Horas Reales Estudiadas**.
+   - Cálculo automático de varianza horaria (`+/- X.X h`) y porcentaje de cumplimiento (`%`).
+   - Diagnóstico automático del nivel de intensidad semanal (`Óptima` [verde], `Exigente` [azul] o `Sobrecargada` [ámbar]).
 
----
+2. **Radar de Próximo Cante**:
+   - Detección inteligente del cante oficial más próximo (Lunes o Jueves).
+   - Cuenta atrás de días restantes (*¡Hoy es el cante!*, *Mañana cante*, o *En N días*).
+   - Listado de temas asignados al cante con números de tema y títulos.
+   - Acceso directo con 1 clic para abrir la sesión de cante con el preparador.
 
-## 1. Visión General y Flujo de Trabajo
+3. **Barra de Filtros de Actividad y Búsqueda**:
+   - Filtros rápidos segmentados con los 4 colores oficiales:
+     - 🔵 **Estudio Nuevo** (conteo de tareas)
+     - 🟠 **Refresco** (conteo de tareas)
+     - 🟢 **Repaso** (conteo de tareas)
+     - 🟣 **Cante** (conteo de tareas)
+     - ⏳ **Solo Pendientes** (conteo de tareas pendientes)
+     - **Todos**
+   - Buscador rápido dentro de la semana por número de tema o texto.
 
-### ¿Qué resuelve esta reorganización?
-Un opositor a Judicaturas / Fiscalías / Notarías no entra a una app para navegar entre pantallas dispersas; necesita saber en menos de 3 segundos:
-1. **Qué canta el próximo Lunes o Jueves** ante su preparador y qué temas tiene asignados.
-2. **Qué temas están en alerta roja de olvido** hoy según la curva de retención.
-3. **El estado de su cante** (ritmo en minutos por tema, notas y fallos recurrentes).
-4. **Registrar o eliminar cualquier sesión en 0 ms** sin fallos de sincronización.
+4. **Registro Directo de Estudio (1-Click Study Log)**:
+   - Botón directo `Registrar` en cada tarjeta de tarea.
+   - Registra de forma instantánea una sesión de estudio real en Firebase (`addStudySession`), sincronizando el historial, el dashboard y la Curva de Ebbinghaus, y marcando la tarea como completada con sonido de éxito.
 
-### Persona y Contexto de Uso
-Opositor de alta intensidad (8 a 10 horas de estudio diario, 6 días por semana) que utiliza cronómetro en mesa o la integración con AeroFocus Pro y se presenta a cante ante el preparador dos veces por semana (Lunes y Jueves hasta las 22:00h).
+5. **Puntos de Color Indicadores de Actividad en Móvil**:
+   - En el selector de días de la vista móvil, cada botón de día muestra mini-indicadores de color (🔵, 🟠, 🟢, 🟣) con las actividades planificadas para ese día, evitando tener que navegar a ciegas.
 
----
+6. **Selector Rápido de Materias en el Modal de Tareas**:
+   - Pestañas/chips de materias (Constitucional, Civil, Penal, etc.) en `TaskEditorModal` para explorar y seleccionar temas entre los 300 disponibles sin fricción.
 
-## 2. Experiencia de Usuario y Diseño Visual
-
-Siguiendo la constitución de diseño de `frontend-design` y la guía de `references/3_saas_dashboard.md`:
-
-### A. Paleta de Color y Distribución 60-30-10
-- **60% Lienzo Neutral**: Fondo gris suave editorial (`#F8FAFC` en modo claro, `#0F172A` en modo oscuro) que reduce la fatiga visual tras 10 horas de estudio.
-- **30% Superficies Estructurales**: Paneles en blanco puro (`#FFFFFF`) con bordes sutiles de 1px (`border-slate-200/80`), sin sombras pesadas ni tarjetas anidadas artificialmente.
-- **10% Acentos Semánticos**:
-  - *Azul Marino / Pizarra Intenso* (`#0F172A`): Identidad de marca, cabeceras editoriales y botones de acción principal.
-  - *Esmeralda* (`#16A34A`): Temas dominados, vueltas completas y cantes en tiempo reglamentario (11–13:40 min).
-  - *Ámbar* (`#D97706`): Temas en fase de refresco o próximos a vencer por curva del olvido.
-  - *Rosa / Rubí* (`#E11D48`): Alerta crítica de retención (<40%), cante con exceso de tiempo (>13:40 min) o acciones destructivas.
-
-### B. Tipografía y Disciplina Sin Píldoras (Zero-Pill Discipline)
-- **Tipografía**:
-  - Títulos y Números de Marca: Familia serif clásica/editorial para conferir sobriedad jurídica.
-  - Interfaz y Datos: Tipografía sans limpia (`Plus Jakarta Sans` / `Outfit`) de alta legibilidad.
-  - Telemetría y Tiempos: Monospace con cifras tabulares obligatorias (`font-mono tabular-nums`) para evitar oscilaciones visuales en cronómetros y tablas.
-- **Eliminación de Píldoras Estáticas**: Las etiquetas de metadatos (fechas, vueltas, duraciones) se presentan como texto plano limpio con separadores tipográficos (`·`, `/`), reservando los fondos redondeados exclusivamente para botones y controles interactivos clicables.
-
-### C. Navegación en Barra Lateral Unificada
-Barra lateral vertical fija de 256px con 4 cuadrantes claramente delimitados:
-1. **Identidad & Perfil**: Logotipo WellsPrep, nombre del opositor y estado de la base de datos sincronizada.
-2. **Buscador Rápido Spotlight**: Acceso inmediato por teclado (`Cmd+K` / `Ctrl+K`) para saltar a cualquier tema en milisegundos.
-3. **Secciones de Trabajo**:
-   - `01. Planificador & Preparador`: Vista central por defecto (Calendario semanal, L/J, cola diaria).
-   - `02. Temario Oficial`: Catálogo clasificado por materias (Constitucional, Penal, Civil, Procesal) con buscador por texto y número.
-   - `03. Centro de Telemetría & Cantos`: Matriz de dispersión, evolución temporal, notas históricas y gestión de cantes.
-   - `04. Enlace AeroFocus Pro`: Bandeja de cuarentena con validación de horas netas e importación directa.
-4. **Acciones Rápidas & Configuración**: Botón de registro rápido directo y ajustes de sincronización.
+7. **Avisos de Inteligencia Preventiva (Consejos de Preparación)**:
+   - Detección de cuellos de botella:
+     - Aviso si se programa estudio de tema nuevo en la víspera del cante (miércoles/domingo), recomendando reservar ese tiempo para repaso y descanso de voz.
+     - Aviso si el domingo supera las 4 horas de carga, aconsejando proteger el descanso previo al cante del lunes.
 
 ---
 
-## 3. Decisiones Técnicas y de Arquitectura de Código
+## 2. Componentes y Módulos Clave
 
-```
-┌────────────────────────────────────────────────────────────────────────┐
-│                        WellsPrep Application                           │
-└────────────────────────────────────────────────────────────────────────┘
-                                    │
-       ┌────────────────────────────┼────────────────────────────┐
-       ▼                            ▼                            ▼
-┌──────────────┐             ┌──────────────┐             ┌──────────────┐
-│  Sidebar &   │             │ Firebase     │             │  AeroFocus   │
-│  Navigation  │             │ Provider     │             │  Webhook Engine
-└──────────────┘             └──────────────┘             └──────────────┘
-       │                            │                            │
-       ▼                            ▼                            ▼
-┌──────────────────┐         ┌──────────────┐             ┌──────────────┐
-│ Vistas Activas   │         │ Dual DB Synced             │ Ingesta &    │
-│ • PreparadorHub  │◄───────►│ (Named + Def)│◄───────────►│ Cuarentena   │
-│ • TemarioView    │         │ State Cache  │             │ Idempotente  │
-│ • DashboardCantos│         └──────────────┘             └──────────────┘
-└──────────────────┘
-```
-
-### Decisión 1: Planificador & Preparador como Vista Predeterminada
-- **Enfoque**: Modificar la pestaña inicial de `App.tsx` para que arranque en `"preparador"`, integrando en su parte superior un **Strip Semanal Inteligente** que muestra los días de la semana, el cante inminente y la cola de temas prioritarios del día según Ebbinghaus.
-- **Razón**: El opositor necesita saber qué estudiar hoy sin tener que hacer 4 clics en menús.
-
-### Decisión 2: Reorganización Modular de Componentes
-- **Enfoque**: Reducir el acoplamiento dividiendo componentes sobredimensionados en submódulos especializados dentro de `src/components/preparador/` y `src/components/dashboard/`.
-- **Razón**: Permite mantener cero re-renders innecesarios, separar la lógica de cálculo estadístico de la presentación visual y garantizar que cada botón tenga un manejador autónomo y probado.
-
-### Decisión 3: Blindaje de Eliminación y Recálculo en 0 ms
-- **Enfoque**: Consolidar la arquitectura corregida en el turno anterior para que cualquier acción de borrado en sesiones, cantes o temas:
-  1. Limpie el identificador sintético (`group-...`).
-  2. Actualice de forma optimista el estado local en 0 ms.
-  3. Ejecute la eliminación en ambas bases de datos (`db` y `defaultDb`).
-  4. Recalcule las métricas acumuladas y las fechas de revisión automáticamente.
+- `src/lib/plannerEngine.ts`: Motor de cálculo semanal, estimación ponderada por páginas y ritmos, generación de los 3 refrescos automáticos, propuestas de redistribución con confirmación y telemetría de sesiones reales.
+- `src/components/planner/WeeklyPlannerView.tsx`: Vista principal de la cuadrícula de 7 días, Radar de Cante, Balance Previsto vs Real, avisos inteligentes, filtros de actividad y tarjetas interactivas.
+- `src/components/planner/TaskEditorModal.tsx`: Modal para crear/editar tareas con chips de materias, estimaciones ajustables y notas.
+- `src/components/planner/RebalanceConfirmModal.tsx`: Modal de confirmación previa a cualquier redistribución masiva.
+- `src/components/planner/EbbinghausRecommendationsModal.tsx`: Recomendaciones proactivas basadas en temas en zona de riesgo de olvido.
+- `src/components/planner/PlannerSettingsModal.tsx`: Configuración personalizada de horas diarias y ritmos de estudio por actividad.
 
 ---
 
-## 4. Plan de Implementación por Fases
+## 3. Estado de Verificación
 
-### Fase 1: Estructuración y Navegación Unificada [COMPLETADA]
-- Configurada `"preparador"` como vista inicial por defecto en `App.tsx`.
-- Rediseñada la barra lateral con estética visual limpia, sin píldoras decorativas y con accesos directos por teclado (`⌘K`).
-- Barra de navegación móvil y de escritorio con jerarquía clara y acceso directo.
-
-### Fase 2: Centro de Comando del Preparador y Planificador Semanal [COMPLETADA]
-- Creado `WeeklyPlannerStrip.tsx` con calendario interactivo de Lunes a Domingo, fechas reales de la semana, anclas oficiales de cante (Lunes y Jueves) y contador de horas de estudio.
-- Creada `PreparadorEbbinghausQueue.tsx` con diagnóstico de retención neuronal en declive, filtro por severidad y materias.
-- Integrado en `PreparadorView.tsx` con soporte para selección de jornadas de estudio, historial y cante oficial.
-
-### Fase 3: Telemetría de Cantos y Auditoría de Retención [COMPLETADA]
-- Implementada acción directa de 1 clic `+45m Hoy` ("Frenar Olvido") en `PreparadorTopicCard.tsx` y en la Cola de Olvido, actualizando al instante el progreso y la curva de retención.
-- Tipografía refinada con disciplina Zero-Pill y cifras tabulares (`font-mono tabular-nums`).
-- Persistencia total y optimista en Firestore con recálculo automático de vueltas y fechas.
-
-### Fase 4: Verificación, Compilación y Calidad [COMPLETADA]
-- `tsc --noEmit` completado con 0 errores de tipo.
-- `npm run build` compilado exitosamente.
-- Servidor de desarrollo reiniciado y verificado en puerto 3000.
+- Compilación de TypeScript (`tsc --noEmit`): **0 errores**.
+- Build de Vite (`compile_applet`): **Éxito**.

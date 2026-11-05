@@ -29,6 +29,15 @@ import { PreparadorTopicCard } from "./preparador/PreparadorTopicCard";
 import { PreparadorQuickFeedbackModal } from "./preparador/PreparadorQuickFeedbackModal";
 import { WeeklyPlannerStrip, ActivePlannerView } from "./preparador/WeeklyPlannerStrip";
 import { PreparadorEbbinghausQueue } from "./preparador/PreparadorEbbinghausQueue";
+import { CanteGoalCockpit } from "./preparador/CanteGoalCockpit";
+import { DailyActionPlanView } from "./preparador/DailyActionPlanView";
+import { WeeklyPlannerView } from "./planner/WeeklyPlannerView";
+import { 
+  buildOrRebalanceWeeklyCantePlan, 
+  getNextCanteTarget, 
+  WeeklyCantePlan,
+  CANTE_PLAN_STORAGE_KEY
+} from "../lib/weeklyCanteEngine";
 
 type SortOption = "menor_nota" | "mayor_nota" | "orden_numero";
 
@@ -43,6 +52,9 @@ const DEFAULT_SCHEDULE: PreparadorSchedule = {
 };
 
 const LOCAL_STORAGE_KEY = "wellsprep_preparador_schedule_v2";
+const STORAGE_CUSTOM_PAGES = "wellsprep_custom_topic_pages_v2";
+const STORAGE_MANUAL_COMPLETIONS = "wellsprep_manual_completions_v2";
+const STORAGE_PROGRESS_OVERRIDES = "wellsprep_progress_overrides_v2";
 
 export function PreparadorView() {
   const { user, userProgress, recentSessions, addStudySession } = useFirebase();
@@ -71,14 +83,45 @@ export function PreparadorView() {
     return DEFAULT_SCHEDULE;
   });
 
+  // Dynamic Weekly Cante Plan States
+  const [customTopicPages, setCustomTopicPages] = useState<Record<string, number>>(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_CUSTOM_PAGES);
+      if (saved) return JSON.parse(saved);
+    } catch (e) {
+      console.error(e);
+    }
+    return {};
+  });
+
+  const [manualDayCompletions, setManualDayCompletions] = useState<Record<string, Record<string, boolean>>>(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_MANUAL_COMPLETIONS);
+      if (saved) return JSON.parse(saved);
+    } catch (e) {
+      console.error(e);
+    }
+    return {};
+  });
+
+  const [progressOverrides, setProgressOverrides] = useState<Record<string, { completedPages: number }>>(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_PROGRESS_OVERRIDES);
+      if (saved) return JSON.parse(saved);
+    } catch (e) {
+      console.error(e);
+    }
+    return {};
+  });
+
   // Sorting state for topic cards
   const [sortOption, setSortOption] = useState<SortOption>("menor_nota");
   const [showMobileKpiDetails, setShowMobileKpiDetails] = useState(false);
 
-  // Sync schedule with Firestore when user is loaded
+  // Sync schedule and cante plan settings with Firestore when user is loaded
   useEffect(() => {
     if (!user) return;
-    const loadSchedule = async () => {
+    const loadScheduleAndPlan = async () => {
       try {
         const ref = doc(db, `users/${user.uid}/settings/preparador`);
         const snap = await getDoc(ref);
@@ -93,11 +136,30 @@ export function PreparadorView() {
             localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(merged));
           }
         }
+
+        // Load weekly cante plan overrides
+        const planRef = doc(db, `users/${user.uid}/settings/weeklyCantePlan`);
+        const planSnap = await getDoc(planRef);
+        if (planSnap.exists()) {
+          const planData = planSnap.data();
+          if (planData.customTopicPages) {
+            setCustomTopicPages(planData.customTopicPages);
+            localStorage.setItem(STORAGE_CUSTOM_PAGES, JSON.stringify(planData.customTopicPages));
+          }
+          if (planData.manualDayCompletions) {
+            setManualDayCompletions(planData.manualDayCompletions);
+            localStorage.setItem(STORAGE_MANUAL_COMPLETIONS, JSON.stringify(planData.manualDayCompletions));
+          }
+          if (planData.progressOverrides) {
+            setProgressOverrides(planData.progressOverrides);
+            localStorage.setItem(STORAGE_PROGRESS_OVERRIDES, JSON.stringify(planData.progressOverrides));
+          }
+        }
       } catch (e) {
-        console.error("Error loading preparador schedule:", e);
+        console.error("Error loading preparador schedule and plan:", e);
       }
     };
-    loadSchedule();
+    loadScheduleAndPlan();
   }, [user]);
 
   const saveSchedule = async (newSchedule: PreparadorSchedule) => {
@@ -115,6 +177,86 @@ export function PreparadorView() {
       }
     } catch (e) {
       console.error("Error saving preparador schedule:", e);
+    }
+  };
+
+  const handleUpdateTopicPages = (topicId: string, newTotalPages: number) => {
+    const updated = {
+      ...customTopicPages,
+      [topicId]: newTotalPages
+    };
+    setCustomTopicPages(updated);
+    try {
+      localStorage.setItem(STORAGE_CUSTOM_PAGES, JSON.stringify(updated));
+      if (user) {
+        const ref = doc(db, `users/${user.uid}/settings/weeklyCantePlan`);
+        setDoc(ref, {
+          userId: user.uid,
+          customTopicPages: updated,
+          updatedAt: serverTimestamp()
+        }, { merge: true });
+      }
+    } catch (e) {
+      console.error(e);
+    }
+    toast.success(`Tema configurado con ${newTotalPages} páginas. Plan recalculado en tiempo real.`);
+  };
+
+  const handleUpdateTopicProgress = (topicId: string, newCompletedPages: number) => {
+    const updated = {
+      ...progressOverrides,
+      [topicId]: { completedPages: newCompletedPages }
+    };
+    setProgressOverrides(updated);
+    try {
+      localStorage.setItem(STORAGE_PROGRESS_OVERRIDES, JSON.stringify(updated));
+      if (user) {
+        const ref = doc(db, `users/${user.uid}/settings/weeklyCantePlan`);
+        setDoc(ref, {
+          userId: user.uid,
+          progressOverrides: updated,
+          updatedAt: serverTimestamp()
+        }, { merge: true });
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  const handleToggleTaskComplete = (dateStr: string, topicId: string, isCompleted: boolean, pagesCount: number) => {
+    const dayMap = manualDayCompletions[dateStr] || {};
+    const updatedCompletions = {
+      ...manualDayCompletions,
+      [dateStr]: {
+        ...dayMap,
+        [topicId]: isCompleted
+      }
+    };
+    setManualDayCompletions(updatedCompletions);
+
+    // Dynamic adjustment of topic progress
+    const prevDone = progressOverrides[topicId]?.completedPages ?? 0;
+    const nextDone = isCompleted ? prevDone + pagesCount : Math.max(0, prevDone - pagesCount);
+    const updatedOverrides = {
+      ...progressOverrides,
+      [topicId]: { completedPages: nextDone }
+    };
+    setProgressOverrides(updatedOverrides);
+
+    try {
+      localStorage.setItem(STORAGE_MANUAL_COMPLETIONS, JSON.stringify(updatedCompletions));
+      localStorage.setItem(STORAGE_PROGRESS_OVERRIDES, JSON.stringify(updatedOverrides));
+      if (user) {
+        const ref = doc(db, `users/${user.uid}/settings/weeklyCantePlan`);
+        setDoc(ref, {
+          userId: user.uid,
+          manualDayCompletions: updatedCompletions,
+          progressOverrides: updatedOverrides,
+          updatedAt: serverTimestamp()
+        }, { merge: true });
+      }
+    } catch (e) {
+      console.error(e);
     }
   };
 
@@ -158,17 +300,37 @@ export function PreparadorView() {
     return map;
   }, [allTopics]);
 
-  // Assigned topics for current active cante day (Lunes or Jueves)
+  // Target cante detection & plan computation
+  const upcomingCanteInfo = useMemo(() => getNextCanteTarget(), []);
+  const targetCanteDay: "lunes" | "jueves" = (activeView === "lunes" || activeView === "jueves")
+    ? activeView
+    : upcomingCanteInfo.targetDay;
+
   const currentCanteDayKey = activeView === "jueves" ? "jueves" : "lunes";
   const assignedTopicIds = (activeView === "lunes" || activeView === "jueves")
     ? (schedule[currentCanteDayKey] || [])
-    : [];
+    : (schedule[targetCanteDay] || []);
+
+  const weeklyPlan = useMemo(() => {
+    return buildOrRebalanceWeeklyCantePlan({
+      assignedTopicIds: schedule[targetCanteDay] || [],
+      targetDay: targetCanteDay,
+      allTopics,
+      sessions: recentSessions,
+      customTopicPages,
+      progressOverrides,
+      manualDayCompletions
+    });
+  }, [schedule, targetCanteDay, allTopics, recentSessions, customTopicPages, progressOverrides, manualDayCompletions]);
 
   const assignedTopics = useMemo(() => {
-    return assignedTopicIds
+    const listToRender = (activeView === "lunes" || activeView === "jueves")
+      ? (schedule[currentCanteDayKey] || [])
+      : [];
+    return listToRender
       .map((id) => topicMap.get(id))
       .filter((t): t is Topic => Boolean(t));
-  }, [assignedTopicIds, topicMap]);
+  }, [activeView, currentCanteDayKey, schedule, topicMap]);
 
   // Master Scientific Preparation Analysis for each assigned topic
   const topicsAnalysis = useMemo(() => {
@@ -586,7 +748,18 @@ export function PreparadorView() {
           totalCantosCount={preparadorSessions.length}
           selectedDateStr={selectedDayDate}
           recentSessions={recentSessions}
+          dailyQuotas={weeklyPlan.dailyQuotas}
         />
+
+        {/* VIEW 0: CUADRÍCULA SEMANAL 7 DÍAS INTELIGENTE */}
+        {activeView === "semana_completa" && (
+          <WeeklyPlannerView
+            allTopics={allTopics}
+            scheduleLunes={schedule.lunes || []}
+            scheduleJueves={schedule.jueves || []}
+            onOpenPreparadorSession={(day) => setActiveView(day)}
+          />
+        )}
 
         {/* VIEW 1: EBBINGHAUS QUEUE */}
         {activeView === "ebbinghaus" && (
@@ -600,90 +773,26 @@ export function PreparadorView() {
           />
         )}
 
-        {/* VIEW 2: STUDY DAY DETAIL (Martes, Miércoles, etc.) */}
+        {/* VIEW 2: STUDY DAY DETAIL (Plan de Acción Diario con Reubicación Dinámica) */}
         {activeView === "dia_estudio" && (
-          <div className="space-y-4">
-            <div className="bg-white rounded-2xl p-5 border border-slate-200/80 shadow-2xs">
-              <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
-                <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-2xl bg-indigo-50 border border-indigo-100 flex items-center justify-center text-indigo-600 font-bold">
-                    <Calendar size={18} />
-                  </div>
-                  <div>
-                    <h3 className="text-base font-black font-serif text-slate-900 tracking-tight">
-                      Jornada de Estudio ({selectedDayDate})
-                    </h3>
-                    <p className="text-xs text-slate-500 mt-0.5">
-                      {selectedDaySessions.length} {selectedDaySessions.length === 1 ? "sesión registrada" : "sesiones registradas"} · {formatMinutesToHours(selectedDayTotalMinutes)} netos de estudio.
-                    </p>
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setActiveView("lunes")}
-                    className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-xl transition-all"
-                  >
-                    Ver Cante Lunes
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setActiveView("jueves")}
-                    className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-xl transition-all"
-                  >
-                    Ver Cante Jueves
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            {selectedDaySessions.length === 0 ? (
-              <div className="bg-white rounded-3xl p-12 text-center border border-slate-200/70 shadow-sm">
-                <Clock size={36} className="text-slate-300 mx-auto mb-3" />
-                <h3 className="text-base font-bold text-slate-800">No hay sesiones registradas en esta fecha</h3>
-                <p className="text-xs text-slate-500 max-w-md mx-auto mt-1 mb-4">
-                  Las sesiones importadas de AeroFocus Pro o registradas manualmente aparecerán aquí desglosadas por tema y dificultad.
-                </p>
-              </div>
-            ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
-                {selectedDaySessions.map((session, idx) => {
-                  const topic = topicMap.get(session.topicId);
-                  const durMins = session.durationMinutes || session.duration || 0;
-                  return (
-                    <div
-                      key={session.id || idx}
-                      className="bg-white rounded-2xl p-4 border border-slate-200/80 shadow-2xs flex items-center justify-between gap-3"
-                    >
-                      <div>
-                        <div className="flex items-center gap-2 mb-1">
-                          <span className="text-[10px] font-black uppercase tracking-wider px-2 py-0.5 bg-slate-100 text-slate-700 rounded-md font-mono">
-                            Tema {topic?.number || session.topicId}
-                          </span>
-                          <span className="text-[10px] font-bold text-slate-400 capitalize">
-                            {session.type || "Estudio"}
-                          </span>
-                        </div>
-                        <h4 className="text-xs font-bold text-slate-900 truncate">
-                          {topic?.title || `Tema ${session.topicId}`}
-                        </h4>
-                      </div>
-
-                      <div className="text-right shrink-0">
-                        <div className="text-sm font-black text-slate-900 font-mono tabular-nums">
-                          {durMins} min
-                        </div>
-                        <div className="text-[10px] text-slate-400 font-bold">
-                          Dif. {session.difficulty || 5}/10
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
+          <DailyActionPlanView
+            quota={weeklyPlan.dailyQuotas[selectedDayDate]}
+            dateStr={selectedDayDate}
+            plan={weeklyPlan}
+            daySessions={selectedDaySessions}
+            topicMap={topicMap}
+            onToggleTaskComplete={handleToggleTaskComplete}
+            onRecordStudySession={async (topicId, durationMinutes) => {
+              try {
+                await addStudySession(topicId, durationMinutes, 5, "repaso");
+                playSound.success();
+                toast.success(`⚡ Sesión de ${durationMinutes} min registrada`);
+              } catch (e: any) {
+                toast.error("Error al registrar sesión: " + (e?.message || e));
+              }
+            }}
+            onSwitchToCanteView={(day) => setActiveView(day)}
+          />
         )}
 
         {/* VIEW 3: HISTORIAL */}
@@ -780,6 +889,18 @@ export function PreparadorView() {
         {/* VIEW 4 & 5: LUNES O JUEVES SESIÓN OFICIAL */}
         {(activeView === "lunes" || activeView === "jueves") && (
           <div className="space-y-4">
+            {/* Top Cante Goal Cockpit with dynamic page pacing & auto-rebalance */}
+            <CanteGoalCockpit
+              plan={weeklyPlan}
+              onUpdateTopicPages={handleUpdateTopicPages}
+              onUpdateTopicProgress={handleUpdateTopicProgress}
+              onForceRebalance={() => {
+                playSound.click();
+                toast.success("Plan recalculado con las últimas métricas.");
+              }}
+              onOpenTopicPicker={() => setIsPickerOpen(true)}
+            />
+
             {/* Status explanation & Meta banner */}
             <div className="flex flex-wrap items-center justify-between gap-1.5 p-2 sm:p-3 bg-white rounded-2xl border border-slate-200/80 shadow-2xs">
               <div className="flex items-center gap-1.5 text-[11px] sm:text-xs font-semibold text-slate-700">

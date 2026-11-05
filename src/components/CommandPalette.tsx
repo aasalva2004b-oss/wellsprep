@@ -25,7 +25,7 @@ interface CommandPaletteProps {
   isOpen: boolean;
   onClose: () => void;
   onSelectTopic: (topicId: string) => void;
-  onNavigateTab?: (tab: "dashboard" | "temario" | "preparador") => void;
+  onNavigateTab?: (tab: "dashboard" | "temario" | "preparador" | "planificador") => void;
   onSelectSubject?: (subjectId: string) => void;
 }
 
@@ -68,6 +68,14 @@ export function CommandPalette({
     if (!q) {
       // Default quick actions and first few urgent topics
       const quickActions = [
+        {
+          type: "action" as const,
+          id: "act-planificador",
+          title: "Ir a Planificador Semanal (7 Días)",
+          subtitle: "Organización completa de estudio nuevo, refrescos, repasos y cantes",
+          icon: Calendar,
+          action: () => onNavigateTab?.("planificador"),
+        },
         {
           type: "action" as const,
           id: "act-preparador",

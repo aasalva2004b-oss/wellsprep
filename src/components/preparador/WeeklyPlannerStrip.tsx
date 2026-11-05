@@ -14,7 +14,9 @@ import {
 import { cn, safeParseDate } from "../../lib/utils";
 import { playSound } from "../../lib/sound";
 
-export type ActivePlannerView = "lunes" | "jueves" | "ebbinghaus" | "historial" | "dia_estudio";
+import { DayStudyQuota } from "../../lib/weeklyCanteEngine";
+
+export type ActivePlannerView = "lunes" | "jueves" | "ebbinghaus" | "historial" | "dia_estudio" | "semana_completa";
 
 interface WeeklyPlannerStripProps {
   activeView: ActivePlannerView;
@@ -25,6 +27,7 @@ interface WeeklyPlannerStripProps {
   totalCantosCount: number;
   selectedDateStr?: string;
   recentSessions: any[];
+  dailyQuotas?: Record<string, DayStudyQuota>;
 }
 
 export const WeeklyPlannerStrip: React.FC<WeeklyPlannerStripProps> = ({
@@ -35,7 +38,8 @@ export const WeeklyPlannerStrip: React.FC<WeeklyPlannerStripProps> = ({
   ebbinghausAlertCount,
   totalCantosCount,
   selectedDateStr,
-  recentSessions
+  recentSessions,
+  dailyQuotas
 }) => {
   // Compute current week Monday to Sunday
   const [weekOffset, setWeekOffset] = React.useState(0);
@@ -207,6 +211,24 @@ export const WeeklyPlannerStrip: React.FC<WeeklyPlannerStripProps> = ({
             </span>
           </button>
 
+          {/* Master 7-Day Grid View Tab */}
+          <button
+            type="button"
+            onClick={() => {
+              playSound.click();
+              onSelectView("semana_completa");
+            }}
+            className={cn(
+              "px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 border active:scale-95",
+              activeView === "semana_completa"
+                ? "bg-slate-900 text-white border-slate-900 shadow-xs"
+                : "bg-white text-slate-700 border-slate-200 hover:bg-slate-50 hover:text-slate-900"
+            )}
+          >
+            <CalendarIcon size={13} className={activeView === "semana_completa" ? "text-amber-400" : "text-slate-400"} />
+            <span>Cuadrícula 7 Días</span>
+          </button>
+
           {/* Week Arrows */}
           <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-xl border border-slate-200/60 ml-1">
             <button
@@ -337,19 +359,35 @@ export const WeeklyPlannerStrip: React.FC<WeeklyPlannerStripProps> = ({
                     </span>
                   </div>
                 ) : (
-                  <div className="flex items-center justify-between text-[10px] text-slate-400">
-                    <span className="text-[9px] font-mono">
-                      {day.hoursFormatted ? (
-                        <span className="text-emerald-700 font-black">{day.hoursFormatted}</span>
-                      ) : (
-                        <span>Estudio</span>
-                      )}
-                    </span>
-                    {day.sessionsCount > 0 && (
+                  <div className="flex items-center justify-between text-[10px]">
+                    {dailyQuotas?.[day.iso] && dailyQuotas[day.iso].totalPlannedPages > 0 ? (
+                      <span className={cn(
+                        "text-[9px] font-mono font-bold px-1 py-0.2 rounded-md",
+                        dailyQuotas[day.iso].tasks.every(t => t.isCompleted)
+                          ? "bg-emerald-100 text-emerald-800"
+                          : "bg-indigo-50 text-indigo-700"
+                      )}>
+                        {dailyQuotas[day.iso].tasks.filter(t => t.isCompleted).reduce((acc, t) => acc + t.pagesCount, 0)}/{dailyQuotas[day.iso].totalPlannedPages}p
+                      </span>
+                    ) : (
+                      <span className="text-[9px] font-mono text-slate-400">
+                        {day.hoursFormatted ? (
+                          <span className="text-emerald-700 font-black">{day.hoursFormatted}</span>
+                        ) : (
+                          <span>Estudio</span>
+                        )}
+                      </span>
+                    )}
+
+                    {day.sessionsCount > 0 ? (
                       <span className="text-[9px] font-mono text-slate-500 font-bold">
                         {day.sessionsCount}s
                       </span>
-                    )}
+                    ) : day.hoursFormatted ? (
+                      <span className="text-[9px] font-mono text-emerald-700 font-bold">
+                        {day.hoursFormatted}
+                      </span>
+                    ) : null}
                   </div>
                 )}
               </div>
