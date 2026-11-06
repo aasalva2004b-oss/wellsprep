@@ -56,13 +56,35 @@ const STORAGE_CUSTOM_PAGES = "wellsprep_custom_topic_pages_v2";
 const STORAGE_MANUAL_COMPLETIONS = "wellsprep_manual_completions_v2";
 const STORAGE_PROGRESS_OVERRIDES = "wellsprep_progress_overrides_v2";
 
-export function PreparadorView() {
+export interface PreparadorViewProps {
+  initialView?: ActivePlannerView;
+  onSubViewChange?: (view: ActivePlannerView) => void;
+}
+
+export function PreparadorView({
+  initialView = "semana_completa",
+  onSubViewChange
+}: PreparadorViewProps = {}) {
   const { user, userProgress, recentSessions, addStudySession, updateTopicProgress } = useFirebase();
 
-  // Active view in the planner cockpit
+  // Active view in the planner cockpit (defaults to semana_completa for 7-day master view)
   const [activeView, setActiveView] = useState<ActivePlannerView>(() => {
-    return getDefaultPreparadorDay();
+    return initialView || "semana_completa";
   });
+
+  useEffect(() => {
+    if (initialView) {
+      setActiveView(initialView);
+    }
+  }, [initialView]);
+
+  const handleSelectView = (view: ActivePlannerView, selectedDate?: string) => {
+    setActiveView(view);
+    if (onSubViewChange) {
+      onSubViewChange(view);
+    }
+    if (selectedDate) setSelectedDayDate(selectedDate);
+  };
 
   const [selectedDayDate, setSelectedDayDate] = useState<string>(() => {
     return getLocalDateString();
@@ -743,10 +765,7 @@ export function PreparadorView() {
         {/* INTERACTIVE WEEKLY PLANNER RIBBON STRIP AT THE TOP */}
         <WeeklyPlannerStrip
           activeView={activeView}
-          onSelectView={(view, selectedDate) => {
-            setActiveView(view);
-            if (selectedDate) setSelectedDayDate(selectedDate);
-          }}
+          onSelectView={handleSelectView}
           lunesTopicsCount={(schedule.lunes || []).length}
           juevesTopicsCount={(schedule.jueves || []).length}
           ebbinghausAlertCount={ebbinghausAlertCount}
@@ -762,7 +781,7 @@ export function PreparadorView() {
             allTopics={allTopics}
             scheduleLunes={schedule.lunes || []}
             scheduleJueves={schedule.jueves || []}
-            onOpenPreparadorSession={(day) => setActiveView(day)}
+            onOpenPreparadorSession={(day) => handleSelectView(day)}
           />
         )}
 
@@ -894,6 +913,21 @@ export function PreparadorView() {
         {/* VIEW 4 & 5: LUNES O JUEVES SESIÓN OFICIAL */}
         {(activeView === "lunes" || activeView === "jueves") && (
           <div className="space-y-4">
+            {/* Quick Breadcrumb Button to Weekly Plan */}
+            <div className="flex items-center justify-between gap-2">
+              <button
+                type="button"
+                onClick={() => handleSelectView("semana_completa")}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white hover:bg-slate-100 text-slate-700 text-xs font-bold border border-slate-200/80 shadow-2xs transition-all active:scale-95"
+              >
+                <Calendar size={13} className="text-slate-500" />
+                <span>← Volver a Vista Semanal (7 Días)</span>
+              </button>
+              <span className="text-xs font-mono font-bold text-slate-500 hidden sm:inline-block">
+                Cockpit de Cante · {activeView === "lunes" ? "Lunes" : "Jueves"}
+              </span>
+            </div>
+
             {/* Top Cante Goal Cockpit with dynamic page pacing & auto-rebalance */}
             <CanteGoalCockpit
               plan={weeklyPlan}

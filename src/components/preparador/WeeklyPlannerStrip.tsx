@@ -158,9 +158,75 @@ export const WeeklyPlannerStrip: React.FC<WeeklyPlannerStripProps> = ({
           </div>
         </div>
 
-        {/* View Mode Pills (Cante / Ebbinghaus / Historial) & Week Nav */}
-        <div className="flex items-center gap-2 flex-wrap">
-          {/* Direct Navigation to Ebbinghaus Queue */}
+        {/* Unified Mode Selector Switcher */}
+        <div className="flex items-center gap-1.5 flex-wrap">
+          {/* 1. Master 7-Day Grid View Tab */}
+          <button
+            type="button"
+            onClick={() => {
+              playSound.click();
+              onSelectView("semana_completa");
+            }}
+            className={cn(
+              "px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 border active:scale-95 shadow-2xs",
+              activeView === "semana_completa"
+                ? "bg-slate-900 text-white border-slate-900 shadow-xs"
+                : "bg-white text-slate-700 border-slate-200 hover:bg-slate-50 hover:text-slate-900"
+            )}
+          >
+            <CalendarIcon size={14} className={activeView === "semana_completa" ? "text-amber-400" : "text-slate-400"} />
+            <span>Vista Semanal (7 Días)</span>
+          </button>
+
+          {/* 2. Cante Lunes */}
+          <button
+            type="button"
+            onClick={() => {
+              playSound.click();
+              onSelectView("lunes");
+            }}
+            className={cn(
+              "px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 border active:scale-95 shadow-2xs",
+              activeView === "lunes"
+                ? "bg-purple-900 text-white border-purple-900 shadow-xs ring-1 ring-purple-400/40"
+                : "bg-white text-slate-700 border-slate-200 hover:bg-purple-50 hover:text-purple-900"
+            )}
+          >
+            <Award size={14} className={activeView === "lunes" ? "text-amber-300" : "text-purple-600"} />
+            <span>Cante Lunes</span>
+            <span className={cn(
+              "text-[10px] font-mono font-bold px-1.5 py-0.2 rounded-full",
+              activeView === "lunes" ? "bg-purple-800 text-purple-100" : "bg-purple-50 text-purple-700 border border-purple-200"
+            )}>
+              {lunesTopicsCount}
+            </span>
+          </button>
+
+          {/* 3. Cante Jueves */}
+          <button
+            type="button"
+            onClick={() => {
+              playSound.click();
+              onSelectView("jueves");
+            }}
+            className={cn(
+              "px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 border active:scale-95 shadow-2xs",
+              activeView === "jueves"
+                ? "bg-purple-900 text-white border-purple-900 shadow-xs ring-1 ring-purple-400/40"
+                : "bg-white text-slate-700 border-slate-200 hover:bg-purple-50 hover:text-purple-900"
+            )}
+          >
+            <Award size={14} className={activeView === "jueves" ? "text-amber-300" : "text-purple-600"} />
+            <span>Cante Jueves</span>
+            <span className={cn(
+              "text-[10px] font-mono font-bold px-1.5 py-0.2 rounded-full",
+              activeView === "jueves" ? "bg-purple-800 text-purple-100" : "bg-purple-50 text-purple-700 border border-purple-200"
+            )}>
+              {juevesTopicsCount}
+            </span>
+          </button>
+
+          {/* 4. Curva de Olvido (Ebbinghaus) */}
           <button
             type="button"
             onClick={() => {
@@ -168,15 +234,15 @@ export const WeeklyPlannerStrip: React.FC<WeeklyPlannerStripProps> = ({
               onSelectView("ebbinghaus");
             }}
             className={cn(
-              "px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 border active:scale-95",
+              "px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 border active:scale-95 shadow-2xs",
               activeView === "ebbinghaus"
                 ? "bg-amber-500 text-white border-amber-600 shadow-xs"
-                : "bg-white text-slate-700 border-slate-200 hover:bg-slate-50 hover:text-slate-900"
+                : "bg-white text-slate-700 border-slate-200 hover:bg-amber-50 hover:text-amber-900"
             )}
             title="Temas en riesgo según la curva de retención Ebbinghaus"
           >
-            <Brain size={13} className={activeView === "ebbinghaus" ? "text-white" : "text-amber-500"} />
-            <span>Cola de Olvido</span>
+            <Brain size={14} className={activeView === "ebbinghaus" ? "text-white" : "text-amber-500"} />
+            <span>Curva de Olvido</span>
             {ebbinghausAlertCount > 0 && (
               <span className={cn(
                 "text-[10px] font-mono font-black px-1.5 py-0.2 rounded-full",
@@ -187,7 +253,7 @@ export const WeeklyPlannerStrip: React.FC<WeeklyPlannerStripProps> = ({
             )}
           </button>
 
-          {/* Historial Tab */}
+          {/* 5. Historial Tab */}
           <button
             type="button"
             onClick={() => {
@@ -195,13 +261,13 @@ export const WeeklyPlannerStrip: React.FC<WeeklyPlannerStripProps> = ({
               onSelectView("historial");
             }}
             className={cn(
-              "px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 border active:scale-95",
+              "px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 border active:scale-95 shadow-2xs",
               activeView === "historial"
                 ? "bg-slate-900 text-white border-slate-900 shadow-xs"
                 : "bg-white text-slate-700 border-slate-200 hover:bg-slate-50 hover:text-slate-900"
             )}
           >
-            <Award size={13} className={activeView === "historial" ? "text-amber-400" : "text-slate-400"} />
+            <Award size={14} className={activeView === "historial" ? "text-amber-400" : "text-slate-400"} />
             <span>Historial</span>
             <span className={cn(
               "text-[10px] font-mono font-bold px-1.5 py-0.2 rounded-full",
@@ -210,68 +276,12 @@ export const WeeklyPlannerStrip: React.FC<WeeklyPlannerStripProps> = ({
               {totalCantosCount}
             </span>
           </button>
-
-          {/* Master 7-Day Grid View Tab */}
-          <button
-            type="button"
-            onClick={() => {
-              playSound.click();
-              onSelectView("semana_completa");
-            }}
-            className={cn(
-              "px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 border active:scale-95",
-              activeView === "semana_completa"
-                ? "bg-slate-900 text-white border-slate-900 shadow-xs"
-                : "bg-white text-slate-700 border-slate-200 hover:bg-slate-50 hover:text-slate-900"
-            )}
-          >
-            <CalendarIcon size={13} className={activeView === "semana_completa" ? "text-amber-400" : "text-slate-400"} />
-            <span>Cuadrícula 7 Días</span>
-          </button>
-
-          {/* Week Arrows */}
-          <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-xl border border-slate-200/60 ml-1">
-            <button
-              type="button"
-              onClick={() => {
-                playSound.click();
-                setWeekOffset((w) => w - 1);
-              }}
-              className="p-1 rounded-lg text-slate-500 hover:text-slate-900 hover:bg-white transition-colors"
-              title="Semana anterior"
-            >
-              <ChevronLeft size={14} />
-            </button>
-            {weekOffset !== 0 && (
-              <button
-                type="button"
-                onClick={() => {
-                  playSound.click();
-                  setWeekOffset(0);
-                }}
-                className="px-1.5 text-[10px] font-bold text-slate-600 hover:text-slate-900"
-                title="Volver a la semana actual"
-              >
-                Hoy
-              </button>
-            )}
-            <button
-              type="button"
-              onClick={() => {
-                playSound.click();
-                setWeekOffset((w) => w + 1);
-              }}
-              className="p-1 rounded-lg text-slate-500 hover:text-slate-900 hover:bg-white transition-colors"
-              title="Semana siguiente"
-            >
-              <ChevronRight size={14} />
-            </button>
-          </div>
         </div>
       </div>
 
-      {/* 7-Day Interactive Ribbon Grid */}
-      <div className="grid grid-cols-7 divide-x divide-slate-100 bg-slate-50/50">
+      {/* 7-Day Ribbon Grid: ONLY shown when in Cante Cockpit or Day Study to avoid duplicate 7-day grid in Weekly Planner */}
+      {activeView !== "semana_completa" && (
+        <div className="grid grid-cols-7 divide-x divide-slate-100 bg-slate-50/50">
         {weekDays.map((day) => {
           const isLunesActive = activeView === "lunes" && day.preparadorKey === "lunes";
           const isJuevesActive = activeView === "jueves" && day.preparadorKey === "jueves";
@@ -395,6 +405,7 @@ export const WeeklyPlannerStrip: React.FC<WeeklyPlannerStripProps> = ({
           );
         })}
       </div>
+      )}
     </div>
   );
 };
