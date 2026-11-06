@@ -177,7 +177,26 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
 
   // Sembrado inicial inteligente con los temas oficiales de cante si la lista está vacía
   useEffect(() => {
-    if (tasks.length === 0 && (scheduleLunes.length > 0 || scheduleJueves.length > 0)) {
+    if (tasks.length === 0) {
+      let effectiveLunes = scheduleLunes;
+      let effectiveJueves = scheduleJueves;
+      if (effectiveLunes.length === 0 && effectiveJueves.length === 0) {
+        try {
+          const saved = localStorage.getItem("wellsprep_preparador_schedule_v2");
+          if (saved) {
+            const parsed = JSON.parse(saved);
+            effectiveLunes = parsed.lunes || [];
+            effectiveJueves = parsed.jueves || [];
+          }
+        } catch (e) {
+          console.error(e);
+        }
+      }
+      if (effectiveLunes.length === 0 && effectiveJueves.length === 0) {
+        effectiveLunes = ["constitucional-1", "constitucional-2"];
+        effectiveJueves = ["constitucional-3", "constitucional-4", "constitucional-5"];
+      }
+
       const today = new Date();
       const distToMon = today.getDay() === 0 ? -6 : 1 - today.getDay();
       const monday = new Date(today);
@@ -191,7 +210,7 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
 
       const initialList: PlannerTask[] = [];
 
-      scheduleLunes.forEach((id) => {
+      effectiveLunes.forEach((id) => {
         const t = topicMap.get(id);
         if (t) {
           initialList.push({
@@ -210,7 +229,7 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
         }
       });
 
-      scheduleJueves.forEach((id) => {
+      effectiveJueves.forEach((id) => {
         const t = topicMap.get(id);
         if (t) {
           initialList.push({
@@ -233,7 +252,7 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
         persistTasks(initialList);
       }
     }
-  }, [scheduleLunes, scheduleJueves, topicMap, tasks.length]);
+  }, [scheduleLunes, scheduleJueves, topicMap, tasks.length, settings]);
 
   // Construcción del modelo de la semana actual con telemetría real (AeroFocus y WellsPrep)
   const weekPlan = useMemo(() => {
@@ -246,35 +265,115 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
     return weekPlan.days.find((d) => d.date === todayStr);
   }, [weekPlan, todayStr]);
 
-  // Radar de Próximo Cante (Lunes o Jueves más próximo)
+  // Asegurar que en móvil siempre haya un día visible y coherente al cambiar de semana
+  useEffect(() => {
+    if (weekPlan.days.length > 0 && !weekPlan.days.some((d) => d.date === mobileSelectedDate)) {
+      setMobileSelectedDate(weekPlan.days[0].date);
+    }
+  }, [weekPlan.days, mobileSelectedDate]);
+
+  // Radar de Próximo Cante (Lunes o Jueves más próximo, con anticipación de semana)
   const nextCanteInfo = useMemo(() => {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
-    // Buscar en los días de la semana actual o días cargados que tengan cante oficial
+    // 1. Intentar encontrar en los días cargados de la semana actual
     const candidateDays = weekPlan.days.filter((d) => {
       const dDate = new Date(safeParseDate(d.date));
       dDate.setHours(0, 0, 0, 0);
       return d.isCanteOfficialDay && dDate >= today;
     });
 
-    const targetDay = candidateDays[0];
-    if (!targetDay) return null;
+    let targetDateStr: string;
+    let targetDayName: string;
+    let targetDayNumber: number;
+    let targetMonthName: string;
+    let diffDays: number;
+    let canteKey: "lunes" | "jueves";
 
-    const diffMs = new Date(safeParseDate(targetDay.date)).getTime() - today.getTime();
-    const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
-    const canteTasks = tasks.filter(
-      (t) => t.date === targetDay.date && t.activityType === "cante"
+    if (candidateDays.length > 0) {
+      const d = candidateDays[0];
+      targetDateStr = d.date;
+      targetDayName = d.dayName;
+      targetDayNumber = d.dayNumber;
+      targetMonthName = d.monthName;
+      const diffMs = new Date(safeParseDate(d.date)).getTime() - today.getTime();
+      diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
+      canteKey = d.shortName === "LUN" ? "lunes" : "jueves";
+    } else {
+      // Si ya pasó el jueves de la semana actual, calcular el próximo Lunes
+      const dayOfWeek = today.getDay(); // 0: Dom, 1: Lun, 2: Mar, 3: Mié, 4: Jue, 5: Vie, 6: Sáb
+      let daysToAdd = 1;
+      if (dayOfWeek === 0) daysToAdd = 1; // Dom -> Lun (+1)
+      else if (dayOfWeek === 5) daysToAdd = 3; // Vie -> Lun (+3)
+      else if (dayOfWeek === 6) daysToAdd = 2; // Sáb -> Lun (+2)
+      else if (dayOfWeek < 4) daysToAdd = 4 - dayOfWeek; // Mar/Mié -> Jue
+      else daysToAdd = 8 - dayOfWeek; // Jueves noche -> Lun
+
+      const nextCanteDate = new Date(today);
+      nextCanteDate.setDate(today.getDate() + daysToAdd);
+      targetDateStr = getLocalDateString(nextCanteDate);
+      canteKey = nextCanteDate.getDay() === 1 ? "lunes" : "jueves";
+      targetDayName = canteKey === "lunes" ? "Lunes" : "Jueves";
+      targetDayNumber = nextCanteDate.getDate();
+      const monthNames = ["Ene", "Feb", "Mar", "Abr", "May", "Jun", "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"];
+      targetMonthName = monthNames[nextCanteDate.getMonth()];
+      diffDays = daysToAdd;
+    }
+
+    // Buscar tareas de cante programadas para esa fecha específica
+    let canteTasks = tasks.filter(
+      (t) => t.date === targetDateStr && t.activityType === "cante"
     );
 
+    // Si aún no hay tareas creadas para esa fecha, asociar los temas oficiales del horario
+    if (canteTasks.length === 0) {
+      let scheduleTopicIds: string[] = [];
+      try {
+        const saved = localStorage.getItem("wellsprep_preparador_schedule_v2");
+        if (saved) {
+          const parsed = JSON.parse(saved);
+          scheduleTopicIds = (canteKey === "lunes" ? parsed.lunes : parsed.jueves) || [];
+        }
+      } catch (e) {
+        console.error(e);
+      }
+      if (scheduleTopicIds.length === 0) {
+        scheduleTopicIds = canteKey === "lunes"
+          ? (scheduleLunes.length > 0 ? scheduleLunes : ["constitucional-1", "constitucional-2"])
+          : (scheduleJueves.length > 0 ? scheduleJueves : ["constitucional-3", "constitucional-4", "constitucional-5"]);
+      }
+
+      canteTasks = scheduleTopicIds.map((id) => {
+        const t = topicMap.get(id);
+        return {
+          id: `virtual-cante-${id}-${targetDateStr}`,
+          topicId: id,
+          topicNumber: t?.number || 1,
+          topicTitle: t?.title || id,
+          subjectId: t?.subjectId || "constitucional",
+          activityType: "cante",
+          date: targetDateStr,
+          status: "pending",
+          estimatedMinutes: 30,
+          pagesCount: t?.pages || 18,
+          createdAt: new Date().toISOString()
+        } as PlannerTask;
+      });
+    }
+
     return {
-      day: targetDay,
+      date: targetDateStr,
+      dayName: targetDayName,
+      dayNumber: targetDayNumber,
+      monthName: targetMonthName,
       diffDays,
       tasks: canteTasks,
+      canteKey,
       isToday: diffDays === 0,
       isTomorrow: diffDays === 1
     };
-  }, [weekPlan.days, tasks]);
+  }, [weekPlan.days, tasks, topicMap, scheduleLunes, scheduleJueves]);
 
   // Conteo de tareas por filtro para los botones superiores
   const filterCounts = useMemo(() => {
@@ -775,7 +874,7 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
             {nextCanteInfo ? (
               <div className="mt-3">
                 <h3 className="text-base font-black font-serif text-white tracking-tight flex items-baseline gap-2">
-                  <span>{nextCanteInfo.day.dayName} {nextCanteInfo.day.dayNumber} {nextCanteInfo.day.monthName}</span>
+                  <span>{nextCanteInfo.dayName} {nextCanteInfo.dayNumber} {nextCanteInfo.monthName}</span>
                   <span className="text-xs font-mono text-purple-300 font-normal">
                     ({nextCanteInfo.tasks.length} temas asignados)
                   </span>
@@ -814,7 +913,7 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
               <span className="text-[11px] text-purple-300">¿Listo para cantar con el preparador?</span>
               <button
                 type="button"
-                onClick={() => onOpenPreparadorSession(nextCanteInfo.day.shortName === "LUN" ? "lunes" : "jueves")}
+                onClick={() => onOpenPreparadorSession(nextCanteInfo.canteKey)}
                 className="px-3 py-1 bg-white text-slate-900 hover:bg-purple-50 rounded-xl text-xs font-bold transition-all shadow-xs"
               >
                 Abrir Sesión de Cante

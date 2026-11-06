@@ -26,6 +26,7 @@ export default function App() {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isSyncCenterOpen, setIsSyncCenterOpen] = useState(false);
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
+  const [isQuarantineDismissed, setIsQuarantineDismissed] = useState(false);
   const { user, quarantinedEvents = [], addQuarantineEventManually } = useFirebase();
 
   // Escucha universal en tiempo real de AeroFocus Pro (BroadcastChannel + Heartbeat 15s)
@@ -35,6 +36,7 @@ export default function App() {
       const payload = session.payload || session;
       const success = await addQuarantineEventManually(payload);
       if (success) {
+        setIsQuarantineDismissed(false);
         playSound.success();
         const flightId = payload.flightId || payload.transactionId || "Touchdown";
         toast.success(`🛬 Vuelo sincronizado desde AeroFocus Pro (#${flightId})`, {
@@ -214,7 +216,7 @@ export default function App() {
         )}
 
         {/* Banner de Sincronización AeroFocus en Cuarentena */}
-        {quarantinedEvents.length > 0 && (
+        {quarantinedEvents.length > 0 && !isQuarantineDismissed && (
           <div className="shrink-0 px-4 pt-4 pb-1 z-35">
             <div className="p-3.5 bg-amber-500/10 border border-amber-500/30 backdrop-blur-xl rounded-2xl flex flex-wrap items-center justify-between gap-3 shadow-xs">
               <div className="flex items-center gap-3">
@@ -233,13 +235,24 @@ export default function App() {
                   </p>
                 </div>
               </div>
-              <button
-                onClick={() => { playSound.click(); setIsSyncCenterOpen(true); }}
-                className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-black shadow-xs transition-all flex items-center gap-1.5 cursor-pointer active:scale-95"
-              >
-                <SlidersHorizontal size={13} />
-                <span>Revisar, Calificar y Aprobar</span>
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => { playSound.click(); setIsSyncCenterOpen(true); }}
+                  className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-black shadow-xs transition-all flex items-center gap-1.5 cursor-pointer active:scale-95"
+                >
+                  <SlidersHorizontal size={13} />
+                  <span>Revisar y Calificar</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { playSound.click(); setIsQuarantineDismissed(true); }}
+                  className="px-2 py-1.5 text-xs text-amber-900/60 hover:text-amber-900 hover:bg-amber-500/10 rounded-xl transition-colors font-bold"
+                  title="Ocultar aviso de cabecera"
+                >
+                  ✕
+                </button>
+              </div>
             </div>
           </div>
         )}
