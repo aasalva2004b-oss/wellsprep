@@ -11,6 +11,7 @@
 
 import { Topic, Session } from "../types";
 import { getLocalDateString, safeParseDate } from "./utils";
+import { getCanonicalTopic } from "./canonicalTopicService";
 
 export interface TopicCanteGoal {
   topicId: string;
@@ -98,13 +99,21 @@ export function calculateTopicHistoricalPace(
   topicId: string,
   topic: Topic | undefined,
   sessions: Session[],
-  defaultPace = DEFAULT_PACE_MINUTES_PER_PAGE.repaso
+  defaultPace = DEFAULT_PACE_MINUTES_PER_PAGE.repaso,
+  userProgress?: Record<string, any>,
+  allTopics: Topic[] = []
 ): { minutesPerPage: number; isEstimated: boolean; sampleCount: number } {
   const topicSessions = sessions.filter(
     (s) => s.topicId === topicId && (s.durationMinutes || 0) > 0 && s.type !== "canto"
   );
 
-  const topicPages = topic?.pages && topic.pages > 0 ? topic.pages : 20;
+  const canonical = getCanonicalTopic(
+    topicId,
+    allTopics.length > 0 ? allTopics : (topic ? [topic] : []),
+    userProgress,
+    sessions
+  );
+  const topicPages = canonical.pages > 0 ? canonical.pages : (topic?.pages && topic.pages > 0 ? topic.pages : 14);
 
   if (topicSessions.length > 0) {
     const totalMinutes = topicSessions.reduce((acc, s) => acc + (s.durationMinutes || 0), 0);
@@ -257,6 +266,7 @@ export function buildOrRebalanceWeeklyCantePlan(params: {
   existingPlan?: WeeklyCantePlan | null;
   referenceDate?: Date;
   customTopicPages?: Record<string, number>;
+  userProgress?: Record<string, any>;
   progressOverrides?: Record<string, { completedPages: number }>; // { [topicId]: { completedPages } }
   manualDayCompletions?: Record<string, Record<string, boolean>>; // { [date]: { [topicId]: isDone } }
 }): WeeklyCantePlan {
@@ -279,13 +289,23 @@ export function buildOrRebalanceWeeklyCantePlan(params: {
   for (const topicId of params.assignedTopicIds) {
     const topic = topicMap.get(topicId);
     const existingGoal = params.existingPlan?.topicGoals?.[topicId];
+    const canonical = getCanonicalTopic(topicId, params.allTopics, params.userProgress, params.sessions);
     
-    // Páginas del tema: prioridad a override personalizado, luego topic.pages, luego default 20 págs
-    let pages = params.customTopicPages?.[topicId] ||
+    // Páginas del tema: prioridad a override de usuario, luego canonical (de temario oficial), luego existing
+    let pages = params.userProgress?.[topicId]?.pages ||
+      params.customTopicPages?.[topicId] ||
+      (canonical.pages > 0 ? canonical.pages : 0) ||
       existingGoal?.totalPages ||
-      (topic?.pages && topic.pages > 0 ? topic.pages : 20);
+      (topic?.pages && topic.pages > 0 ? topic.pages : 0);
 
-    const pace = calculateTopicHistoricalPace(topicId, topic, params.sessions);
+    const pace = calculateTopicHistoricalPace(
+      topicId,
+      topic,
+      params.sessions,
+      DEFAULT_PACE_MINUTES_PER_PAGE.repaso,
+      params.userProgress,
+      params.allTopics
+    );
 
     // Páginas completadas para este cante
     let completed = 0;

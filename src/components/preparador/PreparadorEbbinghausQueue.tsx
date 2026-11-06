@@ -296,6 +296,11 @@ export const PreparadorEbbinghausQueue: React.FC<PreparadorEbbinghausQueueProps>
                     <span className="text-[10px] font-mono text-slate-400">
                       V{vueltas} · {daysSinceTouch !== null ? `${daysSinceTouch} días sin tocar` : "Sin contacto"}
                     </span>
+                    {(userProgress[topic.id]?.pages || topic.pages) ? (
+                      <span className="text-[10px] font-mono font-bold text-slate-600 bg-slate-50 px-1.5 py-0.2 rounded border border-slate-200">
+                        {userProgress[topic.id]?.pages || topic.pages} págs
+                      </span>
+                    ) : null}
                     {isAssignedLunes && (
                       <span className="text-[9px] font-black uppercase text-indigo-700 bg-indigo-50 px-1.5 py-0.5 rounded border border-indigo-200">
                         Asignado a Lunes

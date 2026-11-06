@@ -1,9 +1,11 @@
 import React, { useMemo, useState } from "react";
-import { X, Brain, Plus, AlertCircle, TrendingDown, Clock, Check } from "lucide-react";
+import { X, Brain, Plus, AlertCircle, TrendingDown, Clock, Check, Mic, Sparkles } from "lucide-react";
 import { Topic } from "../../types";
 import { TopicProgressData } from "../../lib/prediction";
 import { evaluateTopicPreparation } from "../../lib/preparationScore";
-import { getLatestCantoForTopic, sessionMatchesTopic } from "../../lib/cantoUtils";
+import { getCanonicalTopic, CanonicalTopic } from "../../lib/canonicalTopicService";
+import { calculateAdaptiveRetention } from "../../lib/adaptiveLearningEngine";
+import { sessionMatchesTopic } from "../../lib/cantoUtils";
 import { safeParseDate, cn } from "../../lib/utils";
 import { playSound } from "../../lib/sound";
 import { DayPlan } from "../../lib/plannerEngine";
@@ -32,15 +34,17 @@ export const EbbinghausRecommendationsModal: React.FC<EbbinghausRecommendationsM
     weekDays[1]?.date || weekDays[0]?.date || ""
   );
 
-  // Analizar todos los temas y extraer los que tienen mayor necesidad de repaso
+  // Analizar todos los temas con el motor adaptativo de Ebbinghaus
   const urgentTopics = useMemo(() => {
     const list: Array<{
-      topic: Topic;
+      canonical: CanonicalTopic;
       retentionPct: number;
       overallScore: number;
       daysSinceTouch: number;
       isUrgent: boolean;
-      diagnosis: string;
+      activeRetrieval: boolean;
+      explanation: string;
+      evidenceLevel: "canto_evaluado" | "repaso_activo" | "estudio_reciente" | "sin_evidencia";
     }> = [];
 
     for (const topic of allTopics) {
@@ -48,42 +52,28 @@ export const EbbinghausRecommendationsModal: React.FC<EbbinghausRecommendationsM
       const sessions = recentSessions.filter((s) => sessionMatchesTopic(s, topic));
       if (!prog && sessions.length === 0) continue;
 
-      const cantoData = getLatestCantoForTopic(recentSessions, topic, prog);
-      const sortedSessions = [...sessions].sort(
-        (a, b) => safeParseDate(b.date).getTime() - safeParseDate(a.date).getTime()
-      );
-      const lastSessionDate = sortedSessions[0]?.date || prog?.lastReviewDate || prog?.firstStudyDate;
-      const daysSinceTouch = lastSessionDate 
-        ? Math.max(0, Math.floor((new Date().getTime() - safeParseDate(lastSessionDate).getTime()) / (1000 * 3600 * 24)))
-        : 0;
+      const canonical = getCanonicalTopic(topic.id, allTopics, userProgress, recentSessions);
+      const adaptive = calculateAdaptiveRetention(canonical, recentSessions, prog);
 
-      const evaluation = evaluateTopicPreparation({
-        topicNumber: topic.number,
-        topicTitle: topic.title,
-        totalCantoSecs: cantoData.hasCanto ? cantoData.totalSecs : null,
-        lastGrade: cantoData.grade,
-        daysSinceCanto: cantoData.hasCanto ? daysSinceTouch : null,
-        daysSinceReview: daysSinceTouch,
-        daysSinceTouch,
-        vueltas: prog?.vueltas || 0,
-        reviewsCount: sessions.length,
-        difficulty: topic.difficulty || 5
-      });
+      const daysSinceTouch = adaptive.daysSinceLastTouch;
+      const activeRetrieval = adaptive.evidenceLevel === "canto_evaluado";
 
-      // Incluir si la retención es baja (< 75%) o lleva más de 25 días sin repasar o nota baja
-      if (evaluation.retentionPct < 75 || daysSinceTouch >= 25 || evaluation.isDecayed) {
+      // Incluir si la retención es baja (< 75%) o lleva más de 25 días sin repasar
+      if (adaptive.retentionPct < 75 || daysSinceTouch >= 25 || adaptive.isUrgent) {
         list.push({
-          topic,
-          retentionPct: evaluation.retentionPct,
-          overallScore: evaluation.overallScore,
+          canonical,
+          retentionPct: adaptive.retentionPct,
+          overallScore: prog?.lastScore || 6.0,
           daysSinceTouch,
-          isUrgent: evaluation.retentionPct < 60 || daysSinceTouch >= 35,
-          diagnosis: evaluation.ebbinghausDiagnosis
+          isUrgent: adaptive.isUrgent || adaptive.retentionPct < 60 || daysSinceTouch >= 35,
+          activeRetrieval,
+          explanation: adaptive.recommendedAction,
+          evidenceLevel: adaptive.evidenceLevel
         });
       }
     }
 
-    return list.sort((a, b) => a.retentionPct - b.retentionPct).slice(0, 20);
+    return list.sort((a, b) => a.retentionPct - b.retentionPct).slice(0, 25);
   }, [allTopics, userProgress, recentSessions]);
 
   if (!isOpen) return null;
@@ -104,10 +94,10 @@ export const EbbinghausRecommendationsModal: React.FC<EbbinghausRecommendationsM
             </div>
             <div>
               <h3 className="text-base font-black font-serif text-slate-900">
-                Repasos Recomendados (Curva de Ebbinghaus)
+                Repasos Recomendados (Curva de Ebbinghaus Adaptativa)
               </h3>
               <p className="text-xs text-slate-500">
-                Temas con decaimiento de retención neuronal o plazo mensual vencido
+                Temas priorizados según decaimiento de retención, cantes orales y días sin repasar
               </p>
             </div>
           </div>
@@ -142,22 +132,33 @@ export const EbbinghausRecommendationsModal: React.FC<EbbinghausRecommendationsM
         <div className="flex-1 overflow-y-auto py-3 space-y-2 pr-1">
           {urgentTopics.length === 0 ? (
             <div className="p-8 text-center border border-dashed border-slate-200 rounded-2xl text-xs text-slate-500">
-              ¡Excelente! No tienes temas con decaimiento crítico de retención ni repasos mensuales vencidos.
+              ¡Excelente! No tienes temas con decaimiento crítico de retención ni repasos mensuales pendientes.
             </div>
           ) : (
             urgentTopics.map((item) => (
               <div
-                key={item.topic.id}
+                key={item.canonical.id}
                 className="p-3.5 rounded-2xl border border-slate-200/80 bg-slate-50/60 hover:bg-white transition-all flex items-center justify-between gap-3"
               >
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2 mb-1">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2 mb-1 flex-wrap">
                     <span className="font-mono text-xs font-bold px-1.5 py-0.5 rounded-md bg-slate-900 text-white">
-                      T.{item.topic.number}
+                      T.{item.canonical.number}
                     </span>
                     <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">
-                      {item.topic.subjectId}
+                      {item.canonical.subjectId}
                     </span>
+                    <span className="text-[10px] font-mono text-slate-600 bg-white px-1.5 py-0.2 rounded border border-slate-200">
+                      {item.canonical.hasExplicitPages && item.canonical.pages > 0
+                        ? `${item.canonical.pages} págs`
+                        : "Págs s/r"}
+                    </span>
+                    {item.activeRetrieval && (
+                      <span className="text-[9px] font-black uppercase px-1.5 py-0.2 rounded-full bg-purple-100 text-purple-800 border border-purple-200 flex items-center gap-0.5">
+                        <Mic size={9} />
+                        Cante previo
+                      </span>
+                    )}
                     {item.isUrgent && (
                       <span className="text-[9px] font-black uppercase px-1.5 py-0.2 rounded-full bg-rose-100 text-rose-800 border border-rose-200">
                         Urgente
@@ -166,10 +167,14 @@ export const EbbinghausRecommendationsModal: React.FC<EbbinghausRecommendationsM
                   </div>
 
                   <h4 className="text-xs font-bold text-slate-900 truncate">
-                    {item.topic.title}
+                    {item.canonical.title}
                   </h4>
 
-                  <div className="flex items-center gap-3 text-[11px] text-slate-500 mt-1 font-mono">
+                  <p className="text-[11px] text-slate-600 mt-1 leading-snug line-clamp-1">
+                    {item.explanation}
+                  </p>
+
+                  <div className="flex items-center gap-3 text-[11px] text-slate-500 mt-1.5 font-mono">
                     <span className={cn(
                       "font-bold",
                       item.retentionPct < 60 ? "text-rose-600" : "text-amber-600"
@@ -179,7 +184,7 @@ export const EbbinghausRecommendationsModal: React.FC<EbbinghausRecommendationsM
                     <span>·</span>
                     <span>Hace {item.daysSinceTouch} días</span>
                     <span>·</span>
-                    <span>Nota: {item.overallScore.toFixed(1)}</span>
+                    <span>V{item.canonical.vueltas || 0}</span>
                   </div>
                 </div>
 
@@ -187,7 +192,7 @@ export const EbbinghausRecommendationsModal: React.FC<EbbinghausRecommendationsM
                   type="button"
                   onClick={() => {
                     playSound.success();
-                    onAddReviewTask(item.topic.id, selectedTargetDay);
+                    onAddReviewTask(item.canonical.id, selectedTargetDay);
                   }}
                   className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition-all shadow-xs flex items-center gap-1 shrink-0 active:scale-95"
                 >

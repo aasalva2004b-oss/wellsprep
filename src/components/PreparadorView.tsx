@@ -57,7 +57,7 @@ const STORAGE_MANUAL_COMPLETIONS = "wellsprep_manual_completions_v2";
 const STORAGE_PROGRESS_OVERRIDES = "wellsprep_progress_overrides_v2";
 
 export function PreparadorView() {
-  const { user, userProgress, recentSessions, addStudySession } = useFirebase();
+  const { user, userProgress, recentSessions, addStudySession, updateTopicProgress } = useFirebase();
 
   // Active view in the planner cockpit
   const [activeView, setActiveView] = useState<ActivePlannerView>(() => {
@@ -180,7 +180,7 @@ export function PreparadorView() {
     }
   };
 
-  const handleUpdateTopicPages = (topicId: string, newTotalPages: number) => {
+  const handleUpdateTopicPages = async (topicId: string, newTotalPages: number) => {
     const updated = {
       ...customTopicPages,
       [topicId]: newTotalPages
@@ -196,10 +196,14 @@ export function PreparadorView() {
           updatedAt: serverTimestamp()
         }, { merge: true });
       }
+      // Sincronización con la fuente de verdad canónica (userProgress)
+      if (updateTopicProgress) {
+        await updateTopicProgress(topicId, { pages: newTotalPages });
+      }
     } catch (e) {
       console.error(e);
     }
-    toast.success(`Tema configurado con ${newTotalPages} páginas. Plan recalculado en tiempo real.`);
+    toast.success(`Tema configurado con ${newTotalPages} páginas. Plan y temario unificados en tiempo real.`);
   };
 
   const handleUpdateTopicProgress = (topicId: string, newCompletedPages: number) => {
@@ -318,10 +322,11 @@ export function PreparadorView() {
       allTopics,
       sessions: recentSessions,
       customTopicPages,
+      userProgress,
       progressOverrides,
       manualDayCompletions
     });
-  }, [schedule, targetCanteDay, allTopics, recentSessions, customTopicPages, progressOverrides, manualDayCompletions]);
+  }, [schedule, targetCanteDay, allTopics, recentSessions, customTopicPages, userProgress, progressOverrides, manualDayCompletions]);
 
   const assignedTopics = useMemo(() => {
     const listToRender = (activeView === "lunes" || activeView === "jueves")

@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from "react";
-import { X, Search, Clock, BookOpen, Sparkles, Check, Calendar } from "lucide-react";
+import { X, Search, Clock, BookOpen, Sparkles, Check, Calendar, Info, Edit3 } from "lucide-react";
 import { Topic } from "../../types";
 import { 
   PlannerTask, 
@@ -7,8 +7,13 @@ import {
   ACTIVITY_CONFIG, 
   PlannerSettings, 
   DEFAULT_PLANNER_SETTINGS,
-  estimateTaskDurationMinutes 
+  estimateTaskAdaptiveDetails
 } from "../../lib/plannerEngine";
+import { 
+  getCanonicalTopic, 
+  buildCanonicalTopicMap, 
+  CanonicalTopic 
+} from "../../lib/canonicalTopicService";
 import { cn, formatMinutesToHours } from "../../lib/utils";
 import { playSound } from "../../lib/sound";
 import { motion } from "motion/react";
@@ -21,7 +26,9 @@ interface TaskEditorModalProps {
   initialDate: string; // "YYYY-MM-DD"
   allTopics: Topic[];
   sessions: any[];
+  userProgress?: Record<string, any>;
   settings?: PlannerSettings;
+  onUpdateTopicProgress?: (topicId: string, updates: any) => Promise<void>;
 }
 
 export const TaskEditorModal: React.FC<TaskEditorModalProps> = ({
@@ -32,7 +39,9 @@ export const TaskEditorModal: React.FC<TaskEditorModalProps> = ({
   initialDate,
   allTopics,
   sessions,
-  settings = DEFAULT_PLANNER_SETTINGS
+  userProgress = {},
+  settings = DEFAULT_PLANNER_SETTINGS,
+  onUpdateTopicProgress
 }) => {
   const [selectedTopicId, setSelectedTopicId] = useState<string>(
     initialTask?.topicId || (allTopics[0]?.id || "constitucional-1")
@@ -48,16 +57,24 @@ export const TaskEditorModal: React.FC<TaskEditorModalProps> = ({
   );
 
   const [selectedSubjectFilter, setSelectedSubjectFilter] = useState<string>("todos");
+  const [isEditingPagesInline, setIsEditingPagesInline] = useState(false);
+  const [inlinePagesInput, setInlinePagesInput] = useState<string>("");
 
-  const selectedTopic = useMemo(() => {
-    return allTopics.find((t) => t.id === selectedTopicId) || allTopics[0];
-  }, [allTopics, selectedTopicId]);
+  // Map canónico de todos los temas con fuente de verdad única
+  const canonicalMap = useMemo(() => {
+    return buildCanonicalTopicMap(allTopics, userProgress, sessions);
+  }, [allTopics, userProgress, sessions]);
 
-  // Recalcular estimación automática según actividad y tema
-  const autoEstimatedMinutes = useMemo(() => {
-    return estimateTaskDurationMinutes(selectedTopic, activityType, sessions, settings);
-  }, [selectedTopic, activityType, sessions, settings]);
+  const selectedCanonicalTopic = useMemo<CanonicalTopic>(() => {
+    return getCanonicalTopic(selectedTopicId, allTopics, userProgress, sessions);
+  }, [selectedTopicId, allTopics, userProgress, sessions]);
 
+  // Cálculo adaptativo con explicación transparente
+  const adaptiveDetails = useMemo(() => {
+    return estimateTaskAdaptiveDetails(selectedCanonicalTopic, activityType, sessions, settings);
+  }, [selectedCanonicalTopic, activityType, sessions, settings]);
+
+  const autoEstimatedMinutes = adaptiveDetails.minutes;
   const finalEstimatedMinutes = customMinutes !== null ? customMinutes : autoEstimatedMinutes;
 
   // Lista única de materias para pestañas rápidas
@@ -69,39 +86,50 @@ export const TaskEditorModal: React.FC<TaskEditorModalProps> = ({
     return Array.from(subs);
   }, [allTopics]);
 
-  // Filtrado de temas en el buscador y por materia
+  // Filtrado de temas con datos canónicos
   const filteredTopics = useMemo(() => {
     let list = allTopics;
     if (selectedSubjectFilter !== "todos") {
       list = list.filter((t) => t.subjectId === selectedSubjectFilter);
     }
-    if (!search.trim()) return list.slice(0, 45);
+    if (!search.trim()) return list.slice(0, 50);
     const q = search.toLowerCase().trim();
-    return list.filter(
-      (t) =>
-        t.title.toLowerCase().includes(q) ||
-        (t.fullTitle && t.fullTitle.toLowerCase().includes(q)) ||
-        t.number.toString().includes(q) ||
-        t.subjectId.toLowerCase().includes(q)
-    ).slice(0, 50);
-  }, [allTopics, search, selectedSubjectFilter]);
+    return list.filter((t) => {
+      const c = canonicalMap.get(t.id);
+      const title = (c?.title || t.title).toLowerCase();
+      const fullTitle = (t.fullTitle || "").toLowerCase();
+      const num = t.number.toString();
+      const sub = (t.subjectId || "").toLowerCase();
+      return title.includes(q) || fullTitle.includes(q) || num.includes(q) || sub.includes(q);
+    }).slice(0, 50);
+  }, [allTopics, search, selectedSubjectFilter, canonicalMap]);
 
   if (!isOpen) return null;
 
+  const handleSaveInlinePages = async () => {
+    const num = parseFloat(inlinePagesInput.replace(",", "."));
+    if (isNaN(num) || num <= 0) return;
+    if (onUpdateTopicProgress) {
+      await onUpdateTopicProgress(selectedCanonicalTopic.id, { pages: num });
+      playSound.success();
+    }
+    setIsEditingPagesInline(false);
+  };
+
   const handleSave = () => {
-    if (!selectedTopic) return;
+    if (!selectedCanonicalTopic) return;
     playSound.success();
     onSaveTask({
       id: initialTask?.id,
-      topicId: selectedTopic.id,
-      topicNumber: selectedTopic.number,
-      topicTitle: selectedTopic.title,
-      subjectId: selectedTopic.subjectId,
+      topicId: selectedCanonicalTopic.id,
+      topicNumber: selectedCanonicalTopic.number,
+      topicTitle: selectedCanonicalTopic.title,
+      subjectId: selectedCanonicalTopic.subjectId,
       activityType,
       date,
       status: initialTask?.status || "pending",
       estimatedMinutes: finalEstimatedMinutes,
-      pagesCount: selectedTopic.pages || 18,
+      pagesCount: selectedCanonicalTopic.pages > 0 ? selectedCanonicalTopic.pages : undefined,
       notes: notes.trim() || undefined
     });
     onClose();
@@ -244,6 +272,10 @@ export const TaskEditorModal: React.FC<TaskEditorModalProps> = ({
             <div className="max-h-40 overflow-y-auto space-y-1 border border-slate-200/80 rounded-2xl p-1 bg-slate-50/50">
               {filteredTopics.map((topic) => {
                 const isSelected = selectedTopicId === topic.id;
+                const canonical = canonicalMap.get(topic.id);
+                const pagesDisplay = canonical?.hasExplicitPages && canonical.pages > 0
+                  ? `${canonical.pages}p`
+                  : "Sin págs";
                 return (
                   <button
                     key={topic.id}
@@ -251,6 +283,7 @@ export const TaskEditorModal: React.FC<TaskEditorModalProps> = ({
                     onClick={() => {
                       playSound.click();
                       setSelectedTopicId(topic.id);
+                      setIsEditingPagesInline(false);
                     }}
                     className={cn(
                       "w-full text-left px-3 py-2 rounded-xl text-xs transition-all flex items-center justify-between gap-2",
@@ -266,30 +299,100 @@ export const TaskEditorModal: React.FC<TaskEditorModalProps> = ({
                       )}>
                         T.{topic.number}
                       </span>
-                      <span className="truncate">{topic.title}</span>
+                      <span className="truncate">{canonical?.title || topic.title}</span>
                     </div>
-                    <span className={cn("text-[10px] shrink-0 font-mono", isSelected ? "text-slate-300" : "text-slate-400")}>
-                      {topic.pages || 18}p
-                    </span>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <span className={cn(
+                        "text-[10px] font-mono",
+                        isSelected ? "text-slate-300" : canonical?.hasExplicitPages ? "text-slate-500 font-bold" : "text-amber-500"
+                      )}>
+                        {pagesDisplay}
+                      </span>
+                    </div>
                   </button>
                 );
               })}
             </div>
+
+            {/* Inline Quick-Add Pages if Topic is Missing Official Pages */}
+            {!selectedCanonicalTopic.hasExplicitPages && onUpdateTopicProgress && (
+              <div className="mt-2 p-2.5 rounded-xl bg-amber-50/90 border border-amber-200 text-amber-900 text-xs">
+                {!isEditingPagesInline ? (
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[11px] font-medium">
+                      Este tema no tiene páginas en el temario oficial.
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setInlinePagesInput("");
+                        setIsEditingPagesInline(true);
+                      }}
+                      className="px-2 py-1 rounded-lg bg-amber-200/80 hover:bg-amber-300 text-amber-950 text-[10px] font-bold flex items-center gap-1 shrink-0"
+                    >
+                      <Edit3 size={11} />
+                      <span>Fijar páginas</span>
+                    </button>
+                  </div>
+                ) : (
+                  <div className="space-y-1.5">
+                    <span className="text-[11px] font-bold block">
+                      Introduce las páginas oficiales de T.{selectedCanonicalTopic.number}:
+                    </span>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="number"
+                        step="0.5"
+                        min="1"
+                        placeholder="Ej: 6.5"
+                        value={inlinePagesInput}
+                        onChange={(e) => setInlinePagesInput(e.target.value)}
+                        className="w-24 px-2 py-1 bg-white border border-amber-300 rounded-lg text-xs font-mono font-bold text-slate-900 focus:outline-amber-600"
+                      />
+                      <button
+                        type="button"
+                        onClick={handleSaveInlinePages}
+                        className="px-2.5 py-1 bg-amber-700 hover:bg-amber-800 text-white rounded-lg text-xs font-bold shadow-2xs"
+                      >
+                        Guardar en Ficha
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setIsEditingPagesInline(false)}
+                        className="px-2 py-1 text-xs text-amber-800 hover:text-amber-950 font-bold"
+                      >
+                        Cancelar
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
-          {/* 4. Duración Estimada y Ritmo */}
-          <div className="p-3.5 bg-slate-50 rounded-2xl border border-slate-200/80 space-y-2">
+          {/* 4. Duración Estimada Adaptativa y Ritmo */}
+          <div className="p-3.5 bg-slate-50 rounded-2xl border border-slate-200/80 space-y-2.5">
             <div className="flex items-center justify-between">
               <span className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
                 <Clock size={14} className="text-indigo-600" />
-                <span>Tiempo Estimado de Estudio</span>
+                <span>Tiempo Estimado Adaptativo</span>
               </span>
-              <span className="text-xs font-mono font-black text-slate-900">
-                {formatMinutesToHours(finalEstimatedMinutes)} ({finalEstimatedMinutes}m)
-              </span>
+              <div className="flex items-center gap-1.5">
+                <span className={cn(
+                  "text-[9px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full font-mono",
+                  adaptiveDetails.confidence === "alta" && "bg-emerald-100 text-emerald-800 border border-emerald-200",
+                  adaptiveDetails.confidence === "media" && "bg-indigo-100 text-indigo-800 border border-indigo-200",
+                  adaptiveDetails.confidence === "baja" && "bg-slate-200 text-slate-700 border border-slate-300"
+                )}>
+                  {adaptiveDetails.confidence === "alta" ? "Calibración Empírica" : adaptiveDetails.confidence === "media" ? "Estimación Materia" : "Base Estándar"}
+                </span>
+                <span className="text-xs font-mono font-black text-slate-900">
+                  {formatMinutesToHours(finalEstimatedMinutes)} ({finalEstimatedMinutes}m)
+                </span>
+              </div>
             </div>
 
-            <div className="flex items-center gap-2 pt-1">
+            <div className="flex items-center gap-2 pt-0.5">
               <button
                 type="button"
                 onClick={() => setCustomMinutes(Math.max(10, finalEstimatedMinutes - 15))}
@@ -318,13 +421,28 @@ export const TaskEditorModal: React.FC<TaskEditorModalProps> = ({
                   onClick={() => setCustomMinutes(null)}
                   className="text-[10px] text-indigo-600 hover:underline ml-auto font-bold"
                 >
-                  Restablecer automático
+                  Restablecer adaptativo
                 </button>
               )}
             </div>
-            <p className="text-[11px] text-slate-500 font-medium">
-              Calculado según volumen ({selectedTopic?.pages || 18} págs) y tu ritmo para <em>{ACTIVITY_CONFIG[activityType].label}</em>.
-            </p>
+
+            {/* Desglose explicativo de la estimación */}
+            <div className="pt-2 border-t border-slate-200/60 space-y-1">
+              <p className="text-[11px] text-slate-700 font-medium leading-relaxed">
+                {adaptiveDetails.explanation}
+              </p>
+              <div className="flex items-center gap-2 text-[10px] font-mono text-slate-500 pt-0.5 flex-wrap">
+                <span className="px-1.5 py-0.5 rounded-md bg-white border border-slate-200">
+                  Volumen: {selectedCanonicalTopic.pages > 0 ? `${selectedCanonicalTopic.pages} págs` : "Sin registrar"}
+                </span>
+                <span className="px-1.5 py-0.5 rounded-md bg-white border border-slate-200">
+                  Vuelta {selectedCanonicalTopic.vueltas || 0}
+                </span>
+                <span className="px-1.5 py-0.5 rounded-md bg-white border border-slate-200">
+                  Dificultad {selectedCanonicalTopic.difficulty}/10
+                </span>
+              </div>
+            </div>
           </div>
 
           {/* 5. Notas u Observaciones */}

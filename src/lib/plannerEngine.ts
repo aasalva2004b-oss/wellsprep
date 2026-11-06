@@ -12,6 +12,13 @@ import { Topic, Session } from "../types";
 import { TopicProgressData } from "./prediction";
 import { getLocalDateString, safeParseDate } from "./utils";
 import { evaluateTopicPreparation } from "./preparationScore";
+import { CanonicalTopic, getCanonicalTopic, buildCanonicalTopicMap } from "./canonicalTopicService";
+import { 
+  buildLearnerProfile, 
+  estimateAdaptiveDuration, 
+  LearnerProfile, 
+  AdaptiveDurationEstimate 
+} from "./adaptiveLearningEngine";
 
 export type PlannerActivityType = "estudio_nuevo" | "refresco" | "repaso" | "cante";
 
@@ -166,65 +173,81 @@ export const ACTIVITY_CONFIG: Record<
 
 /**
  * Calcula el tiempo estimado (en minutos) para una actividad y tema específicos,
- * integrando páginas, palabras, dificultad y velocidad histórica.
+ * integrando la Fuente Única de Verdad (páginas y palabras reales del tema)
+ * y el perfil de aprendizaje empírico del opositor.
  */
 export function estimateTaskDurationMinutes(
-  topic: Topic | undefined,
+  topic: Topic | CanonicalTopic | undefined,
   activityType: PlannerActivityType,
-  sessions: Session[],
+  sessions: Session[] = [],
   settings: PlannerSettings = DEFAULT_PLANNER_SETTINGS,
-  refrescoIndex?: 1 | 2 | 3
+  refrescoIndex?: 1 | 2 | 3,
+  userProgress: Record<string, TopicProgressData> = {}
 ): number {
   if (!topic) {
     if (activityType === "cante") return settings.duracionEstimadaCantePorTemaMinutos;
     if (activityType === "refresco") return settings.refresco1DuracionMinutos;
-    return 60;
+    return 45;
   }
 
-  const pages = topic.pages && topic.pages > 0 ? topic.pages : 18;
-  const words = topic.numeroPalabras && topic.numeroPalabras > 0 ? topic.numeroPalabras : pages * 320;
-  const difficulty = topic.difficulty || 5;
+  // Convertir a CanonicalTopic si no lo es ya
+  const canonical: CanonicalTopic = (topic as any).hasExplicitPages !== undefined
+    ? (topic as CanonicalTopic)
+    : getCanonicalTopic((topic as any).id, [topic as any], userProgress, sessions);
 
-  // Elasticidad por dificultad (un tema de dificultad 8 tarda un 15% más que uno de 5)
-  const difficultyMultiplier = 1 + (difficulty - 5) * 0.05;
+  // Perfil del opositor
+  const canonicalMap = new Map<string, CanonicalTopic>();
+  canonicalMap.set(canonical.id, canonical);
+  const profile = buildLearnerProfile(sessions, canonicalMap);
 
-  if (activityType === "cante") {
-    // 12m 30s de cante oficial + 15m de lectura mental y esquema previo
-    return settings.duracionEstimadaCantePorTemaMinutos;
+  // Aplicar ajustes manuales del usuario si difieren del DEFAULT
+  if (settings.velocidadEstudioNuevoMinPorPagina !== DEFAULT_PLANNER_SETTINGS.velocidadEstudioNuevoMinPorPagina) {
+    profile.studyPaceMinPerPage = settings.velocidadEstudioNuevoMinPorPagina;
+  }
+  if (settings.velocidadRepasoMinPorPagina !== DEFAULT_PLANNER_SETTINGS.velocidadRepasoMinPorPagina) {
+    profile.reviewPaceMinPerPage = settings.velocidadRepasoMinPorPagina;
+  }
+  if (settings.velocidadRefrescoMinPorPagina !== DEFAULT_PLANNER_SETTINGS.velocidadRefrescoMinPorPagina) {
+    profile.refreshPaceMinPerPage = settings.velocidadRefrescoMinPorPagina;
   }
 
-  if (activityType === "refresco") {
-    if (refrescoIndex === 1) return Math.round(settings.refresco1DuracionMinutos * difficultyMultiplier);
-    if (refrescoIndex === 2) return Math.round(settings.refresco2DuracionMinutos * difficultyMultiplier);
-    if (refrescoIndex === 3) return Math.round(settings.refresco3DuracionMinutos * difficultyMultiplier);
-    // Genérico si no tiene índice
-    const refreshMins = pages * settings.velocidadRefrescoMinPorPagina * difficultyMultiplier;
-    return Math.max(20, Math.round(refreshMins));
+  const estimate = estimateAdaptiveDuration(canonical, activityType, profile, refrescoIndex);
+  return estimate.estimatedMinutes;
+}
+
+/**
+ * Devuelve el desglose detallado y justificado de la estimación adaptativa.
+ */
+export function estimateTaskAdaptiveDetails(
+  topic: Topic | CanonicalTopic | undefined,
+  activityType: PlannerActivityType,
+  sessions: Session[] = [],
+  settings: PlannerSettings = DEFAULT_PLANNER_SETTINGS,
+  refrescoIndex?: 1 | 2 | 3,
+  userProgress: Record<string, TopicProgressData> = {}
+): AdaptiveDurationEstimate {
+  if (!topic) {
+    return {
+      estimatedMinutes: 45,
+      confidence: "provisional",
+      explanation: "Sin tema seleccionado",
+      paceMinPerPage: 3.5,
+      pagesUsed: 0,
+      hasExplicitPages: false,
+      isCustomSpeed: false,
+      details: { baseVolumeMinutes: 45, difficultyAdjustmentMinutes: 0, vueltaAdjustmentMinutes: 0, decayAdjustmentMinutes: 0 }
+    };
   }
 
-  // Comprobar sesiones históricas de este tema para afinar ritmo real
-  const relevantSessions = sessions.filter(
-    (s) => s.topicId === topic.id && s.type !== "canto" && (s.durationMinutes || 0) > 0
-  );
+  const canonical: CanonicalTopic = (topic as any).hasExplicitPages !== undefined
+    ? (topic as CanonicalTopic)
+    : getCanonicalTopic((topic as any).id, [topic as any], userProgress, sessions);
 
-  if (activityType === "estudio_nuevo") {
-    const studySessions = relevantSessions.filter((s) => s.type === "primer_estudio" || (s.type as string) === "estudio_inicial");
-    if (studySessions.length > 0) {
-      const avgMins = studySessions.reduce((acc, s) => acc + (s.durationMinutes || 0), 0) / studySessions.length;
-      return Math.max(45, Math.round(avgMins));
-    }
-    const computed = pages * settings.velocidadEstudioNuevoMinPorPagina * difficultyMultiplier;
-    return Math.max(60, Math.round(computed));
-  }
+  const canonicalMap = new Map<string, CanonicalTopic>();
+  canonicalMap.set(canonical.id, canonical);
+  const profile = buildLearnerProfile(sessions, canonicalMap);
 
-  // Actividad: REPASO
-  const reviewSessions = relevantSessions.filter((s) => s.type === "repaso" || s.type === "refresco");
-  if (reviewSessions.length > 0) {
-    const avgMins = reviewSessions.reduce((acc, s) => acc + (s.durationMinutes || 0), 0) / reviewSessions.length;
-    return Math.max(30, Math.round(avgMins));
-  }
-  const reviewComputed = pages * settings.velocidadRepasoMinPorPagina * difficultyMultiplier;
-  return Math.max(30, Math.round(reviewComputed));
+  return estimateAdaptiveDuration(canonical, activityType, profile, refrescoIndex);
 }
 
 /**
@@ -246,13 +269,15 @@ export function calculateNextStudyDays(startDateStr: string, count: number = 3):
 
 /**
  * Genera automáticamente los 3 refrescos posteriores cuando se completa un estudio nuevo.
- * Garantiza que no existan duplicados para el mismo tema y ciclo.
+ * Garantiza que no existan duplicados y utiliza la volumetría real exacta del tema.
  */
 export function generateAutoRefrescos(
   completedStudyTask: PlannerTask,
-  topic: Topic | undefined,
+  topic: Topic | CanonicalTopic | undefined,
   existingTasks: PlannerTask[],
-  settings: PlannerSettings = DEFAULT_PLANNER_SETTINGS
+  settings: PlannerSettings = DEFAULT_PLANNER_SETTINGS,
+  userProgress: Record<string, TopicProgressData> = {},
+  sessions: Session[] = []
 ): PlannerTask[] {
   if (completedStudyTask.activityType !== "estudio_nuevo") {
     return [];
@@ -271,16 +296,22 @@ export function generateAutoRefrescos(
     return [];
   }
 
+  const canonical: CanonicalTopic | undefined = topic
+    ? ((topic as any).hasExplicitPages !== undefined ? (topic as CanonicalTopic) : getCanonicalTopic((topic as any).id, [topic as any], userProgress, sessions))
+    : undefined;
+
+  const realPages = canonical?.pages && canonical.pages > 0
+    ? canonical.pages
+    : completedStudyTask.pagesCount && completedStudyTask.pagesCount > 0
+    ? completedStudyTask.pagesCount
+    : 0;
+
   const newRefrescos: PlannerTask[] = [];
   const refrescoIndices: Array<1 | 2 | 3> = [1, 2, 3];
 
   refrescoIndices.forEach((idx, i) => {
     const taskDate = refreshDates[i];
-    const estimatedMins = idx === 1 
-      ? settings.refresco1DuracionMinutos 
-      : idx === 2 
-      ? settings.refresco2DuracionMinutos 
-      : settings.refresco3DuracionMinutos;
+    const estimatedMins = estimateTaskDurationMinutes(canonical, "refresco", sessions, settings, idx, userProgress);
 
     newRefrescos.push({
       id: `refresco-${topicId}-${idx}-${Date.now()}-${i}`,
@@ -292,7 +323,7 @@ export function generateAutoRefrescos(
       date: taskDate,
       status: "pending",
       estimatedMinutes: estimatedMins,
-      pagesCount: completedStudyTask.pagesCount || topic?.pages || 18,
+      pagesCount: realPages,
       refrescoIndex: idx,
       sourceStudyTaskId: completedStudyTask.id,
       notes: `Refresco ${idx}/3 automático tras completar estudio nuevo el ${finishDate}.`,
@@ -311,7 +342,9 @@ export function buildWeekPlan(
   weekOffset: number = 0,
   settings: PlannerSettings = DEFAULT_PLANNER_SETTINGS,
   referenceDate: Date = new Date(),
-  sessions: Session[] = []
+  sessions: Session[] = [],
+  userProgress: Record<string, TopicProgressData> = {},
+  allTopics: Topic[] = []
 ): WeekPlan {
   const today = new Date(referenceDate);
   const todayStr = getLocalDateString(today);

@@ -36,6 +36,7 @@ import {
   RebalanceProposal,
   estimateTaskDurationMinutes
 } from "../../lib/plannerEngine";
+import { getCanonicalTopic } from "../../lib/canonicalTopicService";
 import { TaskEditorModal } from "./TaskEditorModal";
 import { RebalanceConfirmModal } from "./RebalanceConfirmModal";
 import { EbbinghausRecommendationsModal } from "./EbbinghausRecommendationsModal";
@@ -64,7 +65,7 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
   scheduleJueves = [],
   onOpenPreparadorSession
 }) => {
-  const { user, userProgress, recentSessions, addStudySession } = useFirebase();
+  const { user, userProgress, recentSessions, addStudySession, updateTopicProgress } = useFirebase();
 
   // 1. Estados de Navegación Semanal
   const [weekOffset, setWeekOffset] = useState<number>(0);
@@ -213,17 +214,18 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
       effectiveLunes.forEach((id) => {
         const t = topicMap.get(id);
         if (t) {
+          const canonical = getCanonicalTopic(id, allTopics, userProgress, recentSessions);
           initialList.push({
             id: `cante-lunes-${id}`,
             topicId: t.id,
-            topicNumber: t.number,
-            topicTitle: t.title,
-            subjectId: t.subjectId,
+            topicNumber: canonical.number,
+            topicTitle: canonical.title,
+            subjectId: canonical.subjectId,
             activityType: "cante",
             date: monStr,
             status: "pending",
             estimatedMinutes: settings.duracionEstimadaCantePorTemaMinutos,
-            pagesCount: t.pages || 18,
+            pagesCount: canonical.hasExplicitPages && canonical.pages > 0 ? canonical.pages : undefined,
             createdAt: new Date().toISOString()
           });
         }
@@ -232,17 +234,18 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
       effectiveJueves.forEach((id) => {
         const t = topicMap.get(id);
         if (t) {
+          const canonical = getCanonicalTopic(id, allTopics, userProgress, recentSessions);
           initialList.push({
             id: `cante-jueves-${id}`,
             topicId: t.id,
-            topicNumber: t.number,
-            topicTitle: t.title,
-            subjectId: t.subjectId,
+            topicNumber: canonical.number,
+            topicTitle: canonical.title,
+            subjectId: canonical.subjectId,
             activityType: "cante",
             date: thuStr,
             status: "pending",
             estimatedMinutes: settings.duracionEstimadaCantePorTemaMinutos,
-            pagesCount: t.pages || 18,
+            pagesCount: canonical.hasExplicitPages && canonical.pages > 0 ? canonical.pages : undefined,
             createdAt: new Date().toISOString()
           });
         }
@@ -252,12 +255,12 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
         persistTasks(initialList);
       }
     }
-  }, [scheduleLunes, scheduleJueves, topicMap, tasks.length, settings]);
+  }, [scheduleLunes, scheduleJueves, topicMap, tasks.length, settings, allTopics, userProgress, recentSessions]);
 
   // Construcción del modelo de la semana actual con telemetría real (AeroFocus y WellsPrep)
   const weekPlan = useMemo(() => {
-    return buildWeekPlan(tasks, weekOffset, settings, new Date(), recentSessions);
-  }, [tasks, weekOffset, settings, recentSessions]);
+    return buildWeekPlan(tasks, weekOffset, settings, new Date(), recentSessions, userProgress, allTopics);
+  }, [tasks, weekOffset, settings, recentSessions, userProgress, allTopics]);
 
   // Identificar jornada de hoy
   const todayStr = useMemo(() => getLocalDateString(), []);
@@ -345,18 +348,18 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
       }
 
       canteTasks = scheduleTopicIds.map((id) => {
-        const t = topicMap.get(id);
+        const canonical = getCanonicalTopic(id, allTopics, userProgress, recentSessions);
         return {
           id: `virtual-cante-${id}-${targetDateStr}`,
           topicId: id,
-          topicNumber: t?.number || 1,
-          topicTitle: t?.title || id,
-          subjectId: t?.subjectId || "constitucional",
+          topicNumber: canonical.number,
+          topicTitle: canonical.title,
+          subjectId: canonical.subjectId,
           activityType: "cante",
           date: targetDateStr,
           status: "pending",
           estimatedMinutes: 30,
-          pagesCount: t?.pages || 18,
+          pagesCount: canonical.hasExplicitPages && canonical.pages > 0 ? canonical.pages : undefined,
           createdAt: new Date().toISOString()
         } as PlannerTask;
       });
@@ -545,25 +548,24 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
 
   // Manejador: Añadir recomendación de Ebbinghaus
   const handleAddEbbinghausReview = (topicId: string, dateStr: string) => {
-    const topic = topicMap.get(topicId);
-    if (!topic) return;
-    const estMins = estimateTaskDurationMinutes(topic, "repaso", recentSessions, settings);
+    const canonical = getCanonicalTopic(topicId, allTopics, userProgress, recentSessions);
+    const estMins = estimateTaskDurationMinutes(canonical, "repaso", recentSessions, settings);
     const newTask: PlannerTask = {
       id: `ebbinghaus-review-${topicId}-${Date.now()}`,
-      topicId: topic.id,
-      topicNumber: topic.number,
-      topicTitle: topic.title,
-      subjectId: topic.subjectId,
+      topicId: canonical.id,
+      topicNumber: canonical.number,
+      topicTitle: canonical.title,
+      subjectId: canonical.subjectId,
       activityType: "repaso",
       date: dateStr,
       status: "pending",
       estimatedMinutes: estMins,
-      pagesCount: topic.pages || 18,
+      pagesCount: canonical.hasExplicitPages && canonical.pages > 0 ? canonical.pages : undefined,
       notes: "Repaso sugerido por decaimiento de retención en la Curva de Ebbinghaus.",
       createdAt: new Date().toISOString()
     };
     persistTasks([...tasks, newTask]);
-    toast.success(`Repaso de T.${topic.number} programado para el ${dateStr}.`);
+    toast.success(`Repaso de T.${canonical.number} programado para el ${dateStr}.`);
   };
 
   // Manejador: Reubicar todas las tareas retrasadas a hoy
@@ -1275,7 +1277,11 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
                             </h4>
 
                             <div className="flex items-center gap-1.5 mt-1 text-[10px] text-slate-500 font-mono">
-                              <span>{task.pagesCount} págs</span>
+                              {task.pagesCount && task.pagesCount > 0 ? (
+                                <span>{task.pagesCount} págs</span>
+                              ) : (
+                                <span className="text-slate-400 italic">Págs sin registrar</span>
+                              )}
                               {task.notes && (
                                 <>
                                   <span>·</span>
@@ -1378,7 +1384,9 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
         initialDate={targetDateForNewTask}
         allTopics={allTopics}
         sessions={recentSessions}
+        userProgress={userProgress}
         settings={settings}
+        onUpdateTopicProgress={updateTopicProgress}
       />
 
       {/* B. Rebalance Confirm Modal (Regla: no modificar sin confirmación) */}

@@ -251,6 +251,11 @@ export const DashboardPreparadorExecutiveCard: React.FC<DashboardPreparadorExecu
                 <span className="font-sans font-medium text-slate-500 max-w-[120px] truncate">
                   {t.title.replace(/^tema\s*\d+[\s:.-]*/i, "")}
                 </span>
+                {(userProgress[t.id]?.pages || t.pages) ? (
+                  <span className="text-[9px] text-slate-400 font-normal">
+                    ({userProgress[t.id]?.pages || t.pages}p)
+                  </span>
+                ) : null}
               </span>
             ))}
             {assignedTopics.length > 8 && (
