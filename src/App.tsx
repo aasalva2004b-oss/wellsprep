@@ -21,13 +21,27 @@ import { motion, AnimatePresence } from "motion/react";
 import { useAeroFocusSync } from "./hooks/useAeroFocusSync";
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<"planificador" | "preparador" | "temario" | "dashboard">("planificador");
+  const [activeTab, setActiveTab] = useState<"planificador" | "temario" | "dashboard">("planificador");
+  const [plannerSubView, setPlannerSubView] = useState<any>("semana_completa");
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isSyncCenterOpen, setIsSyncCenterOpen] = useState(false);
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
   const [isQuarantineDismissed, setIsQuarantineDismissed] = useState(false);
   const { user, quarantinedEvents = [], addQuarantineEventManually } = useFirebase();
+
+  // Enrutador unificado para pestañas y sub-vistas del planificador
+  const handleNavigateTab = (tab: "planificador" | "preparador" | "temario" | "dashboard", subView?: any) => {
+    if (tab === "preparador") {
+      setPlannerSubView(subView || "lunes");
+      setActiveTab("planificador");
+    } else if (tab === "planificador") {
+      if (subView) setPlannerSubView(subView);
+      setActiveTab("planificador");
+    } else {
+      setActiveTab(tab);
+    }
+  };
 
   // Escucha universal en tiempo real de AeroFocus Pro (BroadcastChannel + Heartbeat 15s)
   useAeroFocusSync(async (session) => {
@@ -132,15 +146,9 @@ export default function App() {
           <nav className="flex-1 px-3.5 py-2 space-y-1.5 overflow-y-auto min-w-[16rem] no-scrollbar">
             <NavItem
               icon={<Calendar size={17} strokeWidth={2.3} />}
-              label="Planificador Semanal"
+              label="Planificador & Cantes"
               active={activeTab === "planificador"}
               onClick={() => { playSound.click(); setActiveTab("planificador"); }}
-            />
-            <NavItem
-              icon={<Award size={17} strokeWidth={2.3} />}
-              label="Preparador & Cantes (L/J)"
-              active={activeTab === "preparador"}
-              onClick={() => { playSound.click(); setActiveTab("preparador"); }}
             />
             <NavItem
               icon={<BookOpen size={17} strokeWidth={2.3} />}
@@ -150,7 +158,7 @@ export default function App() {
             />
             <NavItem
               icon={<ActivitySquare size={17} strokeWidth={2.3} />}
-              label="Dashboard & Cantes"
+              label="Dashboard & Métricas"
               active={activeTab === "dashboard"}
               onClick={() => { playSound.click(); setActiveTab("dashboard"); }}
             />
@@ -266,13 +274,11 @@ export default function App() {
                 animate={{ opacity: 1, scale: 1 }}
                 exit={{ opacity: 0, scale: 0.99 }}
                 transition={{ duration: 0.2, ease: [0.23, 1, 0.32, 1] }}
-                className="w-full h-full absolute inset-0 overflow-y-auto p-3 sm:p-6 md:p-8"
+                className="w-full h-full absolute inset-0"
               >
-                <WeeklyPlannerView
-                  allTopics={initialTopics}
-                  onOpenPreparadorSession={(day) => {
-                    setActiveTab("preparador");
-                  }}
+                <PreparadorView
+                  initialView={plannerSubView}
+                  onSubViewChange={setPlannerSubView}
                 />
               </motion.div>
             )}
@@ -286,7 +292,7 @@ export default function App() {
                 className="w-full h-full absolute inset-0"
               >
                 <DashboardView 
-                  onNavigateTab={setActiveTab}
+                  onNavigateTab={(tab) => handleNavigateTab(tab)}
                   onSelectTopic={handleSelectTopicFromPalette}
                 />
               </motion.div>
@@ -307,18 +313,6 @@ export default function App() {
                 />
               </motion.div>
             )}
-            {activeTab === "preparador" && (
-              <motion.div
-                key="preparador"
-                initial={{ opacity: 0, scale: 0.99 }}
-                animate={{ opacity: 1, scale: 1 }}
-                exit={{ opacity: 0, scale: 0.99 }}
-                transition={{ duration: 0.2, ease: [0.23, 1, 0.32, 1] }}
-                className="w-full h-full absolute inset-0"
-              >
-                <PreparadorView />
-              </motion.div>
-            )}
           </AnimatePresence>
         </div>
       </main>
@@ -330,24 +324,13 @@ export default function App() {
       >
         <MobileNavItem
           icon={<Calendar size={18} strokeWidth={activeTab === "planificador" && !isSyncCenterOpen && !isSettingsOpen ? 2.5 : 2} />}
-          label="Semana"
+          label="Plan & Cantes"
           active={activeTab === "planificador" && !isSyncCenterOpen && !isSettingsOpen}
           onClick={() => {
             playSound.click();
             setIsSyncCenterOpen(false);
             setIsSettingsOpen(false);
             setActiveTab("planificador");
-          }}
-        />
-        <MobileNavItem
-          icon={<Award size={18} strokeWidth={activeTab === "preparador" && !isSyncCenterOpen && !isSettingsOpen ? 2.5 : 2} />}
-          label="Preparador"
-          active={activeTab === "preparador" && !isSyncCenterOpen && !isSettingsOpen}
-          onClick={() => {
-            playSound.click();
-            setIsSyncCenterOpen(false);
-            setIsSettingsOpen(false);
-            setActiveTab("preparador");
           }}
         />
         <MobileNavItem
@@ -363,7 +346,7 @@ export default function App() {
         />
         <MobileNavItem
           icon={<ActivitySquare size={18} strokeWidth={activeTab === "dashboard" && !isSyncCenterOpen && !isSettingsOpen ? 2.5 : 2} />}
-          label="Cantes"
+          label="Dashboard"
           active={activeTab === "dashboard" && !isSyncCenterOpen && !isSettingsOpen}
           onClick={() => {
             playSound.click();
@@ -401,7 +384,7 @@ export default function App() {
         onClose={() => setIsCommandPaletteOpen(false)}
         onSelectTopic={handleSelectTopicFromPalette}
         onSelectSubject={handleSelectSubjectFromPalette}
-        onNavigateTab={(tab) => setActiveTab(tab)}
+        onNavigateTab={(tab) => handleNavigateTab(tab)}
       />
 
       <AnimatePresence>

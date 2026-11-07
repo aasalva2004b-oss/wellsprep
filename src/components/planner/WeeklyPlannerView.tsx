@@ -36,7 +36,8 @@ import {
   RebalanceProposal,
   estimateTaskDurationMinutes
 } from "../../lib/plannerEngine";
-import { getCanonicalTopic } from "../../lib/canonicalTopicService";
+import { getCanonicalTopic, buildCanonicalTopicMap } from "../../lib/canonicalTopicService";
+import { buildLearnerProfile } from "../../lib/adaptiveLearningEngine";
 import { TaskEditorModal } from "./TaskEditorModal";
 import { RebalanceConfirmModal } from "./RebalanceConfirmModal";
 import { EbbinghausRecommendationsModal } from "./EbbinghausRecommendationsModal";
@@ -115,6 +116,12 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
     allTopics.forEach((t) => map.set(t.id, t));
     return map;
   }, [allTopics]);
+
+  // Perfil de aprendizaje empírico adaptativo
+  const learnerProfile = useMemo(() => {
+    const cMap = buildCanonicalTopicMap(allTopics, userProgress, recentSessions);
+    return buildLearnerProfile(recentSessions, cMap);
+  }, [allTopics, userProgress, recentSessions]);
 
   // Sincronizar tareas y configuración con Firestore
   useEffect(() => {
@@ -568,6 +575,68 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
     toast.success(`Repaso de T.${canonical.number} programado para el ${dateStr}.`);
   };
 
+  // Manejador: Planificar repasos de víspera para los temas del próximo cante
+  const handleSchedulePreCanteReviews = () => {
+    if (!nextCanteInfo || nextCanteInfo.tasks.length === 0) return;
+    playSound.click();
+
+    const targetDate = safeParseDate(nextCanteInfo.date);
+    if (!targetDate) return;
+
+    // Calcular días previos (1 y 2 días antes)
+    const eveDates: string[] = [];
+    const d1 = new Date(targetDate);
+    d1.setDate(targetDate.getDate() - 1);
+    eveDates.push(getLocalDateString(d1));
+
+    const d2 = new Date(targetDate);
+    d2.setDate(targetDate.getDate() - 2);
+    eveDates.push(getLocalDateString(d2));
+
+    const newTasks: PlannerTask[] = [];
+    let addedCount = 0;
+
+    nextCanteInfo.tasks.forEach((canteTask, idx) => {
+      const assignedEveDate = eveDates[idx % eveDates.length];
+      const alreadyScheduled = tasks.some(
+        (t) => t.topicId === canteTask.topicId &&
+               (t.date === assignedEveDate || t.date === nextCanteInfo.date) &&
+               t.activityType === "repaso"
+      );
+
+      if (!alreadyScheduled) {
+        const canonical = getCanonicalTopic(canteTask.topicId, allTopics, userProgress, recentSessions);
+        const estMins = estimateTaskDurationMinutes(canonical, "repaso", recentSessions, settings);
+        newTasks.push({
+          id: `pre-cante-repaso-${canteTask.topicId}-${assignedEveDate}-${Date.now()}-${idx}`,
+          topicId: canonical.id,
+          topicNumber: canonical.number,
+          topicTitle: canonical.title,
+          subjectId: canonical.subjectId,
+          activityType: "repaso",
+          date: assignedEveDate,
+          status: "pending",
+          estimatedMinutes: estMins,
+          pagesCount: canonical.hasExplicitPages && canonical.pages > 0 ? canonical.pages : undefined,
+          notes: `Repaso previo intensivo para el Cante de ${nextCanteInfo.dayName} ${nextCanteInfo.dayNumber}.`,
+          createdAt: new Date().toISOString()
+        });
+        addedCount++;
+      }
+    });
+
+    if (addedCount === 0) {
+      toast.info("Los temas de este cante ya tienen repasos previos planificados.");
+      return;
+    }
+
+    persistTasks([...tasks, ...newTasks]);
+    playSound.success();
+    toast.success(`¡${addedCount} repasos pre-cante añadidos a los días previos!`, {
+      description: `Distribuidos en las vísperas del cante de ${nextCanteInfo.dayName}.`
+    });
+  };
+
   // Manejador: Reubicar todas las tareas retrasadas a hoy
   const handleRescheduleDelayedTasks = () => {
     playSound.success();
@@ -910,16 +979,28 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
             )}
           </div>
 
-          {nextCanteInfo && onOpenPreparadorSession && (
-            <div className="mt-3.5 pt-3 border-t border-purple-500/20 flex items-center justify-between">
-              <span className="text-[11px] text-purple-300">¿Listo para cantar con el preparador?</span>
+          {nextCanteInfo && (
+            <div className="mt-3.5 pt-3 border-t border-purple-500/20 flex flex-wrap items-center justify-between gap-2">
               <button
                 type="button"
-                onClick={() => onOpenPreparadorSession(nextCanteInfo.canteKey)}
-                className="px-3 py-1 bg-white text-slate-900 hover:bg-purple-50 rounded-xl text-xs font-bold transition-all shadow-xs"
+                onClick={handleSchedulePreCanteReviews}
+                className="px-2.5 py-1 bg-purple-800/80 hover:bg-purple-700/90 text-purple-100 border border-purple-400/30 rounded-xl text-xs font-bold transition-all shadow-xs flex items-center gap-1.5"
+                title="Generar tareas de repaso en los días previos para asegurar estos temas antes del cante"
               >
-                Abrir Sesión de Cante
+                <Sparkles size={12} className="text-amber-300" />
+                <span>Repasos de Víspera</span>
               </button>
+
+              {onOpenPreparadorSession && (
+                <button
+                  type="button"
+                  onClick={() => onOpenPreparadorSession(nextCanteInfo.canteKey)}
+                  className="px-3 py-1 bg-white text-slate-900 hover:bg-purple-50 rounded-xl text-xs font-bold transition-all shadow-xs flex items-center gap-1.5"
+                >
+                  <Award size={13} className="text-purple-600" />
+                  <span>Cantar ante Preparador</span>
+                </button>
+              )}
             </div>
           )}
         </div>
@@ -966,7 +1047,7 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
                   Estudio Real
                 </span>
                 <span className="text-lg font-black font-serif text-indigo-950 block mt-0.5">
-                  {weekPlan.totalRealHours}h
+                  {weekPlan.totalActualHours}h
                 </span>
                 <span className="text-[10px] text-indigo-700/80 font-mono">
                   sincronizado
@@ -1002,6 +1083,31 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
                 </span>
               </div>
             </div>
+
+            {/* Ciclo de Aprendizaje Empírico & Calibración de Tiempos */}
+            {learnerProfile && (
+              <div className="mt-3 pt-2.5 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-600 flex-wrap gap-2">
+                <div className="flex items-center gap-1.5 font-mono">
+                  <span className="font-bold text-slate-800">Ritmo personal:</span>
+                  <span className="bg-blue-50 text-blue-800 px-1.5 py-0.2 rounded border border-blue-200">
+                    Estudio: {learnerProfile.studyPaceMinPerPage}m/p
+                  </span>
+                  <span className="bg-emerald-50 text-emerald-800 px-1.5 py-0.2 rounded border border-emerald-200">
+                    Repaso: {learnerProfile.reviewPaceMinPerPage}m/p
+                  </span>
+                  <span className="bg-orange-50 text-orange-800 px-1.5 py-0.2 rounded border border-orange-200">
+                    Refresco: {learnerProfile.refreshPaceMinPerPage}m/p
+                  </span>
+                </div>
+
+                {learnerProfile.predictionAccuracy && (
+                  <div className="flex items-center gap-1 text-[10px] font-mono font-bold text-indigo-700 bg-indigo-50/80 px-2 py-0.5 rounded-full border border-indigo-200">
+                    <span>Precisión modelo: {learnerProfile.predictionAccuracy.accuracyPct}%</span>
+                    <span>(±{learnerProfile.predictionAccuracy.meanAbsoluteErrorMinutes}m MAE)</span>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           {/* Progress Bar */}

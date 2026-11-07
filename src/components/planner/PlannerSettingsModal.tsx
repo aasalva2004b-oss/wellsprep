@@ -67,10 +67,10 @@ export const PlannerSettingsModal: React.FC<PlannerSettingsModalProps> = ({
         {/* Form Body */}
         <div className="flex-1 overflow-y-auto py-4 space-y-4">
           {/* 1. Meta Diaria de Horas */}
-          <div className="p-3.5 bg-slate-50 rounded-2xl border border-slate-200/80 space-y-1.5">
+          <div className="p-3.5 bg-slate-50 rounded-2xl border border-slate-200/80 space-y-2">
             <div className="flex items-center justify-between">
               <label className="text-xs font-bold text-slate-900">
-                Capacidad Máxima Diaria (Horas)
+                Capacidad Base Diaria (Horas)
               </label>
               <span className="text-xs font-mono font-black text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded-md border border-indigo-100">
                 {form.targetDailyHours}h
@@ -86,8 +86,54 @@ export const PlannerSettingsModal: React.FC<PlannerSettingsModalProps> = ({
               className="w-full accent-indigo-600"
             />
             <p className="text-[11px] text-slate-500">
-              Si la suma de tareas de un día supera este umbral, el sistema marcará el día como sobrecargado.
+              Si la suma de tareas de un día supera su umbral disponible, el sistema lo marcará como sobrecargado.
             </p>
+
+            {/* Ajuste personalizado por día de la semana */}
+            <div className="mt-3 pt-2.5 border-t border-slate-200">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 font-mono block mb-1.5">
+                Disponibilidad por Día (Modificaciones Excepcionales)
+              </span>
+              <div className="grid grid-cols-7 gap-1 text-center">
+                {[
+                  { key: "1", label: "L" },
+                  { key: "2", label: "M" },
+                  { key: "3", label: "X" },
+                  { key: "4", label: "J" },
+                  { key: "5", label: "V" },
+                  { key: "6", label: "S" },
+                  { key: "0", label: "D" }
+                ].map(({ key, label }) => {
+                  const currentVal = form.dailyAvailabilityOverrides?.[key] !== undefined 
+                    ? form.dailyAvailabilityOverrides[key] 
+                    : form.targetDailyHours;
+                  return (
+                    <div key={key} className="bg-white p-1 rounded-xl border border-slate-200">
+                      <span className="text-[10px] font-mono font-bold block text-slate-500">{label}</span>
+                      <input
+                        type="number"
+                        step={0.5}
+                        min={0}
+                        max={14}
+                        value={currentVal}
+                        onChange={(e) => {
+                          const val = parseFloat(e.target.value);
+                          const updated = { ...(form.dailyAvailabilityOverrides || {}) };
+                          if (isNaN(val)) {
+                            delete updated[key];
+                          } else {
+                            updated[key] = val;
+                          }
+                          setForm({ ...form, dailyAvailabilityOverrides: updated });
+                        }}
+                        className="w-full text-center text-xs font-mono font-bold text-slate-900 border-0 p-0 focus:outline-hidden"
+                      />
+                      <span className="text-[8px] font-mono text-slate-400 block">h</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
           </div>
 
           {/* 2. Velocidades en Minutos por Página */}

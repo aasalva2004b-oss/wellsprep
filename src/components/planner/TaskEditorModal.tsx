@@ -60,6 +60,16 @@ export const TaskEditorModal: React.FC<TaskEditorModalProps> = ({
   const [isEditingPagesInline, setIsEditingPagesInline] = useState(false);
   const [inlinePagesInput, setInlinePagesInput] = useState<string>("");
 
+  const [isPartialMode, setIsPartialMode] = useState<boolean>(
+    Boolean(initialTask?.fromPage !== undefined && initialTask?.toPage !== undefined)
+  );
+  const [fromPageInput, setFromPageInput] = useState<string>(
+    initialTask?.fromPage !== undefined ? String(initialTask.fromPage) : "1"
+  );
+  const [toPageInput, setToPageInput] = useState<string>(
+    initialTask?.toPage !== undefined ? String(initialTask.toPage) : ""
+  );
+
   // Map canónico de todos los temas con fuente de verdad única
   const canonicalMap = useMemo(() => {
     return buildCanonicalTopicMap(allTopics, userProgress, sessions);
@@ -69,12 +79,23 @@ export const TaskEditorModal: React.FC<TaskEditorModalProps> = ({
     return getCanonicalTopic(selectedTopicId, allTopics, userProgress, sessions);
   }, [selectedTopicId, allTopics, userProgress, sessions]);
 
+  // Rango parcial activo
+  const partialWork = useMemo(() => {
+    if (!isPartialMode) return undefined;
+    const f = parseInt(fromPageInput, 10);
+    const t = parseInt(toPageInput, 10);
+    if (!isNaN(f) && !isNaN(t) && t >= f && f >= 1) {
+      return { fromPage: f, toPage: t };
+    }
+    return undefined;
+  }, [isPartialMode, fromPageInput, toPageInput]);
+
   // Cálculo adaptativo con explicación transparente
   const adaptiveDetails = useMemo(() => {
-    return estimateTaskAdaptiveDetails(selectedCanonicalTopic, activityType, sessions, settings);
-  }, [selectedCanonicalTopic, activityType, sessions, settings]);
+    return estimateTaskAdaptiveDetails(selectedCanonicalTopic, activityType, sessions, settings, undefined, userProgress, partialWork);
+  }, [selectedCanonicalTopic, activityType, sessions, settings, userProgress, partialWork]);
 
-  const autoEstimatedMinutes = adaptiveDetails.minutes;
+  const autoEstimatedMinutes = adaptiveDetails.estimatedMinutes;
   const finalEstimatedMinutes = customMinutes !== null ? customMinutes : autoEstimatedMinutes;
 
   // Lista única de materias para pestañas rápidas
@@ -119,6 +140,10 @@ export const TaskEditorModal: React.FC<TaskEditorModalProps> = ({
   const handleSave = () => {
     if (!selectedCanonicalTopic) return;
     playSound.success();
+    const effectivePages = partialWork
+      ? (partialWork.toPage - partialWork.fromPage + 1)
+      : (selectedCanonicalTopic.pages > 0 ? selectedCanonicalTopic.pages : undefined);
+
     onSaveTask({
       id: initialTask?.id,
       topicId: selectedCanonicalTopic.id,
@@ -129,7 +154,9 @@ export const TaskEditorModal: React.FC<TaskEditorModalProps> = ({
       date,
       status: initialTask?.status || "pending",
       estimatedMinutes: finalEstimatedMinutes,
-      pagesCount: selectedCanonicalTopic.pages > 0 ? selectedCanonicalTopic.pages : undefined,
+      pagesCount: effectivePages,
+      fromPage: partialWork?.fromPage,
+      toPage: partialWork?.toPage,
       notes: notes.trim() || undefined
     });
     onClose();
@@ -364,6 +391,70 @@ export const TaskEditorModal: React.FC<TaskEditorModalProps> = ({
                         Cancelar
                       </button>
                     </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Selector de Estudio Completo vs Páginas Parciales */}
+            {selectedCanonicalTopic.hasExplicitPages && selectedCanonicalTopic.pages > 1 && (
+              <div className="mt-2.5 p-2.5 bg-slate-100/70 rounded-2xl border border-slate-200/70 text-xs">
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-slate-800">
+                    ¿Estudiar tema completo o bloque de páginas?
+                  </span>
+                  <div className="flex items-center gap-1 bg-white p-0.5 rounded-lg border border-slate-200">
+                    <button
+                      type="button"
+                      onClick={() => setIsPartialMode(false)}
+                      className={cn(
+                        "px-2 py-0.5 rounded-md text-[10px] font-bold transition-all",
+                        !isPartialMode ? "bg-slate-900 text-white shadow-2xs" : "text-slate-600 hover:text-slate-900"
+                      )}
+                    >
+                      Completo ({selectedCanonicalTopic.pages}p)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsPartialMode(true);
+                        if (!toPageInput) {
+                          setToPageInput(String(Math.min(selectedCanonicalTopic.pages, 4)));
+                        }
+                      }}
+                      className={cn(
+                        "px-2 py-0.5 rounded-md text-[10px] font-bold transition-all",
+                        isPartialMode ? "bg-indigo-600 text-white shadow-2xs" : "text-slate-600 hover:text-slate-900"
+                      )}
+                    >
+                      Páginas Parciales
+                    </button>
+                  </div>
+                </div>
+
+                {isPartialMode && (
+                  <div className="mt-2 pt-2 border-t border-slate-200/80 flex items-center gap-2 flex-wrap">
+                    <span className="text-[11px] text-slate-600 font-medium">De página:</span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={selectedCanonicalTopic.pages}
+                      value={fromPageInput}
+                      onChange={(e) => setFromPageInput(e.target.value)}
+                      className="w-16 px-2 py-1 bg-white border border-slate-300 rounded-lg text-xs font-mono font-bold text-slate-900 text-center"
+                    />
+                    <span className="text-[11px] text-slate-600 font-medium">a página:</span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={selectedCanonicalTopic.pages}
+                      value={toPageInput}
+                      onChange={(e) => setToPageInput(e.target.value)}
+                      className="w-16 px-2 py-1 bg-white border border-slate-300 rounded-lg text-xs font-mono font-bold text-slate-900 text-center"
+                    />
+                    <span className="text-[10px] font-mono font-bold text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded border border-indigo-100 ml-auto">
+                      {partialWork ? `${partialWork.toPage - partialWork.fromPage + 1} de ${selectedCanonicalTopic.pages} págs` : "Rango inválido"}
+                    </span>
                   </div>
                 )}
               </div>

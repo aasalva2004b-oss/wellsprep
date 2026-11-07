@@ -35,6 +35,21 @@ export interface LearnerProfile {
       samplesCount: number;
     }
   >;
+
+  // Métricas avanzadas PLSEMA aprendidas del usuario
+  plsemaProfile?: {
+    dominantPhase: string;
+    activeRecallRatio: number; // % M + A
+    phaseAverages: Record<string, number>; // minutos medios por fase
+  };
+
+  // Evaluación y calibración empírica de predicciones (MAE / Precisión)
+  predictionAccuracy?: {
+    totalEvaluatedSessions: number;
+    meanAbsoluteErrorMinutes: number; // Error medio absoluto
+    accuracyPct: number; // % de precisión (100 - error relativo)
+    sampleConfidence: "alta" | "media" | "provisional";
+  };
 }
 
 export interface AdaptiveDurationEstimate {
@@ -43,6 +58,10 @@ export interface AdaptiveDurationEstimate {
   explanation: string;
   paceMinPerPage: number;
   pagesUsed: number;
+  totalPages: number;
+  fromPage?: number;
+  toPage?: number;
+  isPartialStudy: boolean;
   hasExplicitPages: boolean;
   isCustomSpeed: boolean;
   details: {
@@ -50,6 +69,7 @@ export interface AdaptiveDurationEstimate {
     difficultyAdjustmentMinutes: number;
     vueltaAdjustmentMinutes: number;
     decayAdjustmentMinutes: number;
+    plsemaAdjustmentMinutes?: number;
   };
 }
 
@@ -120,9 +140,44 @@ export function buildLearnerProfile(
   const subjectStudyMap: Record<string, number[]> = {};
   const subjectReviewMap: Record<string, number[]> = {};
 
+  // 1. Análisis de sesiones PLSEMA registradas
+  const plsemaPhasesTotals: Record<string, { totalMinutes: number; count: number }> = {
+    prelectura: { totalMinutes: 0, count: 0 },
+    lectura: { totalMinutes: 0, count: 0 },
+    subrayado: { totalMinutes: 0, count: 0 },
+    esquema: { totalMinutes: 0, count: 0 },
+    memorizar: { totalMinutes: 0, count: 0 },
+    cantar: { totalMinutes: 0, count: 0 }
+  };
+  let activeRecallMinutesSum = 0;
+  let plsemaMinutesSum = 0;
+
+  // 2. Rastreo de calibración y error de estimación (MAE)
+  let sumPredictionErrors = 0;
+  let evaluatedPredictionCount = 0;
+
   validSessions.forEach((s) => {
     const mins = Number(s.durationMinutes || (s as any).duration || 0);
     totalMinutesAll += mins;
+
+    // Procesar datos PLSEMA si existen
+    const plsema = (s as any).plsema || (s as any).fasesPlsema;
+    if (plsema && typeof plsema === "object") {
+      const pm = plsema.minutes || plsema;
+      if (pm) {
+        Object.keys(plsemaPhasesTotals).forEach((ph) => {
+          const phMins = Number(pm[ph] || pm[`minutos${ph.charAt(0).toUpperCase() + ph.slice(1)}`] || 0);
+          if (phMins > 0) {
+            plsemaPhasesTotals[ph].totalMinutes += phMins;
+            plsemaPhasesTotals[ph].count++;
+            plsemaMinutesSum += phMins;
+            if (ph === "memorizar" || ph === "cantar") {
+              activeRecallMinutesSum += phMins;
+            }
+          }
+        });
+      }
+    }
 
     const topic = canonicalTopicMap.get(s.topicId);
     const pages = topic?.pages && topic.pages > 0 ? topic.pages : null;
@@ -154,6 +209,13 @@ export function buildLearnerProfile(
           }
         }
       }
+    }
+
+    // Comprobar si la sesión tenía tiempo previsto para calcular MAE
+    const estMins = Number((s as any).estimatedMinutes || (s as any).tiempoEstimado || 0);
+    if (estMins > 0 && mins > 0) {
+      sumPredictionErrors += Math.abs(mins - estMins);
+      evaluatedPredictionCount++;
     }
 
     if (isCanto && words && words > 0) {
@@ -198,6 +260,28 @@ export function buildLearnerProfile(
     };
   });
 
+  // Perfil PLSEMA consolidado
+  let dominantPhase = "lectura";
+  let maxPhaseMins = 0;
+  const phaseAverages: Record<string, number> = {};
+  Object.entries(plsemaPhasesTotals).forEach(([phase, val]) => {
+    const avg = val.count > 0 ? Math.round(val.totalMinutes / val.count) : 0;
+    phaseAverages[phase] = avg;
+    if (val.totalMinutes > maxPhaseMins) {
+      maxPhaseMins = val.totalMinutes;
+      dominantPhase = phase;
+    }
+  });
+  const activeRecallRatio = plsemaMinutesSum > 0 
+    ? Math.round((activeRecallMinutesSum / plsemaMinutesSum) * 100) 
+    : 35;
+
+  // Calibración y Error medio absoluto de predicción
+  const meanAbsoluteErrorMinutes = evaluatedPredictionCount > 0 
+    ? Math.round((sumPredictionErrors / evaluatedPredictionCount) * 10) / 10 
+    : 12.0;
+  const accuracyPct = Math.max(60, Math.min(98, Math.round(100 - (meanAbsoluteErrorMinutes / 45) * 100)));
+
   return {
     hasSufficientData: validSessions.length >= 5,
     totalRecordedSessionsCount: validSessions.length,
@@ -213,19 +297,32 @@ export function buildLearnerProfile(
     difficultySensitivity: 0.08, // +8% por cada punto sobre dificultad 5
     vueltaSpeedupFactor: 0.88,   // -12% tiempo por vuelta
     decayDelayPenaltyPerDay: 0.25,
-    subjectPaces
+    subjectPaces,
+    plsemaProfile: {
+      dominantPhase,
+      activeRecallRatio,
+      phaseAverages
+    },
+    predictionAccuracy: {
+      totalEvaluatedSessions: evaluatedPredictionCount,
+      meanAbsoluteErrorMinutes,
+      accuracyPct,
+      sampleConfidence: evaluatedPredictionCount >= 10 ? "alta" : evaluatedPredictionCount >= 3 ? "media" : "provisional"
+    }
   };
 }
 
 /**
  * Calcula la estimación de duración adaptativa y justificada para una tarea específica.
- * NUNCA inventa 20 páginas arbitrarias: utiliza los datos reales del tema.
+ * NUNCA inventa 20 páginas arbitrarias: utiliza los datos reales del tema y soporta
+ * páginas parciales exactas (ej: de pág 4 a 6 en vez del tema entero de 6).
  */
 export function estimateAdaptiveDuration(
   topic: CanonicalTopic | undefined,
   activityType: "estudio_nuevo" | "refresco" | "repaso" | "cante",
   profile: LearnerProfile,
-  refrescoIndex?: 1 | 2 | 3
+  refrescoIndex?: 1 | 2 | 3,
+  partialWork?: { fromPage?: number; toPage?: number; targetPages?: number }
 ): AdaptiveDurationEstimate {
   // Caso de cante oral: tiempo reglamentario + lectura previa
   if (activityType === "cante") {
@@ -235,6 +332,8 @@ export function estimateAdaptiveDuration(
       explanation: "30 min reglamentarios (12:30 cante cronometrado + 17:30 preparación y lectura previa)",
       paceMinPerPage: 0,
       pagesUsed: topic?.pages || 0,
+      totalPages: topic?.pages || 0,
+      isPartialStudy: false,
       hasExplicitPages: Boolean(topic?.hasExplicitPages),
       isCustomSpeed: false,
       details: {
@@ -254,6 +353,8 @@ export function estimateAdaptiveDuration(
       explanation: "Estimación base provisional sin tema asignado",
       paceMinPerPage: profile.reviewPaceMinPerPage,
       pagesUsed: 0,
+      totalPages: 0,
+      isPartialStudy: false,
       hasExplicitPages: false,
       isCustomSpeed: false,
       details: {
@@ -265,10 +366,24 @@ export function estimateAdaptiveDuration(
     };
   }
 
-  const pages = topic.pages > 0 ? topic.pages : 0;
+  const totalPages = topic.pages > 0 ? topic.pages : 0;
   const hasPages = topic.hasExplicitPages;
   const difficulty = topic.difficulty || 5;
   const vueltas = topic.vueltas || 0;
+
+  // Determinar páginas efectivas (trabajo parcial vs tema completo)
+  let pagesToStudy = totalPages;
+  let isPartial = false;
+  let fromP = partialWork?.fromPage;
+  let toP = partialWork?.toPage;
+
+  if (partialWork?.targetPages !== undefined && partialWork.targetPages > 0) {
+    pagesToStudy = Math.min(totalPages > 0 ? totalPages : 999, partialWork.targetPages);
+    isPartial = totalPages > 0 && pagesToStudy < totalPages;
+  } else if (fromP !== undefined && toP !== undefined && toP >= fromP) {
+    pagesToStudy = toP - fromP + 1;
+    isPartial = totalPages > 0 && pagesToStudy < totalPages;
+  }
 
   // Modulador de dificultad empírico
   const difficultyMultiplier = 1 + (difficulty - 5) * profile.difficultySensitivity;
@@ -282,9 +397,9 @@ export function estimateAdaptiveDuration(
     if (refrescoIndex === 1) baseMins = profile.refresh1DurationMin;
     if (refrescoIndex === 3) baseMins = profile.refresh3DurationMin;
 
-    if (hasPages && pages > 0) {
+    if (hasPages && pagesToStudy > 0) {
       // Ajustar por volumen real si el tema es especialmente extenso o breve
-      const volumeAdjusted = pages * profile.refreshPaceMinPerPage * difficultyMultiplier;
+      const volumeAdjusted = pagesToStudy * profile.refreshPaceMinPerPage * difficultyMultiplier;
       baseMins = Math.round((baseMins + volumeAdjusted) / 2);
     }
 
@@ -293,10 +408,14 @@ export function estimateAdaptiveDuration(
       estimatedMinutes: finalMins,
       confidence: profile.hasSufficientData ? "alta" : "media",
       explanation: hasPages 
-        ? `Refresco ${refrescoIndex || 1}/3 adaptado a ${pages} págs reales (dificultad ${difficulty})`
+        ? `Refresco ${refrescoIndex || 1}/3 adaptado a ${pagesToStudy} págs reales (dificultad ${difficulty})`
         : `Refresco ${refrescoIndex || 1}/3 con duración estándar personalizada (~${finalMins} min)`,
       paceMinPerPage: profile.refreshPaceMinPerPage,
-      pagesUsed: pages,
+      pagesUsed: pagesToStudy,
+      totalPages,
+      fromPage: fromP,
+      toPage: toP,
+      isPartialStudy: isPartial,
       hasExplicitPages: hasPages,
       isCustomSpeed: profile.hasSufficientData,
       details: {
@@ -325,25 +444,33 @@ export function estimateAdaptiveDuration(
   let explanation: string;
   let confidence: "alta" | "media" | "provisional" = "media";
 
-  if (hasPages && pages > 0) {
-    // Cálculo basado en la volumetría exacta del tema
-    const rawVolumeMins = pages * paceMinPerPage;
+  if (hasPages && pagesToStudy > 0) {
+    // Cálculo basado en la volumetría exacta del trabajo a realizar
+    const rawVolumeMins = pagesToStudy * paceMinPerPage;
     const diffMins = rawVolumeMins * (difficultyMultiplier - 1);
     const vueltaMins = activityType === "repaso" ? rawVolumeMins * (vueltaMultiplier - 1) : 0;
     
-    finalMinutes = Math.max(20, Math.round((rawVolumeMins + diffMins + vueltaMins)));
+    finalMinutes = Math.max(15, Math.round((rawVolumeMins + diffMins + vueltaMins)));
     confidence = isCustom ? "alta" : "media";
 
-    const activityLabel = activityType === "estudio_nuevo" ? "primer estudio" : "repaso";
-    const vueltaText = vueltas > 0 && activityType === "repaso" ? ` · Vuelta ${vueltas} (${Math.round((1 - vueltaMultiplier) * 100)}% de aceleración)` : "";
-    explanation = `Basado en ${pages} págs reales a tu ritmo de ${paceMinPerPage} min/pág (dif. ${difficulty})${vueltaText}`;
+    const partialText = isPartial 
+      ? ` (${pagesToStudy} de ${totalPages} págs${fromP ? `, págs ${fromP}-${toP}` : ""})` 
+      : ` (${pagesToStudy} págs completas)`;
+    const vueltaText = vueltas > 0 && activityType === "repaso" 
+      ? ` · Vuelta ${vueltas} (${Math.round((1 - vueltaMultiplier) * 100)}% aceleración)` 
+      : "";
+    explanation = `Basado en ${pagesToStudy} págs a tu ritmo histórico de ${paceMinPerPage} min/pág (dif. ${difficulty})${partialText}${vueltaText}`;
 
     return {
       estimatedMinutes: finalMinutes,
       confidence,
       explanation,
       paceMinPerPage,
-      pagesUsed: pages,
+      pagesUsed: pagesToStudy,
+      totalPages,
+      fromPage: fromP,
+      toPage: toP,
+      isPartialStudy: isPartial,
       hasExplicitPages: true,
       isCustomSpeed: isCustom,
       details: {
@@ -364,6 +491,8 @@ export function estimateAdaptiveDuration(
       explanation: `Tema sin páginas medidas registradas. Estimación provisional prudente (${finalMinutes}m). Puedes registrar sus páginas en la ficha del tema.`,
       paceMinPerPage,
       pagesUsed: 0,
+      totalPages: 0,
+      isPartialStudy: false,
       hasExplicitPages: false,
       isCustomSpeed: false,
       details: {

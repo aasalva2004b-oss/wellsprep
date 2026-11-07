@@ -3,8 +3,8 @@ import { X, Brain, Plus, AlertCircle, TrendingDown, Clock, Check, Mic, Sparkles 
 import { Topic } from "../../types";
 import { TopicProgressData } from "../../lib/prediction";
 import { evaluateTopicPreparation } from "../../lib/preparationScore";
-import { getCanonicalTopic, CanonicalTopic } from "../../lib/canonicalTopicService";
-import { calculateAdaptiveRetention } from "../../lib/adaptiveLearningEngine";
+import { getCanonicalTopic, buildCanonicalTopicMap, CanonicalTopic } from "../../lib/canonicalTopicService";
+import { calculateAdaptiveRetention, buildLearnerProfile } from "../../lib/adaptiveLearningEngine";
 import { sessionMatchesTopic } from "../../lib/cantoUtils";
 import { safeParseDate, cn } from "../../lib/utils";
 import { playSound } from "../../lib/sound";
@@ -36,6 +36,9 @@ export const EbbinghausRecommendationsModal: React.FC<EbbinghausRecommendationsM
 
   // Analizar todos los temas con el motor adaptativo de Ebbinghaus
   const urgentTopics = useMemo(() => {
+    const canonicalMap = buildCanonicalTopicMap(allTopics, userProgress, recentSessions);
+    const profile = buildLearnerProfile(recentSessions, canonicalMap);
+
     const list: Array<{
       canonical: CanonicalTopic;
       retentionPct: number;
@@ -52,8 +55,8 @@ export const EbbinghausRecommendationsModal: React.FC<EbbinghausRecommendationsM
       const sessions = recentSessions.filter((s) => sessionMatchesTopic(s, topic));
       if (!prog && sessions.length === 0) continue;
 
-      const canonical = getCanonicalTopic(topic.id, allTopics, userProgress, recentSessions);
-      const adaptive = calculateAdaptiveRetention(canonical, recentSessions, prog);
+      const canonical = canonicalMap.get(topic.id) || getCanonicalTopic(topic.id, allTopics, userProgress, recentSessions);
+      const adaptive = calculateAdaptiveRetention(canonical, recentSessions, profile);
 
       const daysSinceTouch = adaptive.daysSinceLastTouch;
       const activeRetrieval = adaptive.evidenceLevel === "canto_evaluado";

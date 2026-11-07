@@ -103,6 +103,8 @@ export interface PlannerSettings {
   refresco1DuracionMinutos: number; // Por defecto: 45 min
   refresco2DuracionMinutos: number; // Por defecto: 35 min
   refresco3DuracionMinutos: number; // Por defecto: 25 min
+  // Disponibilidad específica por día de la semana o fecha (0=Dom, 1=Lun, ..., 6=Sáb) o clave ISO "YYYY-MM-DD"
+  dailyAvailabilityOverrides?: Record<string, number>;
 }
 
 export const DEFAULT_PLANNER_SETTINGS: PlannerSettings = {
@@ -113,7 +115,8 @@ export const DEFAULT_PLANNER_SETTINGS: PlannerSettings = {
   duracionEstimadaCantePorTemaMinutos: 30,
   refresco1DuracionMinutos: 45,
   refresco2DuracionMinutos: 35,
-  refresco3DuracionMinutos: 25
+  refresco3DuracionMinutos: 25,
+  dailyAvailabilityOverrides: {}
 };
 
 export const ACTIVITY_CONFIG: Record<
@@ -173,8 +176,8 @@ export const ACTIVITY_CONFIG: Record<
 
 /**
  * Calcula el tiempo estimado (en minutos) para una actividad y tema específicos,
- * integrando la Fuente Única de Verdad (páginas y palabras reales del tema)
- * y el perfil de aprendizaje empírico del opositor.
+ * integrando la Fuente Única de Verdad (páginas y palabras reales del tema),
+ * el soporte para estudio de páginas parciales y el perfil de aprendizaje empírico.
  */
 export function estimateTaskDurationMinutes(
   topic: Topic | CanonicalTopic | undefined,
@@ -182,7 +185,8 @@ export function estimateTaskDurationMinutes(
   sessions: Session[] = [],
   settings: PlannerSettings = DEFAULT_PLANNER_SETTINGS,
   refrescoIndex?: 1 | 2 | 3,
-  userProgress: Record<string, TopicProgressData> = {}
+  userProgress: Record<string, TopicProgressData> = {},
+  partialWork?: { fromPage?: number; toPage?: number; targetPages?: number }
 ): number {
   if (!topic) {
     if (activityType === "cante") return settings.duracionEstimadaCantePorTemaMinutos;
@@ -211,7 +215,7 @@ export function estimateTaskDurationMinutes(
     profile.refreshPaceMinPerPage = settings.velocidadRefrescoMinPorPagina;
   }
 
-  const estimate = estimateAdaptiveDuration(canonical, activityType, profile, refrescoIndex);
+  const estimate = estimateAdaptiveDuration(canonical, activityType, profile, refrescoIndex, partialWork);
   return estimate.estimatedMinutes;
 }
 
@@ -224,7 +228,8 @@ export function estimateTaskAdaptiveDetails(
   sessions: Session[] = [],
   settings: PlannerSettings = DEFAULT_PLANNER_SETTINGS,
   refrescoIndex?: 1 | 2 | 3,
-  userProgress: Record<string, TopicProgressData> = {}
+  userProgress: Record<string, TopicProgressData> = {},
+  partialWork?: { fromPage?: number; toPage?: number; targetPages?: number }
 ): AdaptiveDurationEstimate {
   if (!topic) {
     return {
@@ -233,6 +238,8 @@ export function estimateTaskAdaptiveDetails(
       explanation: "Sin tema seleccionado",
       paceMinPerPage: 3.5,
       pagesUsed: 0,
+      totalPages: 0,
+      isPartialStudy: false,
       hasExplicitPages: false,
       isCustomSpeed: false,
       details: { baseVolumeMinutes: 45, difficultyAdjustmentMinutes: 0, vueltaAdjustmentMinutes: 0, decayAdjustmentMinutes: 0 }
@@ -247,7 +254,7 @@ export function estimateTaskAdaptiveDetails(
   canonicalMap.set(canonical.id, canonical);
   const profile = buildLearnerProfile(sessions, canonicalMap);
 
-  return estimateAdaptiveDuration(canonical, activityType, profile, refrescoIndex);
+  return estimateAdaptiveDuration(canonical, activityType, profile, refrescoIndex, partialWork);
 }
 
 /**
@@ -403,8 +410,20 @@ export function buildWeekPlan(
       ? Math.round((completedCount / processedTasks.length) * 100) 
       : 0;
 
-    const isOverloaded = dayEstMins > targetDailyMinutes;
-    const overloadMinutes = Math.max(0, dayEstMins - targetDailyMinutes);
+    // Disponibilidad diaria específica (overrides por día de semana o fecha ISO)
+    const dayOfWeekIndex = d.getDay(); // 0 Dom, 1 Lun, ...
+    let daySpecificHours = settings.targetDailyHours;
+    if (settings.dailyAvailabilityOverrides) {
+      if (settings.dailyAvailabilityOverrides[dateStr] !== undefined) {
+        daySpecificHours = settings.dailyAvailabilityOverrides[dateStr];
+      } else if (settings.dailyAvailabilityOverrides[String(dayOfWeekIndex)] !== undefined) {
+        daySpecificHours = settings.dailyAvailabilityOverrides[String(dayOfWeekIndex)];
+      }
+    }
+    const dayTargetDailyMinutes = Math.round(daySpecificHours * 60);
+
+    const isOverloaded = dayEstMins > dayTargetDailyMinutes;
+    const overloadMinutes = Math.max(0, dayEstMins - dayTargetDailyMinutes);
     if (isOverloaded) overloadedDaysCount++;
 
     totalWeekEstMins += dayEstMins;
@@ -429,7 +448,7 @@ export function buildWeekPlan(
       tasks: processedTasks,
       totalEstimatedMinutes: dayEstMins,
       totalActualMinutes: dayActMins,
-      targetDailyMinutes,
+      targetDailyMinutes: dayTargetDailyMinutes,
       isOverloaded,
       overloadMinutes,
       completedTasksCount: completedCount,

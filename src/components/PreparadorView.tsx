@@ -678,10 +678,10 @@ export function PreparadorView({
               </div>
               <div>
                 <h1 className="text-base sm:text-lg font-black text-slate-900 tracking-tight font-serif truncate">
-                  Centro de Mando del Preparador & Agenda
+                  Planificador & Centro de Cantes
                 </h1>
                 <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider hidden sm:block">
-                  Sesiones L/J · Curva Ebbinghaus · Telemetría 12:30
+                  Semana 7 Días · Sesiones L/J · Curva Ebbinghaus · Telemetría 12:30
                 </p>
               </div>
             </div>
