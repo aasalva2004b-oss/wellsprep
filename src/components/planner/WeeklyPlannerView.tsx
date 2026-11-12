@@ -20,7 +20,8 @@ import {
   RefreshCw,
   Layers,
   ChevronDown,
-  Info
+  Info,
+  Search
 } from "lucide-react";
 import { Topic, Session } from "../../types";
 import { TopicProgressData } from "../../lib/prediction";
@@ -652,40 +653,74 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
 
   return (
     <div className="space-y-4 max-w-[105rem] mx-auto w-full pb-32">
-      {/* 1. TOP HEADER & CONTROLS BAR */}
+      {/* 1. TOP EXECUTIVE COMMAND BAR & CONTROLS */}
       <div className="bg-white/95 backdrop-blur-xl border border-slate-200/90 rounded-3xl p-4 sm:p-5 shadow-xs">
-        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-          {/* Logo & Week Range */}
-          <div className="flex items-start sm:items-center gap-3.5">
-            <div className="w-11 h-11 rounded-2xl bg-slate-900 text-white flex items-center justify-center font-bold shadow-xs shrink-0">
-              <CalendarIcon size={20} className="text-amber-400" />
+        <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-4">
+          {/* Week Navigation & Range */}
+          <div className="flex items-center gap-3 flex-wrap">
+            <div className="flex items-center bg-slate-100 p-1 rounded-2xl border border-slate-200/70 shadow-2xs">
+              <button
+                type="button"
+                onClick={() => {
+                  playSound.click();
+                  setWeekOffset((w) => w - 1);
+                }}
+                className="p-1.5 rounded-xl text-slate-600 hover:text-slate-900 hover:bg-white transition-all active:scale-95"
+                title="Semana anterior"
+              >
+                <ChevronLeft size={16} />
+              </button>
+              
+              <button
+                type="button"
+                onClick={() => {
+                  if (weekOffset !== 0) {
+                    playSound.click();
+                    setWeekOffset(0);
+                  }
+                }}
+                className={cn(
+                  "px-3 py-1 rounded-xl text-xs font-serif font-black tracking-tight transition-all",
+                  weekOffset === 0 ? "text-slate-900 cursor-default" : "text-indigo-600 hover:bg-white active:scale-95"
+                )}
+                title="Ir a semana actual"
+              >
+                <span>{weekPlan.startDate} al {weekPlan.endDate}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  playSound.click();
+                  setWeekOffset((w) => w + 1);
+                }}
+                className="p-1.5 rounded-xl text-slate-600 hover:text-slate-900 hover:bg-white transition-all active:scale-95"
+                title="Semana siguiente"
+              >
+                <ChevronRight size={16} />
+              </button>
             </div>
 
-            <div>
-              <div className="flex items-center gap-2 flex-wrap">
-                <h2 className="text-base sm:text-lg font-black font-serif text-slate-900 tracking-tight">
-                  Planificador Semanal de Judicatura
-                </h2>
-                {weekOffset === 0 ? (
-                  <span className="text-[10px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200/80">
-                    Semana Actual
-                  </span>
-                ) : (
-                  <span className="text-[10px] font-mono font-bold text-slate-600 bg-slate-100 px-2 py-0.5 rounded-full">
-                    {weekOffset > 0 ? `+${weekOffset} sem` : `${weekOffset} sem`}
-                  </span>
-                )}
-              </div>
+            {/* Week Status & Target Badge */}
+            <div className="flex items-center gap-2">
+              {weekOffset === 0 ? (
+                <span className="text-[10px] font-bold uppercase tracking-wider px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200/80">
+                  Semana Actual
+                </span>
+              ) : (
+                <span className="text-[10px] font-mono font-bold text-slate-600 bg-slate-100 px-2.5 py-1 rounded-full border border-slate-200/60">
+                  {weekOffset > 0 ? `+${weekOffset} sem` : `${weekOffset} sem`}
+                </span>
+              )}
 
-              <p className="text-xs text-slate-500 font-medium mt-0.5 flex items-center gap-2">
-                <span>{weekPlan.startDate} al {weekPlan.endDate}</span>
-                <span className="text-slate-300">·</span>
-                <span>Objetivo diario: <strong className="font-mono text-slate-700">{settings.targetDailyHours}h</strong></span>
-              </p>
+              <span className="text-xs text-slate-500 font-medium hidden sm:inline-flex items-center gap-1.5 bg-slate-50 px-2.5 py-1 rounded-full border border-slate-200/50">
+                <Clock size={12} className="text-slate-400" />
+                <span>Meta: <strong className="font-mono text-slate-800 font-bold">{settings.targetDailyHours}h</strong> / día</span>
+              </span>
             </div>
           </div>
 
-          {/* Action Tools & Week Navigation */}
+          {/* Action Tools: Ebbinghaus, Smart Rebalance, Settings & Primary New Task */}
           <div className="flex items-center gap-2 flex-wrap shrink-0">
             {/* Ebbinghaus Integration Button */}
             <button
@@ -694,7 +729,7 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
                 playSound.click();
                 setIsEbbinghausModalOpen(true);
               }}
-              className="px-3 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200/80 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 shadow-2xs"
+              className="px-3 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200/80 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 shadow-2xs active:scale-95"
               title="Añadir temas que necesitan repaso según la curva del olvido"
             >
               <Brain size={14} className="text-emerald-600" />
@@ -709,15 +744,15 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
                 handleTriggerRebalance();
               }}
               className={cn(
-                "px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 shadow-2xs",
+                "px-3 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 shadow-2xs active:scale-95",
                 weekPlan.overloadedDaysCount > 0
                   ? "bg-amber-500 text-white hover:bg-amber-600 animate-pulse"
-                  : "bg-slate-100 hover:bg-slate-200 text-slate-700"
+                  : "bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200/60"
               )}
               title="Detectar sobrecargas y proponer redistribución inteligente"
             >
-              <Sparkles size={14} />
-              <span>Redistribuir Semana</span>
+              <Sparkles size={14} className={weekPlan.overloadedDaysCount > 0 ? "text-amber-100" : "text-amber-500"} />
+              <span>Redistribuir Carga</span>
               {weekPlan.overloadedDaysCount > 0 && (
                 <span className="w-2 h-2 rounded-full bg-white ring-1 ring-amber-300" />
               )}
@@ -730,55 +765,31 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
                 playSound.click();
                 setIsSettingsModalOpen(true);
               }}
-              className="p-1.5 bg-slate-100 hover:bg-slate-200 text-slate-600 hover:text-slate-900 rounded-xl transition-all"
-              title="Configurar velocidades y horas"
+              className="p-2 bg-slate-100 hover:bg-slate-200 text-slate-600 hover:text-slate-900 rounded-xl transition-all border border-slate-200/60 active:scale-95"
+              title="Configurar velocidades de estudio y disponibilidades"
             >
               <Sliders size={16} />
             </button>
 
-            {/* Week Offset Switcher */}
-            <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-xl border border-slate-200/80 ml-1">
-              <button
-                type="button"
-                onClick={() => {
-                  playSound.click();
-                  setWeekOffset((w) => w - 1);
-                }}
-                className="p-1 rounded-lg text-slate-600 hover:text-slate-900 hover:bg-white transition-colors"
-                title="Semana anterior"
-              >
-                <ChevronLeft size={16} />
-              </button>
-              {weekOffset !== 0 && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    playSound.click();
-                    setWeekOffset(0);
-                  }}
-                  className="px-2 text-[11px] font-bold text-slate-700 hover:text-slate-900 font-mono"
-                  title="Volver a la semana actual"
-                >
-                  Hoy
-                </button>
-              )}
-              <button
-                type="button"
-                onClick={() => {
-                  playSound.click();
-                  setWeekOffset((w) => w + 1);
-                }}
-                className="p-1 rounded-lg text-slate-600 hover:text-slate-900 hover:bg-white transition-colors"
-                title="Semana siguiente"
-              >
-                <ChevronRight size={16} />
-              </button>
-            </div>
+            {/* Primary Add Task Button */}
+            <button
+              type="button"
+              onClick={() => {
+                playSound.click();
+                setTargetDateForNewTask(todayStr);
+                setEditingTask(null);
+                setIsTaskEditorOpen(true);
+              }}
+              className="px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold transition-all shadow-xs flex items-center gap-1.5 shrink-0 active:scale-95 cursor-pointer ml-1"
+            >
+              <Plus size={14} strokeWidth={2.5} />
+              <span>Nueva Tarea</span>
+            </button>
           </div>
         </div>
 
-        {/* 2. ACTIVITY FILTER AND SEARCH BAR */}
-        <div className="mt-4 pt-3.5 border-t border-slate-100 flex flex-col md:flex-row md:items-center justify-between gap-3">
+        {/* 2. ACTIVITY FILTER AND QUICK SEARCH BAR */}
+        <div className="mt-3.5 pt-3.5 border-t border-slate-100 flex flex-col md:flex-row md:items-center justify-between gap-3">
           {/* Activity Filters */}
           <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-0.5">
             <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-slate-400 mr-1 shrink-0">
@@ -790,7 +801,7 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
               type="button"
               onClick={() => setActivityFilter("todos")}
               className={cn(
-                "px-2.5 py-1 rounded-xl text-xs font-bold transition-all shrink-0 flex items-center gap-1.5",
+                "px-2.5 py-1.5 rounded-xl text-xs font-bold transition-all shrink-0 flex items-center gap-1.5",
                 activityFilter === "todos"
                   ? "bg-slate-900 text-white shadow-2xs"
                   : "bg-slate-100 text-slate-600 hover:bg-slate-200"
@@ -810,7 +821,7 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
               type="button"
               onClick={() => setActivityFilter("estudio_nuevo")}
               className={cn(
-                "px-2.5 py-1 rounded-xl text-xs font-bold transition-all shrink-0 flex items-center gap-1.5",
+                "px-2.5 py-1.5 rounded-xl text-xs font-bold transition-all shrink-0 flex items-center gap-1.5",
                 activityFilter === "estudio_nuevo"
                   ? "bg-blue-600 text-white shadow-2xs"
                   : "bg-blue-50 text-blue-800 hover:bg-blue-100 border border-blue-200/60"
@@ -828,7 +839,7 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
               type="button"
               onClick={() => setActivityFilter("refresco")}
               className={cn(
-                "px-2.5 py-1 rounded-xl text-xs font-bold transition-all shrink-0 flex items-center gap-1.5",
+                "px-2.5 py-1.5 rounded-xl text-xs font-bold transition-all shrink-0 flex items-center gap-1.5",
                 activityFilter === "refresco"
                   ? "bg-orange-600 text-white shadow-2xs"
                   : "bg-orange-50 text-orange-800 hover:bg-orange-100 border border-orange-200/60"
@@ -846,7 +857,7 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
               type="button"
               onClick={() => setActivityFilter("repaso")}
               className={cn(
-                "px-2.5 py-1 rounded-xl text-xs font-bold transition-all shrink-0 flex items-center gap-1.5",
+                "px-2.5 py-1.5 rounded-xl text-xs font-bold transition-all shrink-0 flex items-center gap-1.5",
                 activityFilter === "repaso"
                   ? "bg-emerald-600 text-white shadow-2xs"
                   : "bg-emerald-50 text-emerald-800 hover:bg-emerald-100 border border-emerald-200/60"
@@ -864,7 +875,7 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
               type="button"
               onClick={() => setActivityFilter("cante")}
               className={cn(
-                "px-2.5 py-1 rounded-xl text-xs font-bold transition-all shrink-0 flex items-center gap-1.5",
+                "px-2.5 py-1.5 rounded-xl text-xs font-bold transition-all shrink-0 flex items-center gap-1.5",
                 activityFilter === "cante"
                   ? "bg-purple-600 text-white shadow-2xs"
                   : "bg-purple-50 text-purple-800 hover:bg-purple-100 border border-purple-200/60"
@@ -882,7 +893,7 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
               type="button"
               onClick={() => setActivityFilter("pendientes")}
               className={cn(
-                "px-2.5 py-1 rounded-xl text-xs font-bold transition-all shrink-0 flex items-center gap-1.5 ml-1",
+                "px-2.5 py-1.5 rounded-xl text-xs font-bold transition-all shrink-0 flex items-center gap-1.5 ml-1",
                 activityFilter === "pendientes"
                   ? "bg-amber-600 text-white shadow-2xs"
                   : "bg-amber-50 text-amber-800 hover:bg-amber-100 border border-amber-200/60"
@@ -897,22 +908,25 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
 
           {/* Quick Search in Week */}
           <div className="flex items-center gap-2">
-            <input
-              type="text"
-              placeholder="Buscar tema en la semana..."
-              value={searchTopicQuery}
-              onChange={(e) => setSearchTopicQuery(e.target.value)}
-              className="px-3 py-1 bg-slate-50 hover:bg-white focus:bg-white border border-slate-200 rounded-xl text-xs text-slate-800 placeholder-slate-400 focus:outline-indigo-600 w-full sm:w-56 transition-all"
-            />
-            {searchTopicQuery && (
-              <button
-                type="button"
-                onClick={() => setSearchTopicQuery("")}
-                className="text-xs text-slate-400 hover:text-slate-600 font-bold"
-              >
-                ✕
-              </button>
-            )}
+            <div className="relative w-full sm:w-60">
+              <input
+                type="text"
+                placeholder="Buscar tema en la semana..."
+                value={searchTopicQuery}
+                onChange={(e) => setSearchTopicQuery(e.target.value)}
+                className="w-full pl-8 pr-7 py-1.5 bg-slate-50 hover:bg-white focus:bg-white border border-slate-200 rounded-xl text-xs text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all"
+              />
+              <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
+              {searchTopicQuery && (
+                <button
+                  type="button"
+                  onClick={() => setSearchTopicQuery("")}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-xs text-slate-400 hover:text-slate-600 font-bold"
+                >
+                  ✕
+                </button>
+              )}
+            </div>
           </div>
         </div>
       </div>
@@ -1161,21 +1175,28 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
 
       {/* 4. MODO HOY BANNER (Si estamos en la semana actual) */}
       {todayDayPlan && (
-        <div className="bg-gradient-to-r from-slate-900 to-indigo-950 text-white rounded-3xl p-4 sm:p-5 shadow-sm relative overflow-hidden">
+        <div className="bg-gradient-to-r from-slate-950 via-slate-900 to-indigo-950 text-white rounded-3xl p-4 sm:p-5 shadow-sm relative overflow-hidden border border-slate-800/80">
           <div className="relative z-10 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div>
               <div className="flex items-center gap-2">
-                <span className="text-[10px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full bg-white/20 text-white">
+                <span className="text-[10px] font-black uppercase tracking-wider px-2.5 py-0.5 rounded-full bg-amber-400/20 text-amber-300 border border-amber-400/30 font-mono">
                   Jornada de Hoy
                 </span>
-                <span className="text-xs font-mono text-slate-300">
+                <span className="text-xs font-mono text-slate-300 font-medium">
                   {todayDayPlan.dayName} {todayDayPlan.dayNumber} {todayDayPlan.monthName}
                 </span>
               </div>
-              <h3 className="text-base sm:text-lg font-black font-serif mt-1 tracking-tight">
-                {todayDayPlan.tasks.length === 0
-                  ? "Día libre o sin tareas programadas para hoy."
-                  : `${todayDayPlan.tasks.length} ${todayDayPlan.tasks.length === 1 ? "tarea programada" : "tareas programadas"} · ${formatMinutesToHours(todayDayPlan.totalEstimatedMinutes)} de estudio previsto.`}
+              <h3 className="text-base sm:text-lg font-black font-serif mt-1.5 tracking-tight text-white flex items-baseline gap-2 flex-wrap">
+                <span>
+                  {todayDayPlan.tasks.length === 0
+                    ? "Jornada libre o sin tareas programadas para hoy."
+                    : `${todayDayPlan.tasks.length} ${todayDayPlan.tasks.length === 1 ? "tarea programada" : "tareas programadas"} · ${formatMinutesToHours(todayDayPlan.totalEstimatedMinutes)} de estudio previsto`}
+                </span>
+                {todayDayPlan.completedTasksCount > 0 && (
+                  <span className="text-xs font-mono text-emerald-400 font-normal">
+                    ({todayDayPlan.completedTasksCount} completadas)
+                  </span>
+                )}
               </h3>
             </div>
 
@@ -1186,17 +1207,17 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
                 setEditingTask(null);
                 setIsTaskEditorOpen(true);
               }}
-              className="px-3.5 py-2 bg-white text-slate-900 hover:bg-slate-100 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 shrink-0 self-start sm:self-center shadow-xs"
+              className="px-4 py-2 bg-white text-slate-900 hover:bg-slate-100 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 shrink-0 self-start sm:self-center shadow-xs active:scale-95 cursor-pointer"
             >
               <Plus size={14} strokeWidth={2.5} />
-              <span>+ Añadir Tarea a Hoy</span>
+              <span>Añadir Tarea a Hoy</span>
             </button>
           </div>
         </div>
       )}
 
       {/* 5. MOBILE DAY SELECTOR (Visible en pantallas pequeñas con puntos de color de actividad) */}
-      <div className="md:hidden flex items-center justify-between gap-1 overflow-x-auto no-scrollbar p-1.5 bg-white rounded-2xl border border-slate-200">
+      <div className="md:hidden flex items-center justify-between gap-1 overflow-x-auto no-scrollbar p-1.5 bg-white rounded-2xl border border-slate-200 shadow-2xs">
         {weekPlan.days.map((day) => {
           const isSelected = mobileSelectedDate === day.date;
           return (
@@ -1249,15 +1270,15 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
               key={day.date}
               className={cn(
                 "bg-white rounded-3xl border transition-all flex flex-col min-h-[380px] sm:min-h-[520px] shadow-2xs relative overflow-hidden",
-                day.isToday ? "border-indigo-400 ring-2 ring-indigo-200/60" : "border-slate-200/85",
+                day.isToday ? "border-indigo-400 ring-2 ring-indigo-200/60 shadow-sm" : "border-slate-200/85 hover:border-slate-300",
                 day.isOverloaded && "border-amber-300 ring-1 ring-amber-200",
                 !isMobileVisible && "hidden md:flex"
               )}
             >
               {/* Day Column Header */}
               <div className={cn(
-                "p-3.5 border-b flex flex-col gap-1 transition-colors",
-                day.isToday ? "bg-indigo-50/50 border-indigo-100" : "bg-slate-50/70 border-slate-100"
+                "p-3.5 border-b flex flex-col gap-1.5 transition-colors",
+                day.isToday ? "bg-indigo-50/60 border-indigo-100" : "bg-slate-50/70 border-slate-100"
               )}>
                 <div className="flex items-center justify-between">
                   <span className={cn(
@@ -1268,15 +1289,15 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
                   </span>
 
                   {day.isToday && (
-                    <span className="text-[9px] font-black uppercase px-1.5 py-0.2 rounded-md bg-indigo-600 text-white font-mono">
+                    <span className="text-[9px] font-black uppercase px-2 py-0.5 rounded-md bg-indigo-600 text-white font-mono shadow-2xs">
                       Hoy
                     </span>
                   )}
                 </div>
 
-                <div className="flex items-baseline justify-between mt-0.5">
+                <div className="flex items-baseline justify-between">
                   <div className="flex items-baseline gap-1">
-                    <span className="text-xl font-black font-serif text-slate-900 tabular-nums">
+                    <span className="text-2xl font-black font-serif text-slate-900 tabular-nums leading-none">
                       {day.dayNumber}
                     </span>
                     <span className="text-xs text-slate-400 font-medium">
@@ -1285,7 +1306,7 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
                   </div>
 
                   <span className={cn(
-                    "font-mono text-xs font-bold",
+                    "font-mono text-xs font-bold tabular-nums",
                     day.isOverloaded ? "text-amber-700" : "text-slate-600"
                   )}>
                     {formatMinutesToHours(day.totalEstimatedMinutes)}
@@ -1294,26 +1315,26 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
 
                 {/* Overload Alert Badge */}
                 {day.isOverloaded && (
-                  <div className="mt-1 p-1 px-2 rounded-lg bg-amber-100 text-amber-900 text-[10px] font-bold flex items-center justify-between">
+                  <div className="p-1 px-2 rounded-lg bg-amber-100 text-amber-900 text-[10px] font-bold flex items-center justify-between border border-amber-200/60">
                     <span>Sobrecarga:</span>
-                    <span>+{Math.round(day.overloadMinutes)} min</span>
+                    <span className="font-mono">+{Math.round(day.overloadMinutes)} min</span>
                   </div>
                 )}
 
                 {/* Cante Official Day Badge */}
                 {day.isCanteOfficialDay && (
-                  <div className="mt-1 flex items-center justify-between text-[10px] text-purple-800 font-bold px-2 py-0.5 bg-purple-100/70 rounded-lg">
+                  <div className="flex items-center justify-between text-[10px] text-purple-900 font-bold px-2 py-1 bg-purple-100/80 border border-purple-200/70 rounded-xl">
                     <span className="flex items-center gap-1">
-                      <Award size={11} />
-                      <span>Cante</span>
+                      <Award size={12} className="text-purple-700" />
+                      <span>Cante Oficial</span>
                     </span>
                     {onOpenPreparadorSession && (
                       <button
                         type="button"
                         onClick={() => onOpenPreparadorSession(day.shortName === "LUN" ? "lunes" : "jueves")}
-                        className="hover:underline text-[9px] font-mono text-purple-900"
+                        className="hover:underline text-[9px] font-mono text-purple-900 font-black cursor-pointer"
                       >
-                        Abrir
+                        Cantar →
                       </button>
                     )}
                   </div>
@@ -1323,7 +1344,7 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
               {/* Tasks List inside Day Column */}
               <div className="p-2 sm:p-2.5 flex-1 space-y-2 overflow-y-auto max-h-[580px] no-scrollbar">
                 {visibleTasks.length === 0 ? (
-                  <div className="p-4 text-center border border-dashed border-slate-200 rounded-2xl text-[11px] text-slate-400 mt-2">
+                  <div className="p-6 text-center border border-dashed border-slate-200 rounded-2xl text-[11px] text-slate-400 mt-2">
                     {day.tasks.length > 0 ? "Sin coincidencias con el filtro" : "Sin tareas programadas"}
                   </div>
                 ) : (
@@ -1336,15 +1357,15 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
                       <div
                         key={task.id}
                         className={cn(
-                          "p-2.5 sm:p-3 rounded-2xl border transition-all text-left relative group",
+                          "p-2.5 sm:p-3 rounded-2xl border transition-all text-left relative group shadow-2xs hover:shadow-xs hover:-translate-y-0.5 duration-200",
                           cfg.bgClass,
                           cfg.borderClass,
-                          isDone && "opacity-60 saturate-50 bg-slate-50 border-slate-200",
-                          isDelayed && "border-amber-400 shadow-2xs"
+                          isDone && "opacity-60 saturate-50 bg-slate-50 border-slate-200 shadow-none hover:translate-y-0",
+                          isDelayed && "border-amber-400 ring-1 ring-amber-200 shadow-2xs"
                         )}
                       >
                         {/* Task Top Meta */}
-                        <div className="flex items-center justify-between gap-1 mb-1">
+                        <div className="flex items-center justify-between gap-1 mb-1.5">
                           <div className="flex items-center gap-1.5 min-w-0">
                             <span className={cn("w-2 h-2 rounded-full shrink-0", cfg.dotClass)} />
                             <span className={cn("text-[10px] font-bold uppercase tracking-wider truncate", cfg.textClass)}>
@@ -1352,20 +1373,20 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
                             </span>
                           </div>
 
-                          <span className="font-mono text-[10px] text-slate-500 font-bold shrink-0">
+                          <span className="font-mono text-[10px] text-slate-500 font-bold shrink-0 tabular-nums">
                             ~{task.estimatedMinutes}m
                           </span>
                         </div>
 
-                        {/* Topic Title */}
+                        {/* Topic Title & Check Box */}
                         <div className="flex items-start gap-2">
                           <button
                             type="button"
                             onClick={() => handleToggleTaskStatus(task)}
                             className={cn(
-                              "w-5 h-5 rounded-lg flex items-center justify-center transition-all shrink-0 mt-0.5",
+                              "w-5 h-5 rounded-lg flex items-center justify-center transition-all shrink-0 mt-0.5 active:scale-90 cursor-pointer",
                               isDone
-                                ? "bg-emerald-600 text-white"
+                                ? "bg-emerald-600 text-white shadow-2xs"
                                 : "border border-slate-300 hover:border-indigo-600 bg-white"
                             )}
                             title={isDone ? "Marcar pendiente" : "Marcar completado"}
@@ -1378,19 +1399,21 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
                               "text-xs font-bold leading-snug line-clamp-2",
                               isDone ? "line-through text-slate-500" : "text-slate-900"
                             )}>
-                              <span className="font-mono text-slate-700 mr-1">T.{task.topicNumber}</span>
+                              <span className="font-mono text-slate-800 font-black mr-1 bg-white/70 px-1 py-0.2 rounded border border-slate-200/60">
+                                T.{task.topicNumber}
+                              </span>
                               <span>{task.topicTitle}</span>
                             </h4>
 
                             <div className="flex items-center gap-1.5 mt-1 text-[10px] text-slate-500 font-mono">
                               {task.pagesCount && task.pagesCount > 0 ? (
-                                <span>{task.pagesCount} págs</span>
+                                <span className="tabular-nums font-semibold">{task.pagesCount} págs</span>
                               ) : (
-                                <span className="text-slate-400 italic">Págs sin registrar</span>
+                                <span className="text-slate-400 italic">Págs no indicadas</span>
                               )}
                               {task.notes && (
                                 <>
-                                  <span>·</span>
+                                  <span className="text-slate-300">·</span>
                                   <span className="italic line-clamp-1">{task.notes}</span>
                                 </>
                               )}
@@ -1399,13 +1422,13 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
                         </div>
 
                         {/* Task Action Bar */}
-                        <div className="mt-2 pt-1.5 border-t border-slate-200/50 flex items-center justify-between text-[10px]">
+                        <div className="mt-2.5 pt-1.5 border-t border-slate-200/50 flex items-center justify-between text-[10px]">
                           <div className="flex items-center gap-1">
                             {/* 1-Click Registrar Estudio en WellsPrep */}
                             <button
                               type="button"
                               onClick={() => handleQuickRegisterStudy(task)}
-                              className="px-1.5 py-0.5 rounded-md bg-white/90 hover:bg-emerald-50 text-emerald-800 hover:text-emerald-900 border border-emerald-200/70 font-mono font-bold text-[9px] transition-all flex items-center gap-1 shadow-2xs"
+                              className="px-2 py-0.5 rounded-lg bg-white/95 hover:bg-emerald-50 text-emerald-800 hover:text-emerald-900 border border-emerald-200/80 font-mono font-bold text-[9px] transition-all flex items-center gap-1 shadow-2xs active:scale-95 cursor-pointer"
                               title="Registrar estudio real en WellsPrep y marcar tarea como completada"
                             >
                               <Zap size={10} className="text-emerald-600" />
@@ -1466,7 +1489,7 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
                     setEditingTask(null);
                     setIsTaskEditorOpen(true);
                   }}
-                  className="w-full py-1.5 px-2 bg-white hover:bg-slate-100 text-slate-700 border border-slate-200/80 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1 shadow-2xs hover:shadow-xs active:scale-98"
+                  className="w-full py-1.5 px-2 bg-white hover:bg-slate-100 text-slate-700 border border-slate-200/80 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1 shadow-2xs hover:shadow-xs active:scale-98 cursor-pointer"
                 >
                   <Plus size={13} strokeWidth={2.5} />
                   <span>Añadir</span>

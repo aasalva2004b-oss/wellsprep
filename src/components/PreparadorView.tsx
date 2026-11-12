@@ -668,29 +668,29 @@ export function PreparadorView({
   return (
     <div className="flex flex-col h-full bg-[#F5F5F7] overflow-hidden">
       {/* SLIM STICKY HEADER */}
-      <div className="bg-white/95 backdrop-blur-2xl border-b border-slate-200/70 px-4 py-3 sm:px-6 sticky top-0 z-20 shrink-0 shadow-[0_2px_12px_rgba(0,0,0,0.03)]">
-        <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2.5 max-w-[100rem] mx-auto">
-          {/* Title Row */}
-          <div className="flex items-center justify-between sm:justify-start gap-3">
+      <div className="bg-white/95 backdrop-blur-2xl border-b border-slate-200/70 px-4 py-2.5 sm:px-6 sticky top-0 z-20 shrink-0 shadow-[0_2px_12px_rgba(0,0,0,0.03)]">
+        <div className="flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-3 max-w-[105rem] mx-auto">
+          {/* Title & Brand */}
+          <div className="flex items-center justify-between lg:justify-start gap-3">
             <div className="flex items-center gap-2.5">
               <div className="w-8 h-8 rounded-xl bg-slate-900 text-white flex items-center justify-center shrink-0 shadow-xs">
-                <Award size={16} strokeWidth={2.2} />
+                <Award size={16} strokeWidth={2.2} className="text-amber-400" />
               </div>
               <div>
                 <h1 className="text-base sm:text-lg font-black text-slate-900 tracking-tight font-serif truncate">
-                  Planificador & Centro de Cantes
+                  Planificador & Cantes
                 </h1>
                 <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider hidden sm:block">
-                  Semana 7 Días · Sesiones L/J · Curva Ebbinghaus · Telemetría 12:30
+                  Oposición Judicial y Fiscal · WellsPrep
                 </p>
               </div>
             </div>
 
-            {/* Mobile Add Topics Button */}
+            {/* Mobile Add Topics Button (Lunes/Jueves) */}
             {(activeView === "lunes" || activeView === "jueves") && (
               <button
                 onClick={() => setIsPickerOpen(true)}
-                className="sm:hidden px-2.5 py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold transition-all shadow-xs flex items-center gap-1 shrink-0 active:scale-95"
+                className="lg:hidden px-2.5 py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold transition-all shadow-xs flex items-center gap-1 shrink-0 active:scale-95"
               >
                 <Plus size={13} strokeWidth={2.5} />
                 <span>Añadir</span>
@@ -698,51 +698,124 @@ export function PreparadorView({
             )}
           </div>
 
-          {/* Quick Actions & Cante Day Switcher */}
-          <div className="flex items-center gap-2">
-            <div className="flex bg-slate-100 p-1 rounded-xl border border-slate-200/60 flex-1 sm:flex-initial">
+          {/* Master View Switcher (Semana 7D, Cante L, Cante J, Ebbinghaus, Historial) */}
+          <div className="flex items-center gap-2 overflow-x-auto no-scrollbar py-0.5">
+            <div className="flex bg-slate-100/90 p-1 rounded-2xl border border-slate-200/70 gap-0.5 shrink-0 shadow-2xs">
+              {/* 1. Vista Semanal 7D */}
               <button
                 type="button"
                 onClick={() => {
                   playSound.click();
-                  setActiveView("lunes");
+                  handleSelectView("semana_completa");
                 }}
                 className={cn(
-                  "px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-1.5",
-                  activeView === "lunes"
+                  "px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 shrink-0",
+                  activeView === "semana_completa"
                     ? "bg-white text-slate-900 shadow-xs"
                     : "text-slate-600 hover:text-slate-900"
                 )}
               >
-                <Calendar size={12} />
-                <span>Lunes</span>
-                <span className="text-[10px] font-mono font-bold px-1.5 py-0.2 rounded-md bg-slate-100">
+                <Calendar size={13} className={activeView === "semana_completa" ? "text-amber-500" : "text-slate-400"} />
+                <span>Semana 7 Días</span>
+              </button>
+
+              {/* 2. Cante Lunes */}
+              <button
+                type="button"
+                onClick={() => {
+                  playSound.click();
+                  handleSelectView("lunes");
+                }}
+                className={cn(
+                  "px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 shrink-0",
+                  activeView === "lunes"
+                    ? "bg-white text-purple-950 shadow-xs"
+                    : "text-slate-600 hover:text-slate-900"
+                )}
+              >
+                <Award size={13} className={activeView === "lunes" ? "text-purple-600" : "text-slate-400"} />
+                <span>Cante Lunes</span>
+                <span className={cn(
+                  "text-[10px] font-mono font-bold px-1.5 py-0.2 rounded-md",
+                  activeView === "lunes" ? "bg-purple-100 text-purple-800" : "bg-slate-200/70 text-slate-600"
+                )}>
                   {(schedule.lunes || []).length}
                 </span>
               </button>
 
+              {/* 3. Cante Jueves */}
               <button
                 type="button"
                 onClick={() => {
                   playSound.click();
-                  setActiveView("jueves");
+                  handleSelectView("jueves");
                 }}
                 className={cn(
-                  "px-3 py-1.5 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-1.5",
+                  "px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 shrink-0",
                   activeView === "jueves"
+                    ? "bg-white text-purple-950 shadow-xs"
+                    : "text-slate-600 hover:text-slate-900"
+                )}
+              >
+                <Award size={13} className={activeView === "jueves" ? "text-purple-600" : "text-slate-400"} />
+                <span>Cante Jueves</span>
+                <span className={cn(
+                  "text-[10px] font-mono font-bold px-1.5 py-0.2 rounded-md",
+                  activeView === "jueves" ? "bg-purple-100 text-purple-800" : "bg-slate-200/70 text-slate-600"
+                )}>
+                  {(schedule.jueves || []).length}
+                </span>
+              </button>
+
+              {/* 4. Curva de Olvido Ebbinghaus */}
+              <button
+                type="button"
+                onClick={() => {
+                  playSound.click();
+                  handleSelectView("ebbinghaus");
+                }}
+                className={cn(
+                  "px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 shrink-0",
+                  activeView === "ebbinghaus"
+                    ? "bg-white text-amber-950 shadow-xs"
+                    : "text-slate-600 hover:text-slate-900"
+                )}
+              >
+                <Brain size={13} className={activeView === "ebbinghaus" ? "text-amber-600" : "text-slate-400"} />
+                <span>Ebbinghaus</span>
+                {ebbinghausAlertCount > 0 && (
+                  <span className="text-[10px] font-mono font-bold px-1.5 py-0.2 rounded-md bg-amber-100 text-amber-900">
+                    {ebbinghausAlertCount}
+                  </span>
+                )}
+              </button>
+
+              {/* 5. Historial */}
+              <button
+                type="button"
+                onClick={() => {
+                  playSound.click();
+                  handleSelectView("historial");
+                }}
+                className={cn(
+                  "px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 shrink-0",
+                  activeView === "historial"
                     ? "bg-white text-slate-900 shadow-xs"
                     : "text-slate-600 hover:text-slate-900"
                 )}
               >
-                <Calendar size={12} />
-                <span>Jueves</span>
-                <span className="text-[10px] font-mono font-bold px-1.5 py-0.2 rounded-md bg-slate-100">
-                  {(schedule.jueves || []).length}
+                <History size={13} className={activeView === "historial" ? "text-indigo-600" : "text-slate-400"} />
+                <span>Historial</span>
+                <span className={cn(
+                  "text-[10px] font-mono font-bold px-1.5 py-0.2 rounded-md",
+                  activeView === "historial" ? "bg-slate-200 text-slate-800" : "bg-slate-200/70 text-slate-600"
+                )}>
+                  {preparadorSessions.length}
                 </span>
               </button>
             </div>
 
-            {/* Desktop Add Topics Button */}
+            {/* Desktop Add Topics Button (Lunes/Jueves) */}
             {(activeView === "lunes" || activeView === "jueves") && (
               <button
                 type="button"
@@ -750,7 +823,7 @@ export function PreparadorView({
                   playSound.click();
                   setIsPickerOpen(true);
                 }}
-                className="hidden sm:flex px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold transition-all shadow-xs items-center gap-1.5 shrink-0 active:scale-95"
+                className="hidden lg:flex px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold transition-all shadow-xs items-center gap-1.5 shrink-0 active:scale-95"
               >
                 <Plus size={14} strokeWidth={2.5} />
                 <span>Añadir Temas</span>
@@ -761,19 +834,21 @@ export function PreparadorView({
       </div>
 
       {/* MAIN SCROLLABLE CONTENT */}
-      <div className="flex-1 min-h-0 overflow-y-auto overscroll-y-contain touch-pan-y -webkit-overflow-scrolling-touch p-3 sm:p-6 md:p-8 pb-44 sm:pb-36 max-w-[100rem] mx-auto w-full">
-        {/* INTERACTIVE WEEKLY PLANNER RIBBON STRIP AT THE TOP */}
-        <WeeklyPlannerStrip
-          activeView={activeView}
-          onSelectView={handleSelectView}
-          lunesTopicsCount={(schedule.lunes || []).length}
-          juevesTopicsCount={(schedule.jueves || []).length}
-          ebbinghausAlertCount={ebbinghausAlertCount}
-          totalCantosCount={preparadorSessions.length}
-          selectedDateStr={selectedDayDate}
-          recentSessions={recentSessions}
-          dailyQuotas={weeklyPlan.dailyQuotas}
-        />
+      <div className="flex-1 min-h-0 overflow-y-auto overscroll-y-contain touch-pan-y -webkit-overflow-scrolling-touch p-3 sm:p-5 md:p-6 pb-44 sm:pb-36 max-w-[105rem] mx-auto w-full">
+        {/* INTERACTIVE WEEKLY PLANNER RIBBON STRIP: Shown only in Day Study / Cante modes */}
+        {activeView !== "semana_completa" && (
+          <WeeklyPlannerStrip
+            activeView={activeView}
+            onSelectView={handleSelectView}
+            lunesTopicsCount={(schedule.lunes || []).length}
+            juevesTopicsCount={(schedule.jueves || []).length}
+            ebbinghausAlertCount={ebbinghausAlertCount}
+            totalCantosCount={preparadorSessions.length}
+            selectedDateStr={selectedDayDate}
+            recentSessions={recentSessions}
+            dailyQuotas={weeklyPlan.dailyQuotas}
+          />
+        )}
 
         {/* VIEW 0: CUADRÍCULA SEMANAL 7 DÍAS INTELIGENTE */}
         {activeView === "semana_completa" && (

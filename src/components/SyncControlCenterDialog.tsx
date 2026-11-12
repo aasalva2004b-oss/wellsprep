@@ -65,6 +65,7 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
     webhookToken,
     purgeAllAeroFocusData,
     deduplicateUserSessions,
+    migrateAndPurgeNonConstitucionalData,
     quarantinedEvents = [],
     isLoadingQuarantine,
     fetchQuarantinedEvents,
@@ -96,6 +97,7 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
   const [isApprovingAll, setIsApprovingAll] = useState(false);
   const [isSimulatingFlight, setIsSimulatingFlight] = useState(false);
   const [isPurging, setIsPurging] = useState(false);
+  const [isPurgingDuplicates, setIsPurgingDuplicates] = useState(false);
 
   // Manual Paste Modal state
   const [isPasteModalOpen, setIsPasteModalOpen] = useState(false);
@@ -321,6 +323,26 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
     }
   };
 
+  // Saneamiento de asignaturas: aislar Constitucional y purgar duplicados de Civil y Penal
+  const handlePurgeDuplicates = async () => {
+    if (
+      !confirm(
+        "¿Deseas desvincular y sanear las asignaturas? Esto asegurará que todas tus sesiones pertenezcan exclusivamente a Derecho Constitucional y eliminará cualquier réplica accidental de Civil y Penal."
+      )
+    ) {
+      return;
+    }
+    try {
+      setIsPurgingDuplicates(true);
+      await migrateAndPurgeNonConstitucionalData(false);
+    } catch (e: any) {
+      console.error(e);
+      toast.error("Error al sanear asignaturas: " + (e?.message || e));
+    } finally {
+      setIsPurgingDuplicates(false);
+    }
+  };
+
   // Quick 1-click clipboard paste importer
   const handleQuickClipboardPaste = async () => {
     try {
@@ -526,6 +548,17 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
 
           {/* Top Actions */}
           <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+            <button
+              onClick={handlePurgeDuplicates}
+              disabled={isPurgingDuplicates}
+              className="px-2.5 sm:px-3 py-1.5 rounded-xl text-xs font-semibold bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200/60 transition-colors flex items-center gap-1.5 disabled:opacity-50"
+              title="Aísla tus datos en Constitucional y elimina duplicados residuales de Civil y Penal"
+            >
+              <ShieldCheck size={13} className={cn(isPurgingDuplicates && "animate-spin text-emerald-600")} />
+              <span className="hidden md:inline">{isPurgingDuplicates ? "Saneando..." : "Desvincular Asignaturas"}</span>
+              <span className="md:hidden">{isPurgingDuplicates ? "..." : "Aislar"}</span>
+            </button>
+
             <button
               onClick={handleReconcile}
               disabled={isReconciling}
@@ -1759,6 +1792,15 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                     className="px-3 py-1.5 rounded-xl text-xs font-semibold bg-white hover:bg-rose-50 text-rose-700 border border-slate-200 hover:border-rose-200 transition-colors"
                   >
                     Purgar datos de prueba
+                  </button>
+
+                  <button
+                    onClick={handlePurgeDuplicates}
+                    disabled={isPurgingDuplicates}
+                    className="px-3 py-1.5 rounded-xl text-xs font-semibold bg-white hover:bg-emerald-50 text-emerald-700 border border-slate-200 hover:border-emerald-200 transition-colors flex items-center gap-1.5"
+                  >
+                    <ShieldCheck size={13} className={cn(isPurgingDuplicates && "animate-spin text-emerald-600")} />
+                    <span>Desvincular Asignaturas (Aislar Constitucional)</span>
                   </button>
 
                   <button

@@ -170,18 +170,87 @@ export function compareSessionsAsc(a: any, b: any): number {
  * - legacy "mercantil-17" if it was a mismapped Constitucional topic
  * - topicNumber: 17
  */
-import { normalizeCategoryToSubjectId, parseAeroFocusTopicIdPrefix } from "./topicResolver";
+import { 
+  normalizeCategoryToSubjectId, 
+  parseAeroFocusTopicIdPrefix,
+  resolveCanonicalJudicaturaId,
+  extractTopicNumber 
+} from "./topicResolver";
+
+/**
+ * Deduce con certeza la asignatura a la que pertenece una sesión.
+ * Jerarquía estricta:
+ * 1. topicId con prefijo conocido (ej: "constitucional-5", "civil-12", "penal-3")
+ * 2. subjectId explícito
+ * 3. parseAeroFocusTopicIdPrefix (ej: "CONST_T5", "CIV_T12")
+ * 4. resolveCanonicalJudicaturaId (ej: "jud-1" -> "constitucional", "jud-28" -> "civil")
+ * 5. Campo materia / category / asignatura
+ * 6. Fallback predeterminado: "constitucional" (ya que el usuario únicamente ha estudiado Constitucional)
+ */
+export function extractSessionSubjectId(s: any): string {
+  if (!s) return "constitucional";
+
+  const rawTopicId = String(s.topicId || "").trim().toLowerCase();
+
+  // 1. Prefijo directo oficial de Wellsprep en topicId
+  if (rawTopicId.startsWith("constitucional-") || rawTopicId.startsWith("constitucional_") || rawTopicId.startsWith("const-") || rawTopicId.startsWith("const_")) {
+    return "constitucional";
+  }
+  if (rawTopicId.startsWith("civil-") || rawTopicId.startsWith("civil_") || rawTopicId.startsWith("civ-") || rawTopicId.startsWith("civ_")) {
+    return "civil";
+  }
+  if (rawTopicId.startsWith("penal-") || rawTopicId.startsWith("penal_") || rawTopicId.startsWith("pen-") || rawTopicId.startsWith("pen_")) {
+    return "penal";
+  }
+  if (rawTopicId.startsWith("procesal-civil-") || rawTopicId.startsWith("procesal_civil_") || rawTopicId.startsWith("proc-civ-") || rawTopicId.startsWith("pciv-")) {
+    return "procesal-civil";
+  }
+  if (rawTopicId.startsWith("procesal-penal-") || rawTopicId.startsWith("procesal_penal_") || rawTopicId.startsWith("proc-pen-") || rawTopicId.startsWith("ppen-")) {
+    return "procesal-penal";
+  }
+  if (rawTopicId.startsWith("mercantil-") || rawTopicId.startsWith("mercantil_") || rawTopicId.startsWith("merc-")) {
+    return "mercantil";
+  }
+  if (rawTopicId.startsWith("administrativo-laboral-") || rawTopicId.startsWith("administrativo_laboral_") || rawTopicId.startsWith("admin-lab-")) {
+    return "administrativo-laboral";
+  }
+
+  // 2. Campo subjectId directo
+  if (s.subjectId) {
+    const sId = normalizeCategoryToSubjectId(s.subjectId) || String(s.subjectId).toLowerCase().trim();
+    if (sId) return sId;
+  }
+
+  // 3. Formato AeroFocus (jud-1..jud-328 o prefijos CIV_T12, etc.)
+  const parsedPrefix = parseAeroFocusTopicIdPrefix(rawTopicId);
+  if (parsedPrefix?.subjectId) {
+    return parsedPrefix.subjectId;
+  }
+  const canonical = resolveCanonicalJudicaturaId(rawTopicId);
+  if (canonical?.subjectId) {
+    return canonical.subjectId;
+  }
+
+  // 4. Campo category, materia o asignatura
+  const cat = s.category || s.materia || s.asignatura;
+  if (cat) {
+    const normalized = normalizeCategoryToSubjectId(cat);
+    if (normalized) return normalized;
+  }
+
+  // 5. Título de tema o notas con mención explícita
+  const text = `${s.topicTitle || ""} ${s.notes || ""}`.toLowerCase();
+  const subjFromText = normalizeCategoryToSubjectId(text);
+  if (subjFromText) return subjFromText;
+
+  // 6. Por defecto, dado que la única asignatura estudiada en la oposición es Constitucional
+  return "constitucional";
+}
 
 /**
  * Universal topic session matcher.
- * Matches whether a session `s` corresponds to the given `topic` (e.g. Tema 5 Constitucional),
- * handling variations such as:
- * - "constitucional-5", "constitucional_5", "const-5", "const_5"
- * - "5" or 5
- * - "tema-5" or "Tema 5" or "t5" or "t-5"
- * - legacy "mercantil-5" if it was a mismapped Constitucional topic
- * - topicNumber: 5
- * - subject name variations ("CONST", "Constitución", "Derecho Constitucional")
+ * Matches whether a session `s` corresponds to the given `topic` (e.g. Tema 5 Constitucional).
+ * Strictly guarantees that sessions for one subject NEVER leak into another subject.
  */
 export function sessionMatchesTopic(
   s: any,
@@ -189,104 +258,56 @@ export function sessionMatchesTopic(
 ): boolean {
   if (!s || !topic) return false;
 
-  const sTopicId = String(s.topicId || "").trim().toLowerCase();
   const targetId = String(topic.id || "").trim().toLowerCase();
+  const targetSubj = normalizeCategoryToSubjectId(topic.subjectId) || String(topic.subjectId || "").toLowerCase().trim();
   const topicNum = Number(topic.number);
-  const topicNumStr = String(topicNum);
 
-  // 1. Exact topic ID match
+  // 1. Extraer asignatura de la sesión
+  const sessionSubj = extractSessionSubjectId(s);
+
+  // REGLA FUNDAMENTAL DE AISLAMIENTO:
+  // Si la sesión pertenece a una asignatura distinta de la del tema consultado, NO HAY COINCIDENCIA.
+  // Esto elimina de raíz la duplicación entre Constitucional, Civil, Penal, etc.
+  if (sessionSubj !== targetSubj) {
+    return false;
+  }
+
+  // 2. Si la asignatura coincide, comprobar el número de tema
+  const sTopicId = String(s.topicId || "").trim().toLowerCase();
   if (sTopicId === targetId) return true;
 
-  // Normalized subjects
-  const targetSubj = normalizeCategoryToSubjectId(topic.subjectId) || String(topic.subjectId || "").toLowerCase();
-  const sessionSubj = s.subjectId ? (normalizeCategoryToSubjectId(s.subjectId) || String(s.subjectId).toLowerCase()) : null;
-
-  // Subject compatibility helper
-  const subjectCompatible = !sessionSubj || sessionSubj === targetSubj || 
-    (targetSubj === 'constitucional' && (sessionSubj === 'general' || sessionSubj === 'const'));
-
-  // 2. Direct numeric ID (e.g. s.topicId === "5" or 5)
-  if (sTopicId === topicNumStr) {
-    if (subjectCompatible) return true;
+  // Extraer número de la sesión
+  let sNum: number | null = null;
+  if (s.topicNumber !== undefined && !isNaN(Number(s.topicNumber))) {
+    sNum = Number(s.topicNumber);
+  } else if (s.temaNumero !== undefined && !isNaN(Number(s.temaNumero))) {
+    sNum = Number(s.temaNumero);
+  } else {
+    sNum = extractTopicNumber(sTopicId) || extractTopicNumber(s.topicTitle);
   }
 
-  // 3. Match by topicNumber property
-  if (s.topicNumber !== undefined && Number(s.topicNumber) === topicNum) {
-    if (subjectCompatible) return true;
+  if (sNum !== null && sNum === topicNum) {
+    return true;
   }
 
-  // 4. Try parsing prefixes like "CONST_T5", "CONST-5", "CIV_T12"
-  const parsedPrefix = parseAeroFocusTopicIdPrefix(sTopicId);
-  if (parsedPrefix && parsedPrefix.number === topicNum) {
-    if (parsedPrefix.subjectId === targetSubj || (!parsedPrefix.subjectId && subjectCompatible)) {
-      return true;
-    }
-  }
-
-  // 5. Match prefix and variations (e.g. "tema-5", "tema 5", "t5", "tema_5", "const-5", "const_5")
+  // Comprobar sufijos exactos: ej. "constitucional-5" o "tema-5"
+  const topicNumStr = String(topicNum);
   if (
+    sTopicId === `${targetSubj}-${topicNumStr}` ||
+    sTopicId === `${targetSubj}_${topicNumStr}` ||
+    sTopicId === topicNumStr ||
     sTopicId === `tema-${topicNumStr}` ||
     sTopicId === `tema ${topicNumStr}` ||
-    sTopicId === `tema_${topicNumStr}` ||
     sTopicId === `t-${topicNumStr}` ||
-    sTopicId === `t${topicNumStr}` ||
-    sTopicId === `const-${topicNumStr}` ||
-    sTopicId === `const_${topicNumStr}` ||
-    sTopicId === `constitucional-${topicNumStr}` ||
-    sTopicId === `constitucional_${topicNumStr}`
+    sTopicId === `t${topicNumStr}`
   ) {
-    if (subjectCompatible) return true;
+    return true;
   }
 
-  // 6. Match ending with "-5" or "_5"
-  if (sTopicId.endsWith(`-${topicNumStr}`) || sTopicId.endsWith(`_${topicNumStr}`)) {
-    const prefix = sTopicId.slice(0, -(topicNumStr.length + 1));
-    const prefixSubj = normalizeCategoryToSubjectId(prefix);
-    if (!prefixSubj || prefixSubj === targetSubj) {
-      if (subjectCompatible) return true;
-    }
-    // If it was stored under mercantil-5 or penal (5 or 12) but active subject is constitucional
-    if (targetSubj === "constitucional" && (sTopicId.startsWith("mercantil") || sTopicId.startsWith("constitucional") || (topicNum === 5 && (sTopicId.startsWith("penal") || sTopicId.startsWith("jud-pen"))))) {
-      return true;
-    }
-  }
-
-  // Special match: Penal 5 & Penal 12 belong to Constitucional 5
+  // Casos especiales históricos de Constitucional 5
   if (targetSubj === "constitucional" && topicNum === 5) {
-    const tCorpus = `${s.topicTitle || ""} ${s.notes || ""} ${s.category || ""}`.toLowerCase();
-    if (
-      sTopicId === "penal-5" ||
-      sTopicId === "penal-12" ||
-      sTopicId === "penal_5" ||
-      sTopicId === "penal_12" ||
-      sTopicId === "jud-pen-05" ||
-      sTopicId === "jud-pen-12" ||
-      tCorpus.includes("penal 5") ||
-      tCorpus.includes("penal 12") ||
-      tCorpus.includes("delito imprudente") ||
-      tCorpus.includes("circunstancias agravantes")
-    ) {
+    if (sTopicId === "penal-5" || sTopicId === "penal-12" || sTopicId === "mercantil-5") {
       return true;
-    }
-  }
-
-  // 7. Check notes or title if they explicitly mention "Tema 5"
-  const textCorpus = `${s.topicTitle || ""} ${s.notes || ""} ${s.mistakes || ""}`.toLowerCase();
-  if (
-    textCorpus.includes(`tema ${topicNumStr}`) ||
-    textCorpus.includes(`tema: ${topicNumStr}`) ||
-    textCorpus.includes(`tema ${topicNumStr}:`) ||
-    textCorpus.includes(`tema ${topicNumStr} `)
-  ) {
-    if (subjectCompatible) return true;
-  }
-
-  // 8. Match by topic title key phrase
-  if (topic.title && s.topicTitle) {
-    const sTitle = String(s.topicTitle).toLowerCase();
-    const tTitle = String(topic.title).toLowerCase();
-    if (sTitle.length > 8 && tTitle.includes(sTitle.slice(0, 20))) {
-      if (subjectCompatible) return true;
     }
   }
 

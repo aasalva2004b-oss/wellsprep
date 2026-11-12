@@ -83,7 +83,7 @@ export function buildSubjectTelemetryIndex(
 
     for (const s of directSessions) {
       const sid = s.id || JSON.stringify(s);
-      if (!sessionSeen.has(sid)) {
+      if (!sessionSeen.has(sid) && sessionMatchesTopic(s, topic)) {
         sessionSeen.add(sid);
         topicSessions.push(s);
       }

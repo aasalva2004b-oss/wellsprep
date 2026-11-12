@@ -130,153 +130,59 @@ export const WeeklyPlannerStrip: React.FC<WeeklyPlannerStripProps> = ({
     <div className="bg-white/95 backdrop-blur-xl border border-slate-200/80 rounded-2xl shadow-xs overflow-hidden mb-4">
       {/* Header Bar with Week Controls and Countdown */}
       <div className="px-4 py-3 border-b border-slate-100 flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-2.5">
-          <div className="w-8 h-8 rounded-xl bg-slate-900 text-white flex items-center justify-center font-bold text-xs shadow-xs">
-            <CalendarIcon size={15} />
+        <div className="flex items-center gap-3">
+          <div className="flex items-center bg-slate-100 p-0.5 rounded-xl border border-slate-200/70">
+            <button
+              type="button"
+              onClick={() => { playSound.click(); setWeekOffset(w => w - 1); }}
+              className="p-1 hover:bg-white rounded-lg text-slate-500 hover:text-slate-900 transition-colors"
+              title="Semana anterior"
+            >
+              <ChevronLeft size={16} />
+            </button>
+            <button
+              type="button"
+              onClick={() => { playSound.click(); setWeekOffset(0); }}
+              className="px-2 py-0.5 text-xs font-bold text-slate-700 hover:text-slate-900"
+              title="Ir a semana actual"
+            >
+              {weekOffset === 0 ? "Semana Actual" : weekOffset > 0 ? `+${weekOffset} sem` : `${weekOffset} sem`}
+            </button>
+            <button
+              type="button"
+              onClick={() => { playSound.click(); setWeekOffset(w => w + 1); }}
+              className="p-1 hover:bg-white rounded-lg text-slate-500 hover:text-slate-900 transition-colors"
+              title="Semana siguiente"
+            >
+              <ChevronRight size={16} />
+            </button>
           </div>
-          <div>
-            <div className="flex items-center gap-2">
-              <h2 className="text-sm font-black font-serif text-slate-900 tracking-tight">
-                Planificador Semanal del Opositor
-              </h2>
-              {weekOffset === 0 ? (
-                <span className="text-[10px] font-bold uppercase tracking-wider text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200/60">
-                  Semana Actual
-                </span>
-              ) : (
-                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-600 bg-slate-100 px-2 py-0.5 rounded-full">
-                  {weekOffset > 0 ? `+${weekOffset} sem` : `${weekOffset} sem`}
-                </span>
-              )}
-            </div>
-            <p className="text-[11px] text-slate-500 font-medium flex items-center gap-1.5 mt-0.5">
+
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-bold text-slate-700">
+              {weekDays[0]?.dateNum} {weekDays[0]?.monthName} — {weekDays[6]?.dateNum} {weekDays[6]?.monthName}
+            </span>
+            <span className="inline-flex items-center gap-1.5 text-[11px] text-slate-500 font-medium">
               <Clock size={11} className={cn(nextCanteInfo.urgent ? "text-amber-600 animate-pulse" : "text-slate-400")} />
               <span className={cn(nextCanteInfo.urgent && "font-bold text-amber-900")}>
                 {nextCanteInfo.message}
               </span>
-            </p>
+            </span>
           </div>
         </div>
 
-        {/* Unified Mode Selector Switcher */}
-        <div className="flex items-center gap-1.5 flex-wrap">
-          {/* 1. Master 7-Day Grid View Tab */}
-          <button
-            type="button"
-            onClick={() => {
-              playSound.click();
-              onSelectView("semana_completa");
-            }}
-            className={cn(
-              "px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 border active:scale-95 shadow-2xs",
-              activeView === "semana_completa"
-                ? "bg-slate-900 text-white border-slate-900 shadow-xs"
-                : "bg-white text-slate-700 border-slate-200 hover:bg-slate-50 hover:text-slate-900"
-            )}
-          >
-            <CalendarIcon size={14} className={activeView === "semana_completa" ? "text-amber-400" : "text-slate-400"} />
-            <span>Vista Semanal (7 Días)</span>
-          </button>
-
-          {/* 2. Cante Lunes */}
-          <button
-            type="button"
-            onClick={() => {
-              playSound.click();
-              onSelectView("lunes");
-            }}
-            className={cn(
-              "px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 border active:scale-95 shadow-2xs",
-              activeView === "lunes"
-                ? "bg-purple-900 text-white border-purple-900 shadow-xs ring-1 ring-purple-400/40"
-                : "bg-white text-slate-700 border-slate-200 hover:bg-purple-50 hover:text-purple-900"
-            )}
-          >
-            <Award size={14} className={activeView === "lunes" ? "text-amber-300" : "text-purple-600"} />
-            <span>Cante Lunes</span>
-            <span className={cn(
-              "text-[10px] font-mono font-bold px-1.5 py-0.2 rounded-full",
-              activeView === "lunes" ? "bg-purple-800 text-purple-100" : "bg-purple-50 text-purple-700 border border-purple-200"
-            )}>
-              {lunesTopicsCount}
-            </span>
-          </button>
-
-          {/* 3. Cante Jueves */}
-          <button
-            type="button"
-            onClick={() => {
-              playSound.click();
-              onSelectView("jueves");
-            }}
-            className={cn(
-              "px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 border active:scale-95 shadow-2xs",
-              activeView === "jueves"
-                ? "bg-purple-900 text-white border-purple-900 shadow-xs ring-1 ring-purple-400/40"
-                : "bg-white text-slate-700 border-slate-200 hover:bg-purple-50 hover:text-purple-900"
-            )}
-          >
-            <Award size={14} className={activeView === "jueves" ? "text-amber-300" : "text-purple-600"} />
-            <span>Cante Jueves</span>
-            <span className={cn(
-              "text-[10px] font-mono font-bold px-1.5 py-0.2 rounded-full",
-              activeView === "jueves" ? "bg-purple-800 text-purple-100" : "bg-purple-50 text-purple-700 border border-purple-200"
-            )}>
-              {juevesTopicsCount}
-            </span>
-          </button>
-
-          {/* 4. Curva de Olvido (Ebbinghaus) */}
-          <button
-            type="button"
-            onClick={() => {
-              playSound.click();
-              onSelectView("ebbinghaus");
-            }}
-            className={cn(
-              "px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 border active:scale-95 shadow-2xs",
-              activeView === "ebbinghaus"
-                ? "bg-amber-500 text-white border-amber-600 shadow-xs"
-                : "bg-white text-slate-700 border-slate-200 hover:bg-amber-50 hover:text-amber-900"
-            )}
-            title="Temas en riesgo según la curva de retención Ebbinghaus"
-          >
-            <Brain size={14} className={activeView === "ebbinghaus" ? "text-white" : "text-amber-500"} />
-            <span>Curva de Olvido</span>
-            {ebbinghausAlertCount > 0 && (
-              <span className={cn(
-                "text-[10px] font-mono font-black px-1.5 py-0.2 rounded-full",
-                activeView === "ebbinghaus" ? "bg-amber-700 text-white" : "bg-rose-100 text-rose-700"
-              )}>
-                {ebbinghausAlertCount}
-              </span>
-            )}
-          </button>
-
-          {/* 5. Historial Tab */}
-          <button
-            type="button"
-            onClick={() => {
-              playSound.click();
-              onSelectView("historial");
-            }}
-            className={cn(
-              "px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 border active:scale-95 shadow-2xs",
-              activeView === "historial"
-                ? "bg-slate-900 text-white border-slate-900 shadow-xs"
-                : "bg-white text-slate-700 border-slate-200 hover:bg-slate-50 hover:text-slate-900"
-            )}
-          >
-            <Award size={14} className={activeView === "historial" ? "text-amber-400" : "text-slate-400"} />
-            <span>Historial</span>
-            <span className={cn(
-              "text-[10px] font-mono font-bold px-1.5 py-0.2 rounded-full",
-              activeView === "historial" ? "bg-slate-800 text-white" : "bg-slate-100 text-slate-600"
-            )}>
-              {totalCantosCount}
-            </span>
-          </button>
-        </div>
+        {/* Action to switch to full 7-day grid */}
+        <button
+          type="button"
+          onClick={() => {
+            playSound.click();
+            onSelectView("semana_completa");
+          }}
+          className="px-3 py-1.5 rounded-xl text-xs font-bold bg-slate-900 hover:bg-slate-800 text-white transition-all flex items-center gap-1.5 active:scale-95 shadow-2xs"
+        >
+          <CalendarIcon size={13} className="text-amber-400" />
+          <span>Abrir Planificador 7 Días</span>
+        </button>
       </div>
 
       {/* 7-Day Ribbon Grid: ONLY shown when in Cante Cockpit or Day Study to avoid duplicate 7-day grid in Weekly Planner */}

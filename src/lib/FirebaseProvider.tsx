@@ -32,8 +32,15 @@ import Papa from "papaparse";
 import { Topic } from "../types";
 import { TopicProgressData } from "./prediction";
 import { WebhookSyncRecord, WebhookResolvedTopic } from "./webhookTypes";
-import { isCantoSession, getCantoDuration, sessionMatchesTopic } from "./cantoUtils";
-import { resolveAeroFocusTopic, extractMinutesFromAeroItem, extractTopicNumber, normalizeCategoryToSubjectId } from "./topicResolver";
+import { isCantoSession, getCantoDuration, sessionMatchesTopic, extractSessionSubjectId } from "./cantoUtils";
+import { 
+  resolveAeroFocusTopic, 
+  extractMinutesFromAeroItem, 
+  extractTopicNumber, 
+  normalizeCategoryToSubjectId,
+  resolveCanonicalJudicaturaId,
+  parseAeroFocusTopicIdPrefix
+} from "./topicResolver";
 import { parseAeroFocusInput } from "./aeroFocusParser";
 import { initialTopics } from "../data/initialData";
 
@@ -89,6 +96,34 @@ export function cleanForFirestore<T>(data: T): T {
     }
   }
   return cleanObj as T;
+}
+
+export function normalizeCanonicalTopicId(rawId: any): string {
+  if (rawId === null || rawId === undefined) return "constitucional-1";
+  const str = String(rawId).trim().toLowerCase();
+
+  // If pure number: 1-29 are strictly Constitucional
+  const numMatch = str.match(/^(\d+)$/);
+  if (numMatch) {
+    const num = parseInt(numMatch[1], 10);
+    return `constitucional-${num}`;
+  }
+
+  // Matches like "tema 5", "tema-5", "t5", "t-5"
+  const temaMatch = str.match(/^(?:tema|t)[\s_-]*(\d+)$/i);
+  if (temaMatch) {
+    const num = parseInt(temaMatch[1], 10);
+    return `constitucional-${num}`;
+  }
+
+  // Matches like "const-5", "const_5", "constitucion-5", "constitucional-5"
+  const constMatch = str.match(/^(?:const|constitucion|constitucional)[\s_-]*(\d+)$/i);
+  if (constMatch) {
+    const num = parseInt(constMatch[1], 10);
+    return `constitucional-${num}`;
+  }
+
+  return str;
 }
 
 export interface UserSettingsData {
@@ -177,6 +212,7 @@ interface FirebaseContextType {
   purgeAllAeroFocusData: () => Promise<void>;
   purgePhantomTema5Cante: () => Promise<void>;
   migratePenalSessionsToConstitucional5: (silent?: boolean) => Promise<{ migratedCount: number }>;
+  migrateAndPurgeNonConstitucionalData: (silent?: boolean) => Promise<{ migratedCount: number; purgedCount: number }>;
   deduplicateUserSessions: (silent?: boolean) => Promise<{ deletedCount: number; affectedTopics: string[] }>;
   recoverHistoricalUserData: (silent?: boolean) => Promise<any>;
   quarantinedEvents: WebhookSyncRecord[];
@@ -260,30 +296,14 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
     };
 
     const normalizeSession = (id: string, data: any, originDb: string) => {
-      let canonicalTopicId = data.topicId;
-      if (canonicalTopicId === "5" || canonicalTopicId === 5) {
-        canonicalTopicId = "constitucional-5";
-      } else if (canonicalTopicId === "7" || canonicalTopicId === 7) {
-        canonicalTopicId = "constitucional-7";
-      } else if (canonicalTopicId === "17" || canonicalTopicId === 17) {
-        canonicalTopicId = "constitucional-17";
-      } else if (typeof canonicalTopicId === "string") {
-        const clean = canonicalTopicId.toLowerCase().trim();
-        if (clean === "5" || clean === "tema-5" || clean === "tema 5" || clean === "t5" || clean === "t-5") {
-          canonicalTopicId = "constitucional-5";
-        } else if (clean === "7" || clean === "tema-7" || clean === "tema 7" || clean === "t7" || clean === "t-7") {
-          canonicalTopicId = "constitucional-7";
-        } else if (clean === "17" || clean === "tema-17" || clean === "tema 17" || clean === "t17" || clean === "t-17") {
-          canonicalTopicId = "constitucional-17";
-        } else if (clean.startsWith("const-") || clean.startsWith("const_")) {
-          canonicalTopicId = `constitucional-${clean.replace(/^const[-_]/, "")}`;
-        }
-      }
+      const canonicalTopicId = normalizeCanonicalTopicId(data.topicId);
+      const sSubject = data.subjectId || (canonicalTopicId.includes("-") ? canonicalTopicId.split("-")[0] : "constitucional");
 
       return {
         id,
         ...data,
         topicId: canonicalTopicId,
+        subjectId: sSubject,
         originalTopicId: data.topicId,
         originDb,
       };
@@ -364,12 +384,7 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
 
       snapshot.forEach((docSnap: any) => {
         const rawData = { ...docSnap.data() };
-        let tId = docSnap.id;
-        if (tId === "5" || tId === 5) {
-          tId = "constitucional-5";
-        } else if (typeof tId === "string" && (tId.startsWith("const-") || tId.startsWith("const_"))) {
-          tId = `constitucional-${tId.replace(/^const[-_]/, "")}`;
-        }
+        const tId = normalizeCanonicalTopicId(docSnap.id);
 
         // Surgical shield: Prune phantom cante fields from progress document
         if (Number(rawData.ultimoCantoNota) === 8.5 && Number(rawData.ultimoCantoSegundos) === 30) {
@@ -490,16 +505,7 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
     }
 
     try {
-      let cleanTopicId = topicId.trim();
-      if (cleanTopicId === "7" || cleanTopicId === "tema-7" || cleanTopicId === "t7" || cleanTopicId === "const-7") {
-        cleanTopicId = "constitucional-7";
-      } else if (cleanTopicId === "17" || cleanTopicId === "tema-17" || cleanTopicId === "t17" || cleanTopicId === "const-17") {
-        cleanTopicId = "constitucional-17";
-      } else if (cleanTopicId === "5" || cleanTopicId === "tema-5" || cleanTopicId === "t5" || cleanTopicId === "const-5") {
-        cleanTopicId = "constitucional-5";
-      } else if (cleanTopicId.startsWith("const-") || cleanTopicId.startsWith("const_")) {
-        cleanTopicId = `constitucional-${cleanTopicId.replace(/^const[-_]/, "")}`;
-      }
+      const cleanTopicId = normalizeCanonicalTopicId(topicId.trim());
 
       const today = (providedDate && typeof providedDate === "string" && providedDate.trim()) 
         ? providedDate.trim() 
@@ -553,9 +559,11 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
 
       const sessionRef = doc(collection(db, `users/${user.uid}/sessions`));
       
+      const sessionSubject = cleanTopicId.includes("-") ? cleanTopicId.split("-")[0] : "constitucional";
       const sessionDataToSave = cleanForFirestore({
         userId: user.uid,
         topicId: cleanTopicId,
+        subjectId: sessionSubject,
         date: today,
         durationMinutes: durMinutes,
         durationReal: durMinutes,
@@ -2004,12 +2012,273 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
     await auditAndRestoreTopicIntegrity();
   };
 
-  // Sincronización automática de cuenta Google, deduplicación de cantes y blindaje de cuarentena
+  /**
+   * Saneamiento y migración definitiva de datos cruzados entre asignaturas.
+   * Dado que el opositor ha estudiado EXCLUSIVAMENTE Derecho Constitucional:
+   * 1. Si existen datos en otras asignaturas (civil, penal, mercantil, etc.) o con número suelto (1..29)
+   *    que no estén en el tema equivalente de Constitucional, se migran íntegramente a Constitucional.
+   * 2. Si ya están registrados en Constitucional o una vez migrados, se eliminan por completo de las
+   *    demás asignaturas en Firestore (progress y sessions) y en el estado en memoria.
+   */
+  const migrateAndPurgeNonConstitucionalData = async (silent: boolean = false) => {
+    if (!user) return { migratedCount: 0, purgedCount: 0 };
+
+    let toastId: string | number | undefined;
+    if (!silent) {
+      toastId = toast.loading("Saneando asignaturas y eliminando duplicados de Civil y Penal...");
+    }
+
+    try {
+      let migratedCount = 0;
+      let purgedCount = 0;
+      const touchedConstitucionalTopics = new Set<string>();
+
+      // Bases de datos a auditar (namedDb y defaultDb si está configurada)
+      const databasesToScan = [db];
+      if (defaultDb && defaultDb !== db) {
+        databasesToScan.push(defaultDb);
+      }
+
+      // ---------------------------------------------------------
+      // PASO 1: AUDITAR Y SANEAR COLECCIÓN PROGRESS
+      // ---------------------------------------------------------
+      for (const targetDb of databasesToScan) {
+        const progressSnap = await getDocs(collection(targetDb, `users/${user.uid}/progress`));
+
+        // Mapeo previo de documentos oficiales de Constitucional
+        const constDocsMap = new Map<number, { id: string; ref: any; data: any }>();
+        progressSnap.docs.forEach((d) => {
+          const docId = d.id.toLowerCase().trim();
+          if (docId.startsWith("constitucional-")) {
+            const num = parseInt(docId.split("-")[1], 10);
+            if (!isNaN(num)) {
+              constDocsMap.set(num, { id: d.id, ref: d.ref, data: d.data() });
+            }
+          }
+        });
+
+        for (const d of progressSnap.docs) {
+          const docId = d.id.toLowerCase().trim();
+          const data = d.data();
+
+          // Ignorar documentos canónicos de Constitucional
+          if (docId.startsWith("constitucional-")) {
+            continue;
+          }
+
+          // Extraer número de tema
+          let topicNum: number | null = null;
+          const matchNum = docId.match(/(\d+)/);
+          if (matchNum) {
+            topicNum = parseInt(matchNum[1], 10);
+          }
+
+          // Si el tema está dentro del rango de Constitucional (1..29), migrar datos faltantes
+          if (topicNum !== null && topicNum >= 1 && topicNum <= 29) {
+            const targetConstitucionalId = `constitucional-${topicNum}`;
+            touchedConstitucionalTopics.add(targetConstitucionalId);
+
+            const existingConst = constDocsMap.get(topicNum);
+            const targetRef = existingConst?.ref || doc(db, `users/${user.uid}/progress`, targetConstitucionalId);
+            const constData = existingConst?.data || userProgress[targetConstitucionalId] || {};
+
+            // Fusionar campos valiosos si Constitucional no los tiene o si son superiores
+            const fieldsToMigrate: any = {};
+            if ((Number(data.studyTimeHours) || 0) > (Number(constData.studyTimeHours) || 0)) {
+              fieldsToMigrate.studyTimeHours = Number(data.studyTimeHours);
+            }
+            if ((Number(data.vueltas) || 0) > (Number(constData.vueltas) || 0)) {
+              fieldsToMigrate.vueltas = Number(data.vueltas);
+            }
+            if (data.firstStudyDate && (!constData.firstStudyDate || data.firstStudyDate < constData.firstStudyDate)) {
+              fieldsToMigrate.firstStudyDate = data.firstStudyDate;
+            }
+            if (data.lastReviewDate && (!constData.lastReviewDate || data.lastReviewDate > constData.lastReviewDate)) {
+              fieldsToMigrate.lastReviewDate = data.lastReviewDate;
+            }
+            if (data.ultimoCantoNota && !constData.ultimoCantoNota) {
+              fieldsToMigrate.ultimoCantoNota = data.ultimoCantoNota;
+              fieldsToMigrate.ultimoCantoFecha = data.ultimoCantoFecha;
+              fieldsToMigrate.ultimoCantoMinutos = data.ultimoCantoMinutos;
+              fieldsToMigrate.ultimoCantoSegundos = data.ultimoCantoSegundos;
+            }
+            if (data.mejorTiempoCantoSegundos && !constData.mejorTiempoCantoSegundos) {
+              fieldsToMigrate.mejorTiempoCantoSegundos = data.mejorTiempoCantoSegundos;
+              fieldsToMigrate.mejorTiempoCantoMinutos = data.mejorTiempoCantoMinutos;
+            }
+            if (data.pages && !constData.pages) {
+              fieldsToMigrate.pages = data.pages;
+            }
+            if (data.numeroPalabras && !constData.numeroPalabras) {
+              fieldsToMigrate.numeroPalabras = data.numeroPalabras;
+            }
+            if (data.notas && !constData.notas) {
+              fieldsToMigrate.notas = data.notas;
+            }
+
+            if (Object.keys(fieldsToMigrate).length > 0) {
+              await setDoc(targetRef, cleanForFirestore({
+                ...fieldsToMigrate,
+                topicId: targetConstitucionalId,
+                userId: user.uid,
+                updatedAt: serverTimestamp(),
+              }), { merge: true });
+              migratedCount++;
+            }
+          }
+
+          // ELIMINAR el documento no-constitucional de progreso de Firestore
+          await deleteDoc(d.ref);
+          purgedCount++;
+        }
+      }
+
+      // ---------------------------------------------------------
+      // PASO 2: AUDITAR Y SANEAR COLECCIÓN SESSIONS
+      // ---------------------------------------------------------
+      for (const targetDb of databasesToScan) {
+        const sessionsSnap = await getDocs(collection(targetDb, `users/${user.uid}/sessions`));
+
+        // Mapeo previo de sesiones en Constitucional para evitar duplicados
+        const constSessionsList: any[] = [];
+        sessionsSnap.docs.forEach((d) => {
+          const sData = d.data();
+          const sSubj = extractSessionSubjectId(sData);
+          if (sSubj === "constitucional") {
+            constSessionsList.push({ id: d.id, ...sData });
+          }
+        });
+
+        for (const d of sessionsSnap.docs) {
+          const sData = d.data();
+          const sId = d.id;
+          const sSubj = extractSessionSubjectId(sData);
+          const rawTopic = String(sData.topicId || "").trim();
+
+          // Si la sesión ya es canónicamente Constitucional, no la tocamos
+          if (sSubj === "constitucional" && rawTopic.startsWith("constitucional-")) {
+            continue;
+          }
+
+          // Extraer número de tema
+          let topicNum: number | null = null;
+          const matchNum = rawTopic.match(/(\d+)/);
+          if (matchNum) {
+            topicNum = parseInt(matchNum[1], 10);
+          } else if (sData.topicNumber) {
+            topicNum = Number(sData.topicNumber);
+          }
+
+          // Si pertenece a 1..29, corresponde al único temario estudiado (Constitucional)
+          if (topicNum !== null && topicNum >= 1 && topicNum <= 29) {
+            const targetConstitucionalId = `constitucional-${topicNum}`;
+            touchedConstitucionalTopics.add(targetConstitucionalId);
+
+            // Verificar si ya existe una sesión equivalente en Constitucional
+            const sessionDate = sData.date || "";
+            const sessionType = sData.type || sData.modality || "repaso";
+            const sessionDurMin = Number(sData.durationMinutes || sData.durationReal || sData.duration || 0);
+            const sessionGrade = sData.cantoGrade ?? sData.grade;
+            const sessionSecs = Number(sData.cantoSeconds || sData.seconds || 0);
+
+            const isDuplicateOfConstitucional = constSessionsList.some((cs) => {
+              const csNum = extractTopicNumber(cs.topicId) || cs.topicNumber;
+              if (Number(csNum) !== topicNum) return false;
+              if (cs.date !== sessionDate) return false;
+              if ((cs.type || cs.modality) !== sessionType) return false;
+              if (Math.abs(Number(cs.durationMinutes || cs.durationReal || 0) - sessionDurMin) > 1) return false;
+              if (sessionGrade !== undefined && cs.cantoGrade !== undefined && cs.cantoGrade !== sessionGrade) return false;
+              if (sessionSecs > 0 && cs.cantoSeconds > 0 && Math.abs(cs.cantoSeconds - sessionSecs) > 2) return false;
+              return true;
+            });
+
+            if (isDuplicateOfConstitucional) {
+              // Ya está en Constitucional -> Eliminar la réplica de Civil/Penal
+              await deleteDoc(d.ref);
+              purgedCount++;
+            } else {
+              // No estaba en Constitucional -> Migrarla a Constitucional para no perder datos
+              await updateDoc(d.ref, {
+                topicId: targetConstitucionalId,
+                subjectId: "constitucional",
+                topicNumber: topicNum,
+                updatedAt: serverTimestamp(),
+              });
+              constSessionsList.push({ ...sData, id: sId, topicId: targetConstitucionalId, subjectId: "constitucional" });
+              migratedCount++;
+            }
+          } else {
+            // Número fuera de rango o asignatura residual no estudiada -> eliminar
+            await deleteDoc(d.ref);
+            purgedCount++;
+          }
+        }
+      }
+
+      // ---------------------------------------------------------
+      // PASO 3: LIMPIAR ESTADO LOCAL EN MEMORIA DE INMEDIATO
+      // ---------------------------------------------------------
+      setUserProgress((prev) => {
+        const clean: Record<string, TopicProgressData> = {};
+        Object.entries(prev).forEach(([key, val]) => {
+          if (key.startsWith("constitucional-")) {
+            clean[key] = val as TopicProgressData;
+          }
+        });
+        return clean;
+      });
+
+      setRecentSessions((prev) => {
+        return (prev || [])
+          .filter((s) => {
+            const subj = extractSessionSubjectId(s);
+            return subj === "constitucional";
+          })
+          .map((s) => {
+            const raw = String(s.topicId || "");
+            if (!raw.startsWith("constitucional-")) {
+              const num = extractTopicNumber(raw) || s.topicNumber;
+              if (num && num >= 1 && num <= 29) {
+                return { ...s, topicId: `constitucional-${num}`, subjectId: "constitucional" };
+              }
+            }
+            return s;
+          });
+      });
+
+      // Recalcular métricas de los temas constitucionales afectados
+      for (const tId of touchedConstitucionalTopics) {
+        await recalculateTopicFromSessions(tId);
+      }
+
+      if (toastId) toast.dismiss(toastId);
+
+      if (migratedCount > 0 || purgedCount > 0) {
+        if (!silent) {
+          toast.success(`Saneamiento exitoso: ${migratedCount} registros migrados a Constitucional y ${purgedCount} réplicas eliminadas de Civil y Penal.`);
+        }
+      } else if (!silent) {
+        toast.info("Integridad confirmada: Tus datos de Constitucional están perfectamente aislados y Civil/Penal están limpias.");
+      }
+
+      return { migratedCount, purgedCount };
+    } catch (err: any) {
+      console.error("Error en saneamiento de asignaturas:", err);
+      if (toastId) toast.dismiss(toastId);
+      if (!silent) {
+        toast.error("Error al sanear asignaturas: " + (err.message || err));
+      }
+      return { migratedCount: 0, purgedCount: 0 };
+    }
+  };
+
+  // Sincronización automática de cuenta Google, deduplicación de cantes, blindaje y saneamiento
   useEffect(() => {
     if (user) {
       recoverHistoricalUserData(true);
       purgePhantomTema5Cante();
       deduplicateUserSessions(true);
+      migrateAndPurgeNonConstitucionalData(true);
       fetchQuarantinedEvents();
     }
   }, [user?.uid]);
@@ -3201,6 +3470,7 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
         purgeAllAeroFocusData,
         purgePhantomTema5Cante,
         migratePenalSessionsToConstitucional5,
+        migrateAndPurgeNonConstitucionalData,
         deduplicateUserSessions,
         recoverHistoricalUserData,
         quarantinedEvents,

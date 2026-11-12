@@ -1,5 +1,6 @@
 import { TopicProgressData } from "./prediction";
 import { getLocalDateString, safeParseDate } from "./utils";
+import { sessionMatchesTopic } from "./cantoUtils";
 
 export type PreparadorPhase = 
   | 'sin_iniciar'          // Tema nuevo sin estudio inicial
@@ -64,19 +65,23 @@ export function calculateTopicCycle(
   const todayStr = getLocalDateString();
   const todayDate = new Date(todayStr);
 
-  // Normalización para concordancia infalible de identificadores
+  // Normalización para concordancia infalible y estrictamente aislada por asignatura
   const cleanTarget = String(topicId || "").toLowerCase().trim();
-  const cleanTargetShort = cleanTarget.replace(/^(constitucional|penal|civil|procesal|administrativo|laboral|mercantil|const)[-_]/i, "");
+  const parts = cleanTarget.split("-");
+  const targetSubject = parts.length > 1 ? parts[0] : "constitucional";
+  const numMatch = cleanTarget.match(/\d+/);
+  const targetNumber = numMatch ? parseInt(numMatch[0], 10) : undefined;
+  const targetTopicObj = {
+    id: cleanTarget,
+    subjectId: targetSubject,
+    number: targetNumber,
+  };
 
-  // Filtrar y ordenar sesiones cronológicamente
+  // Filtrar y ordenar sesiones cronológicamente respetando el aislamiento estricto de asignatura
   const topicSessions = (sessions || [])
     .filter((s) => {
       if (!s) return false;
-      const sTopic = String(s.topicId || "").toLowerCase().trim();
-      if (sTopic === cleanTarget) return true;
-      const sTopicShort = sTopic.replace(/^(constitucional|penal|civil|procesal|administrativo|laboral|mercantil|const)[-_]/i, "");
-      if (cleanTargetShort !== "" && sTopicShort === cleanTargetShort) return true;
-      return false;
+      return sessionMatchesTopic(s, targetTopicObj);
     })
     .sort((a, b) => {
       const dateCmp = (a.date || "").localeCompare(b.date || "");
