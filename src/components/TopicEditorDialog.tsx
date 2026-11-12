@@ -13,6 +13,7 @@ import {
   sessionMatchesTopic,
   compareSessionsDesc,
   compareSessionsAsc,
+  extractSubjectFromTopicId,
 } from "../lib/cantoUtils";
 
 // Atomic Subcomponents
@@ -438,6 +439,8 @@ export function TopicEditorDialog({
           cantoSeconds: logType === "canto" || logType === "simulacro" ? s : undefined,
           mistakes:
             (logType === "canto" || logType === "simulacro") && logMistakes ? logMistakes.trim() : undefined,
+          subjectId: topic.subjectId || extractSubjectFromTopicId(topic.id),
+          topicTitle: (customTitle || topic.title || "").trim(),
         }
       );
 

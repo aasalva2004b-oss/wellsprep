@@ -1,6 +1,6 @@
 import { Topic, Session } from "../types";
 import { TopicProgressData } from "./prediction";
-import { sessionMatchesTopic, isCantoSession, getCantoDuration } from "./cantoUtils";
+import { sessionMatchesTopic, isCantoSession, getCantoDuration, extractSubjectFromTopicId } from "./cantoUtils";
 
 export interface CanonicalTopic {
   id: string;
@@ -99,7 +99,7 @@ export function getCanonicalTopic(
   // 5. Título y materia
   const title = prog?.customTitle || baseTopic?.title || topicId;
   const fullTitle = baseTopic?.fullTitle || title;
-  const subjectId = prog?.subjectId || baseTopic?.subjectId || "constitucional";
+  const subjectId = prog?.subjectId || baseTopic?.subjectId || extractSubjectFromTopicId(topicId);
   const number = baseTopic?.number || parseInt(topicId.replace(/[^\d]/g, ""), 10) || 1;
 
   // 6. Análisis granular de sesiones reales de este tema

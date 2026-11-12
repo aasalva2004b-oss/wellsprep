@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { BookOpen, Save } from "lucide-react";
 import { Topic } from "../../types";
 import { toast } from "sonner";
+import { extractSubjectFromTopicId } from "../../lib/cantoUtils";
 
 interface TopicParametersCardProps {
   topic: Topic;
@@ -46,6 +47,7 @@ export const TopicParametersCard: React.FC<TopicParametersCardProps> = ({
         numeroPalabras: parsedPalabras,
         epigrafes: parsedEpigrafes,
         difficulty: Number(difficulty) || 5,
+        subjectId: topic.subjectId || extractSubjectFromTopicId(topic.id),
       });
       toast.success("Parámetros del tema guardados en la nube");
     } catch (err: any) {

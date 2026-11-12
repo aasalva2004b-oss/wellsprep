@@ -247,20 +247,38 @@ export function extractSessionSubjectId(s: any): string {
   return "constitucional";
 }
 
+export function extractSubjectFromTopicId(topicId: string): string {
+  const clean = String(topicId || "").trim().toLowerCase();
+  if (clean.startsWith("procesal-civil") || clean.startsWith("proc-civ") || clean.startsWith("pciv")) return "procesal-civil";
+  if (clean.startsWith("procesal-penal") || clean.startsWith("proc-pen") || clean.startsWith("ppen")) return "procesal-penal";
+  if (clean.startsWith("administrativo-laboral") || clean.startsWith("admin-lab")) return "administrativo-laboral";
+  if (clean.startsWith("constitucional") || clean.startsWith("const")) return "constitucional";
+  if (clean.startsWith("civil") || clean.startsWith("civ")) return "civil";
+  if (clean.startsWith("penal") || clean.startsWith("pen")) return "penal";
+  if (clean.startsWith("mercantil") || clean.startsWith("merc")) return "mercantil";
+  const parts = clean.split(/[-_]/);
+  return parts[0] || "constitucional";
+}
+
 /**
  * Universal topic session matcher.
- * Matches whether a session `s` corresponds to the given `topic` (e.g. Tema 5 Constitucional).
+ * Matches whether a session `s` corresponds to the given `topic` (e.g. Tema 5 Civil).
  * Strictly guarantees that sessions for one subject NEVER leak into another subject.
  */
 export function sessionMatchesTopic(
   s: any,
-  topic: { id: string; number: number; subjectId?: string; title?: string }
+  topic: { id: string; number?: number; subjectId?: string; title?: string }
 ): boolean {
   if (!s || !topic) return false;
 
   const targetId = String(topic.id || "").trim().toLowerCase();
-  const targetSubj = normalizeCategoryToSubjectId(topic.subjectId) || String(topic.subjectId || "").toLowerCase().trim();
-  const topicNum = Number(topic.number);
+  const targetSubj = normalizeCategoryToSubjectId(topic.subjectId) || 
+    (topic.subjectId ? String(topic.subjectId).toLowerCase().trim() : "") ||
+    (topic.id ? extractSubjectFromTopicId(topic.id) : "constitucional");
+
+  const topicNum = topic.number !== undefined && !isNaN(Number(topic.number))
+    ? Number(topic.number)
+    : extractTopicNumber(topic.id);
 
   // 1. Extraer asignatura de la sesión
   const sessionSubj = extractSessionSubjectId(s);
@@ -286,27 +304,22 @@ export function sessionMatchesTopic(
     sNum = extractTopicNumber(sTopicId) || extractTopicNumber(s.topicTitle);
   }
 
-  if (sNum !== null && sNum === topicNum) {
+  if (sNum !== null && topicNum !== null && sNum === topicNum) {
     return true;
   }
 
-  // Comprobar sufijos exactos: ej. "constitucional-5" o "tema-5"
-  const topicNumStr = String(topicNum);
-  if (
-    sTopicId === `${targetSubj}-${topicNumStr}` ||
-    sTopicId === `${targetSubj}_${topicNumStr}` ||
-    sTopicId === topicNumStr ||
-    sTopicId === `tema-${topicNumStr}` ||
-    sTopicId === `tema ${topicNumStr}` ||
-    sTopicId === `t-${topicNumStr}` ||
-    sTopicId === `t${topicNumStr}`
-  ) {
-    return true;
-  }
-
-  // Casos especiales históricos de Constitucional 5
-  if (targetSubj === "constitucional" && topicNum === 5) {
-    if (sTopicId === "penal-5" || sTopicId === "penal-12" || sTopicId === "mercantil-5") {
+  // Comprobar sufijos exactos: ej. "civil-5" o "tema-5"
+  if (topicNum !== null) {
+    const topicNumStr = String(topicNum);
+    if (
+      sTopicId === `${targetSubj}-${topicNumStr}` ||
+      sTopicId === `${targetSubj}_${topicNumStr}` ||
+      sTopicId === topicNumStr ||
+      sTopicId === `tema-${topicNumStr}` ||
+      sTopicId === `tema ${topicNumStr}` ||
+      sTopicId === `t-${topicNumStr}` ||
+      sTopicId === `t${topicNumStr}`
+    ) {
       return true;
     }
   }
