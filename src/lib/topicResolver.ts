@@ -643,3 +643,17 @@ function buildResolvedTopic(
 
   return resolved;
 }
+
+/** Normalize only explicit, recognised identities. Unknown/custom IDs and bare
+ * numbers keep their identity unless their subject was actually recorded. */
+export function normalizeKnownTopicId(value: unknown, subject?: unknown): string {
+  const id = String(value ?? '').trim();
+  const known = /^(?:(?:constitucional|constitucion|const|civil|civ|penal|pen|procesal[-_]civil|proc[-_]civ|pciv|procesal[-_]penal|proc[-_]pen|ppen|mercantil|merc|administrativo[-_]laboral|admin[-_]lab)[-_]\d+|jud[-_](?:\d+|[a-z]+[-_]\d+)|(?:CONST|CIV|PEN|PCIV|PPEN|MERC|ADM)[-_]T?\d+)$/i;
+  if (known.test(id)) {
+    const identity = parseAeroFocusTopicIdPrefix(id.replace(/_/g, '-'));
+    if (identity) return `${identity.subjectId}-${identity.number}`;
+  }
+  const numeric = id.match(/^(?:(?:tema|t)[-_ ]*)?(\d+)$/i);
+  const subjectId = typeof subject === 'string' ? normalizeCategoryToSubjectId(subject) : null;
+  return numeric && subjectId ? `${subjectId}-${Number(numeric[1])}` : id;
+}

@@ -15,7 +15,7 @@ const topicId = 'civil-1';
 const record = (id, extra = {}) => ({ id, topicId, date: '2026-10-01', type: 'estudio_inicial', durationMinutes: 30, ...extra });
 const fixture = {
   schemaVersion: 2,
-  progress: [{ topicId, pages: 6, difficulty: 5, historyVersion: 3 }, { topicId: '5', pages: 5, firstStudyDate: '2026-10-01' }],
+  progress: [{ topicId, pages: 6, difficulty: 5, historyVersion: 3 }, { topicId: 'civil_1', pages: 77 }, { topicId: '5', pages: 5, firstStudyDate: '2026-10-01' }],
   sessions: [
     record('provider-part-1', { startPage: 1, endPage: 3, pagesCount: 3 }),
     record('provider-part-2', { startPage: 4, endPage: 6, pagesCount: 3 }),
@@ -102,6 +102,11 @@ try {
   await page.waitForFunction(() => window.__WELLSPREP_REPLAY__?.ready);
   await page.evaluate(async () => (await import('/.cache/provider-synthetic/probe.tsx')).mount());
   await page.waitForFunction(() => window.__PROVIDER_PROBE__?.loading === false && window.__PROVIDER_PROBE__.recentSessions.length === 5);
+  const masterIdentity = await page.evaluate(() => ({
+    pages: window.__PROVIDER_PROBE__.rawTopicProgress['civil-1'].pages,
+    duplicate: window.__PROVIDER_PROBE__.topicState.has('civil_1'),
+  }));
+  assert.deepEqual(masterIdentity, { pages: 6, duplicate: false }, 'Canonical master wins over historical aliases without creating another topic');
   const identities = await page.evaluate(() => {
     const probe = window.__PROVIDER_PROBE__;
     return {

@@ -38,7 +38,7 @@ import { Topic } from "../types";
 import { TopicProgressData } from "./prediction";
 import { WebhookSyncRecord, WebhookResolvedTopic } from "./webhookTypes";
 import { isCantoSession, getCantoDuration, sessionMatchesTopic } from "./cantoUtils";
-import { resolveAeroFocusTopic, extractMinutesFromAeroItem, extractTopicNumber, normalizeCategoryToSubjectId } from "./topicResolver";
+import { resolveAeroFocusTopic, extractMinutesFromAeroItem, extractTopicNumber, normalizeCategoryToSubjectId, normalizeKnownTopicId } from "./topicResolver";
 import { parseAeroFocusInput } from "./aeroFocusParser";
 import { initialTopics } from "../data/initialData";
 import { parseBackup, rehydrateBackupTimestamps } from './backup';
@@ -54,12 +54,7 @@ import { captureRetentionPrediction, estimateRetention, type RetentionConfig } f
 
 /** Missing subject evidence stays unresolved; a bare number never implies Constitucional. */
 function resolveStoredTopicId(value: unknown, subject?: unknown): string {
-  const id = String(value ?? '').trim();
-  const alias = id.toLowerCase().match(/^const[-_](\d+)$/);
-  if (alias) return `constitucional-${Number(alias[1])}`;
-  const numeric = id.toLowerCase().match(/^(?:(?:tema|t)[-_ ]*)?(\d+)$/);
-  const subjectId = typeof subject === 'string' ? normalizeCategoryToSubjectId(subject) : null;
-  return numeric && subjectId ? `${subjectId}-${Number(numeric[1])}` : id;
+  return normalizeKnownTopicId(value, subject);
 }
 
 async function rejectHeuristicMaintenance(): Promise<never> {

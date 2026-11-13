@@ -1,6 +1,0 @@
-{
-  "summary": "Documentación completa de la Fase 2 del Planificador Semanal de Judicatura de Wells Prep:\n- Balance Semanal de Rendimiento con comparativa de horas previstas vs reales (AeroFocus y WellsPrep).\n- Radar de Próximo Cante (Lunes y Jueves) con cuenta atrás y temas asignados.\n- Barra segmentada de filtros rápidos por tipo de actividad y estado de tareas.\n- Chips de filtrado rápido por materia en el editor de tareas.\n- Puntos de color indicadores de actividad en el selector de días de la versión móvil.\n- Registro directo de sesiones de estudio sincronizadas con el historial y curvas de Ebbinghaus.",
-  "updatedAt": "2026-11-05T19:23:16.453120279Z",
-  "requestFeedback": true,
-  "userFacing": true
-}
