@@ -43,6 +43,24 @@ import { cn } from "../lib/utils";
 import { TopicProgressData } from "../lib/prediction";
 import { calculateTopicCycle, TopicCycleInfo } from "../lib/oposicionCycle";
 import { motion, AnimatePresence } from "motion/react";
+import { useFirebase } from "../lib/FirebaseProvider";
+import { getCanonicalTopic, getSessionCategory, sessionDurationMinutes } from "../lib/canonicalTopicService";
+import { reportedMetric, reportedNumber } from "../lib/importedAnalyticsPresentation";
+import { DS } from "../lib/designSystem";
+import { useDialogAccessibility } from "../hooks/useDialogAccessibility";
+
+const measuredDifficulty = (value: unknown): number | null => {
+  const number = reportedNumber(value, 10);
+  return number !== null && number >= 1 ? number : null;
+};
+const observedAverage = (values: number[]): number | null =>
+  values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
+const observedMinutes = (sessions: any[]): number[] => sessions.map(sessionDurationMinutes).filter(minutes => minutes > 0);
+const formatDuration = (minutes: number | null): string => {
+  if (minutes === null) return '—';
+  const rounded = Math.round(minutes);
+  return rounded >= 60 ? `${Math.floor(rounded / 60)}h ${rounded % 60}m` : `${rounded}m`;
+};
 
 interface TopicsEvolutionSectionProps {
   topics: Topic[];
@@ -57,6 +75,7 @@ export function TopicsEvolutionSection({
   rawSessions,
   onSelectTopic,
 }: TopicsEvolutionSectionProps) {
+  const { topicState } = useFirebase();
   // Filtros interactivos
   const [selectedSubjectFilter, setSelectedSubjectFilter] = useState<string>("all");
   const [rankingFilter, setRankingFilter] = useState<
@@ -65,135 +84,43 @@ export function TopicsEvolutionSection({
   const [searchTerm, setSearchTerm] = useState("");
   const [activeMetricTab, setActiveMetricTab] = useState<"metodo_preparador" | "aceleracion" | "materias" | "tendencia">("metodo_preparador");
   const [inspectingTopicId, setInspectingTopicId] = useState<string | null>(null);
+  const [showAnalytics, setShowAnalytics] = useState(false);
+  const historyDialogRef = useDialogAccessibility<HTMLDivElement>({ isOpen: !!inspectingTopicId, onClose: () => setInspectingTopicId(null) });
 
-  // Pre-indexed sessions map for instant O(1) topic session lookups
-  const sessionsByTopic = useMemo(() => {
-    const map = new Map<string, any[]>();
-    (rawSessions || []).forEach((s) => {
-      if (s.type === "canto" || s.type === "simulacro" || !s.topicId) return;
-      const list = map.get(s.topicId);
-      if (!list) map.set(s.topicId, [s]);
-      else list.push(s);
-    });
-    map.forEach((list) => {
-      list.sort((a, b) => {
-        const dateCmp = (a.date || "").localeCompare(b.date || "");
-        if (dateCmp !== 0) return dateCmp;
-        const timeA = a.createdAt?.toMillis ? a.createdAt.toMillis() : (a.createdAt || 0);
-        const timeB = b.createdAt?.toMillis ? b.createdAt.toMillis() : (b.createdAt || 0);
-        return timeA - timeB;
-      });
-    });
-    return map;
-  }, [rawSessions]);
-
-  // Normalización y cálculo de telemetría por cada tema
-  const analyzedTopics = useMemo(() => {
-    return topics.map((topic) => {
-      const prog = userProgress[topic.id];
-      // Sesiones de estudio pre-ordenadas O(1)
-      const studySessions = sessionsByTopic.get(topic.id) || [];
-      const hasStudied = !!(prog?.firstStudyDate || studySessions.length > 0);
-
-      // Primera sesión de estudio
-      const firstSession = studySessions[0];
-      const lastSession = studySessions[studySessions.length - 1];
-
-      // Dificultad inicial registrada (de la primera sesión, o metadata del tema)
-      const initialDifficulty = firstSession?.difficulty ?? topic.difficulty ?? (prog?.difficulty || 5);
-      
-      // Dificultad actual / última registrada
-      const currentDifficulty = prog?.difficulty ?? lastSession?.difficulty ?? initialDifficulty;
-      
-      // Variación de dificultad (negativo = mejoró/redujo dificultad; positivo = aumentó dificultad)
-      const difficultyDelta = hasStudied ? currentDifficulty - initialDifficulty : 0;
-
-      // Tiempo total invertido
-      const totalMinutesFromSessions = studySessions.reduce(
-        (acc, s) => acc + (s.durationMinutes || s.duration || 0),
-        0
-      );
-      const totalMinutes =
-        totalMinutesFromSessions > 0
-          ? totalMinutesFromSessions
-          : Math.round((prog?.studyTimeHours || 0) * 60);
-
-      // Tiempo de primer estudio (1ª vuelta)
-      const firstStudySessions = studySessions.filter((s) => s.type === "estudio_inicial");
-      const firstStudyMinutes =
-        firstStudySessions.length > 0
-          ? firstStudySessions.reduce((acc, s) => acc + (s.durationMinutes || s.duration || 0), 0)
-          : firstSession
-          ? (firstSession.durationMinutes || firstSession.duration || 0)
-          : totalMinutes > 0 && !studySessions.length
-          ? totalMinutes
-          : 0;
-
-      // Sesiones de repaso o refresco
-      const reviewSessions = studySessions.filter(
-        (s) => s.type === "repaso" || s.type === "refresco" || (s !== firstSession && s.type !== "estudio_inicial")
-      );
-      const reviewMinutesTotal = reviewSessions.reduce(
-        (acc, s) => acc + (s.durationMinutes || s.duration || 0),
-        0
-      );
-      const avgReviewMinutes =
-        reviewSessions.length > 0 ? Math.round(reviewMinutesTotal / reviewSessions.length) : 0;
-
-      // Reducción porcentual de tiempo de repaso vs primer estudio
-      const timeReductionPct =
-        firstStudyMinutes > 0 && avgReviewMinutes > 0
-          ? Math.round(((firstStudyMinutes - avgReviewMinutes) / firstStudyMinutes) * 100)
-          : 0;
-
-      // Vueltas dadas
-      const vueltas = prog?.vueltas ?? Math.max(hasStudied ? 1 : 0, studySessions.filter((s) => s.completesVuelta).length);
-
-      // Clasificación de estado
-      let status: "sin_estudiar" | "dificil" | "muy_mejorado" | "dominado" | "en_progreso" = "sin_estudiar";
-      if (!hasStudied) {
-        status = "sin_estudiar";
-      } else if (currentDifficulty >= 8) {
-        status = "dificil";
-      } else if (difficultyDelta <= -2) {
-        status = "muy_mejorado";
-      } else if (currentDifficulty <= 4 && vueltas >= 2) {
-        status = "dominado";
-      } else {
-        status = "en_progreso";
-      }
-
-      const subject = initialSubjects.find((s) => s.id === topic.subjectId);
-
-      // Metodología oficial del Preparador: 3 refrescos + cante + repaso mensual (~30d)
-      const cycleInfo: TopicCycleInfo = calculateTopicCycle(topic.id, prog, rawSessions);
-
-      return {
-        id: topic.id,
-        number: topic.number,
-        title: topic.title,
-        subjectId: topic.subjectId,
-        subjectName: subject?.name || topic.subjectId,
-        subjectColor: subject?.color || "bg-slate-500",
-        hasStudied,
-        firstStudyDate: prog?.firstStudyDate || firstSession?.date || null,
-        lastReviewDate: prog?.lastReviewDate || lastSession?.date || null,
-        initialDifficulty,
-        currentDifficulty,
-        difficultyDelta,
-        totalMinutes,
-        firstStudyMinutes,
-        reviewSessionsCount: reviewSessions.length,
-        avgReviewMinutes,
-        timeReductionPct,
-        vueltas: cycleInfo.vueltas,
-        sessionsCount: studySessions.length,
-        sessions: studySessions,
-        status,
-        cycleInfo,
-      };
-    });
-  }, [topics, userProgress, sessionsByTopic]);
+  // The same read-only topic view used by the other sections resolves aliases,
+  // duplicate deliveries, measured coverage and historical units.
+  const analyzedTopics = useMemo(() => topics.map((topic) => {
+    const canonical = topicState.get(topic.id) || getCanonicalTopic(topic, topics, userProgress, rawSessions || []);
+    const studySessions = canonical.sessions.filter(session => getSessionCategory(session) !== 'cante');
+    const difficultySamples = studySessions.map(session => measuredDifficulty(session.difficulty)).filter((value): value is number => value !== null);
+    const initialDifficulty = difficultySamples[0] ?? null;
+    const currentDifficulty = canonical.hasExplicitDifficulty ? measuredDifficulty(canonical.difficulty) : difficultySamples.at(-1) ?? null;
+    const difficultyDelta = initialDifficulty !== null && currentDifficulty !== null ? currentDifficulty - initialDifficulty : null;
+    const reviewDurations = observedMinutes(canonical.reviewSessions);
+    const avgReviewMinutes = observedAverage(reviewDurations);
+    const firstStudyMinutes = canonical.totalInitialStudyMinutes;
+    const subject = initialSubjects.find(subject => subject.id === canonical.subjectId);
+    const cycleInfo = calculateTopicCycle(topic.id, userProgress[topic.id], canonical.sessions, canonical);
+    return {
+      id: topic.id, number: canonical.number, title: canonical.title,
+      subjectId: canonical.subjectId, subjectName: subject?.name || canonical.subjectId,
+      subjectColor: subject?.color || 'bg-slate-500',
+      hasStudied: canonical.hasStarted,
+      firstStudyDate: canonical.firstStudyDate || null,
+      lastReviewDate: canonical.lastReviewDate || null,
+      initialDifficulty, currentDifficulty, difficultyDelta,
+      totalMinutes: canonical.totalRecordedMinutes,
+      hasRecordedDuration: canonical.totalRecordedMinutes > 0,
+      firstStudyMinutes,
+      reviewSessionsCount: reviewDurations.length,
+      avgReviewMinutes,
+      vueltas: canonical.vueltas, vueltasIsExact: canonical.vueltasIsExact,
+      sessionsCount: canonical.sessions.length,
+      sessions: canonical.sessions,
+      studySessions,
+      cycleInfo,
+    };
+  }), [topics, userProgress, rawSessions, topicState]);
 
   // Temas estudiados filtrados
   const studiedTopics = useMemo(() => {
@@ -204,211 +131,64 @@ export function TopicsEvolutionSection({
   // MÉTRICAS Y PIPELINE OFICIAL DEL PREPARADOR
   // ============================================================================
   const preparadorPipeline = useMemo(() => {
-    const sinIniciar = analyzedTopics.filter((t) => t.cycleInfo.phase === 'sin_iniciar');
-    const enRefrescos = analyzedTopics.filter((t) => t.cycleInfo.phase === 'en_refrescos');
-    const listosCantar = analyzedTopics.filter((t) => t.cycleInfo.phase === 'listo_para_cantar');
-    const consolidadoMes = analyzedTopics.filter((t) => t.cycleInfo.phase === 'consolidado_mes');
-    const repasoPendiente = analyzedTopics.filter((t) => t.cycleInfo.phase === 'repaso_pendiente');
-    const repasoVencido = analyzedTopics.filter((t) => t.cycleInfo.phase === 'repaso_vencido');
-
-    // Tiempos reales en cada una de las fases del método del preparador
-    const initialStudyTimes: number[] = [];
-    const refresco1Times: number[] = [];
-    const refresco2Times: number[] = [];
-    const refresco3Times: number[] = [];
-    const cantosTimes: number[] = [];
-    const monthlyReviewTimes: number[] = [];
-
-    (rawSessions || []).forEach((s) => {
-      const duration = s.durationMinutes || s.duration || 0;
-      if (duration <= 0) return;
-
-      if (s.type === 'estudio_inicial' || s.type === 'primer_estudio') {
-        initialStudyTimes.push(duration);
-      } else if (s.type === 'canto') {
-        cantosTimes.push(duration);
-      } else if (s.type === 'repaso') {
-        monthlyReviewTimes.push(duration);
-      }
-    });
-
-    // Desglose de los 3 refrescos por orden en el historial de cada tema
-    analyzedTopics.forEach((t) => {
-      const topicRefrescos = t.sessions.filter((s) => s.type === 'refresco');
-
-      if (topicRefrescos[0]) refresco1Times.push(topicRefrescos[0].durationMinutes || topicRefrescos[0].duration || 0);
-      if (topicRefrescos[1]) refresco2Times.push(topicRefrescos[1].durationMinutes || topicRefrescos[1].duration || 0);
-      if (topicRefrescos[2]) refresco3Times.push(topicRefrescos[2].durationMinutes || topicRefrescos[2].duration || 0);
-    });
-
-    const avgInitial = initialStudyTimes.length > 0
-      ? Math.round(initialStudyTimes.reduce((a, b) => a + b, 0) / initialStudyTimes.length)
-      : 240;
-
-    const avgR1 = refresco1Times.length > 0
-      ? Math.round(refresco1Times.reduce((a, b) => a + b, 0) / refresco1Times.length)
-      : Math.round(avgInitial * 0.22); // ~50 min
-
-    const avgR2 = refresco2Times.length > 0
-      ? Math.round(refresco2Times.reduce((a, b) => a + b, 0) / refresco2Times.length)
-      : Math.round(avgR1 * 0.75); // ~38 min
-
-    const avgR3 = refresco3Times.length > 0
-      ? Math.round(refresco3Times.reduce((a, b) => a + b, 0) / refresco3Times.length)
-      : Math.round(avgR2 * 0.75); // ~28 min
-
-    const avgCanto = cantosTimes.length > 0
-      ? Math.round(cantosTimes.reduce((a, b) => a + b, 0) / cantosTimes.length)
-      : 15;
-
-    const avgMonthlyReview = monthlyReviewTimes.length > 0
-      ? Math.round(monthlyReviewTimes.reduce((a, b) => a + b, 0) / monthlyReviewTimes.length)
-      : Math.round(avgInitial * 0.35); // ~85 min
-
+    const sinIniciar = analyzedTopics.filter(topic => !topic.hasStudied);
+    const enRefrescos = analyzedTopics.filter(topic => topic.cycleInfo.refrescosCount > 0);
+    const listosCantar = analyzedTopics.filter(topic => topic.cycleInfo.lastCantoDate !== null);
+    const consolidadoMes = analyzedTopics.filter(topic => topic.cycleInfo.phase === 'consolidado_mes');
+    const repasoPendiente = analyzedTopics.filter(topic => topic.cycleInfo.phase === 'repaso_pendiente');
+    const repasoVencido = analyzedTopics.filter(topic => topic.cycleInfo.phase === 'repaso_vencido');
+    const samples = { initial: [] as number[], refresh: [] as number[], cante: [] as number[], review: [] as number[] };
+    analyzedTopics.forEach(topic => topic.sessions.forEach(session => {
+      const minutes = sessionDurationMinutes(session);
+      if (minutes <= 0) return;
+      const category = getSessionCategory(session);
+      if (category === 'initial_study') samples.initial.push(minutes);
+      else if (category === 'refresh') samples.refresh.push(minutes);
+      else if (category === 'cante') samples.cante.push(minutes);
+      else if (category === 'review') samples.review.push(minutes);
+    }));
     const cycleBreakdownChart = [
-      {
-        etapa: "Estudio Inicial",
-        sublabel: "Fijación profunda",
-        minutos: avgInitial,
-        horas: (avgInitial / 60).toFixed(1),
-        muestras: initialStudyTimes.length,
-        color: "#6366f1",
-      },
-      {
-        etapa: "Refresco D1",
-        sublabel: "Leer + Intentar cantar",
-        minutos: avgR1,
-        horas: (avgR1 / 60).toFixed(1),
-        muestras: refresco1Times.length,
-        color: "#f59e0b",
-      },
-      {
-        etapa: "Refresco D2",
-        sublabel: "Afianzar y fluidez",
-        minutos: avgR2,
-        horas: (avgR2 / 60).toFixed(1),
-        muestras: refresco2Times.length,
-        color: "#d97706",
-      },
-      {
-        etapa: "Refresco D3",
-        sublabel: "Último pulido oral",
-        minutos: avgR3,
-        horas: (avgR3 / 60).toFixed(1),
-        muestras: refresco3Times.length,
-        color: "#b45309",
-      },
-      {
-        etapa: "Canto Oficial",
-        sublabel: "Examen preparador",
-        minutos: avgCanto,
-        horas: (avgCanto / 60).toFixed(1),
-        muestras: cantosTimes.length,
-        color: "#c026d3",
-      },
-      {
-        etapa: "Repaso Mensual",
-        sublabel: "Vuelta periódica (~30d)",
-        minutos: avgMonthlyReview,
-        horas: (avgMonthlyReview / 60).toFixed(1),
-        muestras: monthlyReviewTimes.length,
-        color: "#10b981",
-      },
-    ];
-
-    return {
-      sinIniciar,
-      enRefrescos,
-      listosCantar,
-      consolidadoMes,
-      repasoPendiente,
-      repasoVencido,
-      totalTemas: analyzedTopics.length,
-      cycleBreakdownChart,
-      avgInitialMins: avgInitial,
-      avgRefresco1Mins: avgR1,
-      avgRefresco3Mins: avgR3,
-      refrescoSavingPct: avgInitial > 0 ? Math.round(((avgInitial - avgR3) / avgInitial) * 100) : 85,
-    };
-  }, [analyzedTopics, rawSessions]);
+      { etapa: 'Estudio inicial', sublabel: 'Por sesión registrada', samples: samples.initial, color: '#6366f1' },
+      { etapa: 'Refresco', sublabel: 'Sin cuota fija de contactos', samples: samples.refresh, color: '#f59e0b' },
+      { etapa: 'Cante', sublabel: 'Duración oral registrada', samples: samples.cante, color: '#c026d3' },
+      { etapa: 'Repaso', sublabel: 'Por sesión registrada', samples: samples.review, color: '#10b981' },
+    ].map(({ samples, ...item }) => {
+      const minutes = observedAverage(samples);
+      return { ...item, minutos: minutes === null ? null : Math.round(minutes), horas: minutes === null ? null : (minutes / 60).toFixed(1), muestras: samples.length };
+    });
+    return { sinIniciar, enRefrescos, listosCantar, consolidadoMes, repasoPendiente, repasoVencido,
+      totalTemas: analyzedTopics.length, cycleBreakdownChart };
+  }, [analyzedTopics]);
 
   // ============================================================================
   // MÉTRICAS GLOBALES DE ESTUDIO Y APRENDIZAJE
   // ============================================================================
   const vitals = useMemo(() => {
-    const studiedCount = studiedTopics.length;
-    if (studiedCount === 0) {
-      return {
-        studiedCount: 0,
-        avgNewTopicHours: 0,
-        avgNewTopicMinutesFormatted: "—",
-        avgReviewMinutesFormatted: "—",
-        globalTimeReductionPct: 0,
-        improvedTopicsCount: 0,
-        improvedPct: 0,
-        avgDifficultyDrop: 0,
-        initialAvgDiff: 0,
-        currentAvgDiff: 0,
-        hardTopicsCount: 0,
-        masteredTopicsCount: 0,
-      };
-    }
-
-    // Tiempo medio tema nuevo (1er estudio)
-    const validFirstStudies = studiedTopics.filter((t) => t.firstStudyMinutes > 0);
-    const totalNewTopicMinutes = validFirstStudies.reduce((acc, t) => acc + t.firstStudyMinutes, 0);
-    const avgNewTopicMins = validFirstStudies.length > 0 ? totalNewTopicMinutes / validFirstStudies.length : 0;
-    const newHours = Math.floor(avgNewTopicMins / 60);
-    const newMins = Math.round(avgNewTopicMins % 60);
-    const avgNewTopicMinutesFormatted = `${newHours}h ${newMins}m`;
-
-    // Tiempo medio de repaso
-    const validReviews = studiedTopics.filter((t) => t.avgReviewMinutes > 0);
-    const totalReviewMinutes = validReviews.reduce((acc, t) => acc + t.avgReviewMinutes, 0);
-    const avgReviewMins = validReviews.length > 0 ? totalReviewMinutes / validReviews.length : 0;
-    const revHours = Math.floor(avgReviewMins / 60);
-    const revMins = Math.round(avgReviewMins % 60);
-    const avgReviewMinutesFormatted = revHours > 0 ? `${revHours}h ${revMins}m` : `${revMins}m`;
-
-    // Reducción porcentual global
-    const globalTimeReductionPct =
-      avgNewTopicMins > 0 && avgReviewMins > 0
-        ? Math.round(((avgNewTopicMins - avgReviewMins) / avgNewTopicMins) * 100)
-        : 0;
-
-    // Temas que han mejorado de dificultad
-    const improvedTopics = studiedTopics.filter((t) => t.difficultyDelta < 0);
-    const improvedTopicsCount = improvedTopics.length;
-    const improvedPct = Math.round((improvedTopicsCount / studiedCount) * 100);
-
-    const totalDrop = improvedTopics.reduce((acc, t) => acc + Math.abs(t.difficultyDelta), 0);
-    const avgDifficultyDrop = improvedTopicsCount > 0 ? (totalDrop / improvedTopicsCount).toFixed(1) : "0.0";
-
-    // Medias de dificultad inicial vs actual
-    const initialAvgDiff = (
-      studiedTopics.reduce((acc, t) => acc + t.initialDifficulty, 0) / studiedCount
-    ).toFixed(1);
-    const currentAvgDiff = (
-      studiedTopics.reduce((acc, t) => acc + t.currentDifficulty, 0) / studiedCount
-    ).toFixed(1);
-
-    // Temas difíciles vs dominados
-    const hardTopicsCount = studiedTopics.filter((t) => t.currentDifficulty >= 8).length;
-    const masteredTopicsCount = studiedTopics.filter((t) => t.currentDifficulty <= 4 && t.vueltas >= 2).length;
-
+    const validFirstStudies = studiedTopics.filter(topic => topic.firstStudyMinutes > 0);
+    const validReviews = studiedTopics.filter(topic => topic.avgReviewMinutes !== null);
+    const avgNewTopicMins = observedAverage(validFirstStudies.map(topic => topic.firstStudyMinutes));
+    const avgReviewMins = observedAverage(validReviews.map(topic => topic.avgReviewMinutes!));
+    const comparedTopics = studiedTopics.filter(topic => topic.difficultyDelta !== null);
+    const improvedTopics = comparedTopics.filter(topic => topic.difficultyDelta! < 0);
+    const initialDifficulties = studiedTopics.map(topic => topic.initialDifficulty).filter((value): value is number => value !== null);
+    const currentDifficulties = studiedTopics.map(topic => topic.currentDifficulty).filter((value): value is number => value !== null);
     return {
-      studiedCount,
-      avgNewTopicHours: avgNewTopicMins / 60,
-      avgNewTopicMinutesFormatted,
-      avgReviewMinutesFormatted,
-      globalTimeReductionPct,
-      improvedTopicsCount,
-      improvedPct,
-      avgDifficultyDrop,
-      initialAvgDiff,
-      currentAvgDiff,
-      hardTopicsCount,
-      masteredTopicsCount,
+      studiedCount: studiedTopics.length,
+      initialDurationSamples: validFirstStudies.length,
+      reviewDurationSamples: validReviews.length,
+      avgNewTopicMinutesFormatted: formatDuration(avgNewTopicMins),
+      avgReviewMinutesFormatted: formatDuration(avgReviewMins),
+      globalTimeReductionPct: avgNewTopicMins !== null && avgReviewMins !== null && avgNewTopicMins > 0
+        ? Math.round(((avgNewTopicMins - avgReviewMins) / avgNewTopicMins) * 100) : null,
+      improvedTopicsCount: improvedTopics.length,
+      comparedTopicsCount: comparedTopics.length,
+      improvedPct: comparedTopics.length ? Math.round(improvedTopics.length / comparedTopics.length * 100) : null,
+      avgDifficultyDrop: observedAverage(improvedTopics.map(topic => Math.abs(topic.difficultyDelta!))),
+      initialAvgDiff: observedAverage(initialDifficulties),
+      currentAvgDiff: observedAverage(currentDifficulties),
+      difficultySamples: currentDifficulties.length,
+      hardTopicsCount: studiedTopics.filter(topic => topic.currentDifficulty !== null && topic.currentDifficulty >= 8).length,
+      masteredTopicsCount: studiedTopics.filter(topic => topic.currentDifficulty !== null && topic.currentDifficulty <= 4 && topic.vueltas >= 2).length,
     };
   }, [studiedTopics]);
 
@@ -416,126 +196,62 @@ export function TopicsEvolutionSection({
   // GRÁFICA 1: CURVA DE ACELERACIÓN Y REDUCCIÓN DE TIEMPO POR VUELTA
   // ============================================================================
   const accelerationCurveData = useMemo(() => {
-    // Calculamos los promedios reales por vuelta según el historial de sesiones de cada tema
-    const vuelta1Times: number[] = [];
-    const vuelta2Times: number[] = [];
-    const vuelta3Times: number[] = [];
-    const vuelta4PlusTimes: number[] = [];
-
-    studiedTopics.forEach((t) => {
-      if (t.sessions && t.sessions.length > 0) {
-        if (t.sessions[0]) vuelta1Times.push(t.sessions[0].durationMinutes || t.sessions[0].duration || 0);
-        if (t.sessions[1]) vuelta2Times.push(t.sessions[1].durationMinutes || t.sessions[1].duration || 0);
-        if (t.sessions[2]) vuelta3Times.push(t.sessions[2].durationMinutes || t.sessions[2].duration || 0);
-        if (t.sessions.length >= 4) {
-          t.sessions.slice(3).forEach((s: any) => {
-            vuelta4PlusTimes.push(s.durationMinutes || s.duration || 0);
-          });
-        }
-      } else if (t.firstStudyMinutes > 0) {
-        vuelta1Times.push(t.firstStudyMinutes);
-      }
+    const groups: number[][] = [[], [], [], []];
+    studiedTopics.forEach(topic => topic.studySessions.forEach((session, index) => {
+      const minutes = sessionDurationMinutes(session);
+      if (minutes > 0) groups[Math.min(index, 3)].push(minutes);
+    }));
+    return groups.map((samples, index) => {
+      const minutes = observedAverage(samples);
+      return {
+        fase: ['1ª sesión', '2ª sesión', '3ª sesión', '4ª+ sesión'][index],
+        sublabel: 'Orden de sesiones no orales; no equivale a vueltas',
+        minutos: minutes === null ? null : Math.round(minutes),
+        horas: minutes === null ? null : (minutes / 60).toFixed(1),
+        muestras: samples.length,
+        color: ['#6366f1', '#3b82f6', '#10b981', '#8b5cf6'][index],
+      };
     });
-
-    const avgV1 = vuelta1Times.length > 0 ? vuelta1Times.reduce((a, b) => a + b, 0) / vuelta1Times.length : 240;
-    const avgV2 = vuelta2Times.length > 0 ? vuelta2Times.reduce((a, b) => a + b, 0) / vuelta2Times.length : avgV1 * 0.55;
-    const avgV3 = vuelta3Times.length > 0 ? vuelta3Times.reduce((a, b) => a + b, 0) / vuelta3Times.length : avgV2 * 0.65;
-    const avgV4 = vuelta4PlusTimes.length > 0 ? vuelta4PlusTimes.reduce((a, b) => a + b, 0) / vuelta4PlusTimes.length : avgV3 * 0.7;
-
-    const baseMin = Math.max(1, avgV1);
-
-    return [
-      {
-        fase: "1ª Vuelta",
-        sublabel: "Estudio Nuevo",
-        minutos: Math.round(avgV1),
-        horas: (avgV1 / 60).toFixed(1),
-        ahorroPct: 0,
-        muestras: vuelta1Times.length,
-        color: "#6366f1",
-      },
-      {
-        fase: "2ª Vuelta",
-        sublabel: "Primer Repaso",
-        minutos: Math.round(avgV2),
-        horas: (avgV2 / 60).toFixed(1),
-        ahorroPct: Math.max(0, Math.round(((baseMin - avgV2) / baseMin) * 100)),
-        muestras: vuelta2Times.length,
-        color: "#3b82f6",
-      },
-      {
-        fase: "3ª Vuelta",
-        sublabel: "Segundo Repaso",
-        minutos: Math.round(avgV3),
-        horas: (avgV3 / 60).toFixed(1),
-        ahorroPct: Math.max(0, Math.round(((baseMin - avgV3) / baseMin) * 100)),
-        muestras: vuelta3Times.length,
-        color: "#10b981",
-      },
-      {
-        fase: "4ª+ Vuelta",
-        sublabel: "Consolidación / Refresco",
-        minutos: Math.round(avgV4),
-        horas: (avgV4 / 60).toFixed(1),
-        ahorroPct: Math.max(0, Math.round(((baseMin - avgV4) / baseMin) * 100)),
-        muestras: vuelta4PlusTimes.length,
-        color: "#8b5cf6",
-      },
-    ];
   }, [studiedTopics]);
 
   // ============================================================================
   // GRÁFICA 2: TIEMPO MEDIO DE TEMA NUEVO POR ASIGNATURA
   // ============================================================================
-  const subjectTimeComparisonData = useMemo(() => {
-    return initialSubjects.map((subj) => {
-      const subjTopics = analyzedTopics.filter((t) => t.subjectId === subj.id);
-      const subjStudied = subjTopics.filter((t) => t.hasStudied);
-      const studiedFirstTime = subjStudied.filter((t) => t.firstStudyMinutes > 0);
-
-      const totalFirstTimeMinutes = studiedFirstTime.reduce((acc, t) => acc + t.firstStudyMinutes, 0);
-      const avgMinutes =
-        studiedFirstTime.length > 0 ? totalFirstTimeMinutes / studiedFirstTime.length : 0;
-
-      const avgHours = Math.round((avgMinutes / 60) * 10) / 10;
-      const unstudiedCount = subj.totalTopics - subjStudied.length;
-      const estimatedRemainingHours = Math.round(unstudiedCount * (avgHours > 0 ? avgHours : 4.0));
-
-      return {
-        id: subj.id,
-        name: subj.name,
-        shortName: subj.name.replace("Derecho ", ""),
-        totalTopics: subj.totalTopics,
-        studiedCount: subjStudied.length,
-        unstudiedCount,
-        avgMinutes: Math.round(avgMinutes),
-        avgHours,
-        estimatedRemainingHours,
-        color: subj.color,
-      };
-    });
-  }, [analyzedTopics]);
+  const subjectTimeComparisonData = useMemo(() => initialSubjects.map(subject => {
+    const subjectTopics = analyzedTopics.filter(topic => topic.subjectId === subject.id);
+    const studied = subjectTopics.filter(topic => topic.hasStudied);
+    const initialDurations = studied.filter(topic => topic.firstStudyMinutes > 0).map(topic => topic.firstStudyMinutes);
+    const avgMinutes = observedAverage(initialDurations);
+    return {
+      id: subject.id, name: subject.name, shortName: subject.name.replace('Derecho ', ''),
+      totalTopics: subjectTopics.length, studiedCount: studied.length,
+      unstudiedCount: subjectTopics.length - studied.length,
+      avgHours: avgMinutes === null ? null : Math.round(avgMinutes / 6) / 10,
+      muestras: initialDurations.length,
+      color: subject.color,
+    };
+  }), [analyzedTopics]);
 
   // ============================================================================
   // GRÁFICA 3: HISTÓRICO DE TENDENCIA DE EFICIENCIA
   // ============================================================================
   const efficiencyTimelineData = useMemo(() => {
     // Agrupar sesiones de estudio y refresco cronológicamente
-    const studySessionsOnly = (rawSessions || [])
-      .filter((s) => s.type !== "canto" && s.type !== "simulacro" && s.date)
+    const studySessionsOnly = analyzedTopics.flatMap(topic => topic.studySessions)
+      .filter((s) => typeof s.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s.date))
       .sort((a, b) => (a.date || "").localeCompare(b.date || ""));
 
     if (studySessionsOnly.length === 0) return [];
 
     // Detección de rango temporal para granularidad adaptativa
-    const uniqueDates = Array.from(new Set(studySessionsOnly.map((s) => s.date.slice(0, 10))));
+    const uniqueDates = Array.from(new Set<string>(studySessionsOnly.map((s) => String(s.date).slice(0, 10))));
     const uniqueMonths = new Set(uniqueDates.map((d) => d.slice(0, 7)));
 
     // Granularidad: Días (si pocos días o 1 mes), Semanas (si 2-3 meses) o Meses (si histórico largo)
     const isDaily = uniqueMonths.size <= 1 || uniqueDates.length <= 14;
     const isWeekly = !isDaily && uniqueMonths.size <= 3;
 
-    const buckets: Record<string, { totalMins: number; totalDiff: number; count: number; label: string }> = {};
+    const buckets: Record<string, { totalMins: number; durationCount: number; totalDiff: number; difficultyCount: number; count: number; label: string }> = {};
 
     studySessionsOnly.forEach((s) => {
       const d = s.date.slice(0, 10);
@@ -562,28 +278,33 @@ export function TopicsEvolutionSection({
       }
 
       if (!buckets[bucketKey]) {
-        buckets[bucketKey] = { totalMins: 0, totalDiff: 0, count: 0, label: bucketLabel };
+        buckets[bucketKey] = { totalMins: 0, durationCount: 0, totalDiff: 0, difficultyCount: 0, count: 0, label: bucketLabel };
       }
-      buckets[bucketKey].totalMins += s.durationMinutes || s.duration || 0;
-      if (typeof s.difficulty === "number" && s.difficulty > 0) {
-        buckets[bucketKey].totalDiff += s.difficulty;
+      const minutes = sessionDurationMinutes(s);
+      if (minutes > 0) {
+        buckets[bucketKey].totalMins += minutes;
+        buckets[bucketKey].durationCount += 1;
+      }
+      const difficulty = measuredDifficulty(s.difficulty);
+      if (difficulty !== null) {
+        buckets[bucketKey].totalDiff += difficulty;
+        buckets[bucketKey].difficultyCount += 1;
       }
       buckets[bucketKey].count += 1;
     });
 
     return Object.entries(buckets).map(([key, data]) => {
-      const avgMins = Math.round(data.totalMins / data.count);
-      const avgDiff = data.count > 0 && data.totalDiff > 0 ? (data.totalDiff / data.count).toFixed(1) : null;
+      const avgMins = data.durationCount ? Math.round(data.totalMins / data.durationCount) : null;
+      const avgDiff = data.difficultyCount ? data.totalDiff / data.difficultyCount : null;
       return {
         key,
         periodo: data.label,
         tiempoMedioMin: avgMins,
-        tiempoMedioHoras: (avgMins / 60).toFixed(1),
-        dificultadMedia: avgDiff ? parseFloat(avgDiff) : 5,
+        dificultadMedia: avgDiff === null ? null : Math.round(avgDiff * 10) / 10,
         sesiones: data.count,
       };
     });
-  }, [rawSessions]);
+  }, [analyzedTopics]);
 
   // ============================================================================
   // RANKING Y MATRIZ FILTRADA DE TEMAS
@@ -630,27 +351,27 @@ export function TopicsEvolutionSection({
           const pB = priorityOrder[b.cycleInfo.phase] || 99;
           if (pA !== pB) return pA - pB;
           // Dentro de la misma fase, ordenar por días para el repaso o dificultad
-          return a.cycleInfo.daysUntilMonthlyReview - b.cycleInfo.daysUntilMonthlyReview;
+          return (a.cycleInfo.daysUntilMonthlyReview ?? Number.POSITIVE_INFINITY) - (b.cycleInfo.daysUntilMonthlyReview ?? Number.POSITIVE_INFINITY);
         });
         break;
       }
 
       case "en_refrescos":
         list = list
-          .filter((t) => t.cycleInfo.phase === "en_refrescos")
+          .filter((t) => t.cycleInfo.refrescosCount > 0)
           .sort((a, b) => b.cycleInfo.refrescosCount - a.cycleInfo.refrescosCount);
         break;
 
       case "listos_canto":
         list = list
-          .filter((t) => t.cycleInfo.phase === "listo_para_cantar")
+          .filter((t) => t.cycleInfo.lastCantoDate !== null)
           .sort((a, b) => (b.firstStudyMinutes || 0) - (a.firstStudyMinutes || 0));
         break;
 
       case "repaso_pendiente":
         list = list
           .filter((t) => t.cycleInfo.phase === "repaso_pendiente" || t.cycleInfo.phase === "repaso_vencido")
-          .sort((a, b) => a.cycleInfo.daysUntilMonthlyReview - b.cycleInfo.daysUntilMonthlyReview);
+          .sort((a, b) => (a.cycleInfo.daysUntilMonthlyReview ?? Number.POSITIVE_INFINITY) - (b.cycleInfo.daysUntilMonthlyReview ?? Number.POSITIVE_INFINITY));
         break;
 
       case "dificiles":
@@ -659,17 +380,17 @@ export function TopicsEvolutionSection({
           .filter((t) => t.hasStudied)
           .sort((a, b) => {
             if (b.currentDifficulty !== a.currentDifficulty) {
-              return b.currentDifficulty - a.currentDifficulty;
+              return (b.currentDifficulty ?? -Infinity) - (a.currentDifficulty ?? -Infinity);
             }
-            return b.initialDifficulty - a.initialDifficulty;
+            return (b.initialDifficulty ?? -Infinity) - (a.initialDifficulty ?? -Infinity);
           });
         break;
 
       case "mejorados":
         // Los que más han reducido su dificultad (difficultyDelta más negativo)
         list = list
-          .filter((t) => t.hasStudied && t.difficultyDelta < 0)
-          .sort((a, b) => a.difficultyDelta - b.difficultyDelta);
+          .filter((t) => t.hasStudied && t.difficultyDelta !== null && t.difficultyDelta < 0)
+          .sort((a, b) => a.difficultyDelta! - b.difficultyDelta!);
         break;
 
       case "tiempo":
@@ -682,14 +403,14 @@ export function TopicsEvolutionSection({
       case "dominados":
         // Dificultad baja y vueltas >= 2
         list = list
-          .filter((t) => t.hasStudied && t.currentDifficulty <= 4)
+          .filter((t) => t.hasStudied && t.currentDifficulty !== null && t.currentDifficulty <= 4 && t.vueltas >= 2)
           .sort((a, b) => b.vueltas - a.vueltas);
         break;
 
       case "atascados":
         // Dificultad alta (>= 7) tras al menos 2 sesiones de estudio
         list = list
-          .filter((t) => t.hasStudied && t.currentDifficulty >= 7 && t.sessionsCount >= 2)
+          .filter((t) => t.hasStudied && t.currentDifficulty !== null && t.currentDifficulty >= 7 && t.sessionsCount >= 2)
           .sort((a, b) => b.currentDifficulty - a.currentDifficulty);
         break;
 
@@ -710,30 +431,28 @@ export function TopicsEvolutionSection({
   }, [inspectingTopicId, analyzedTopics]);
 
   return (
-    <div className="space-y-6">
+    <div className="min-w-0 space-y-5">
       {/* SECCIÓN PRINCIPAL: EVOLUCIÓN DE TEMAS Y DINÁMICA DE ESTUDIO */}
-      <div className="bg-white/80 backdrop-blur-2xl p-6 lg:p-8 rounded-[2.5rem] shadow-[0_8px_30px_rgb(0,0,0,0.04)] ring-1 ring-slate-900/5 flex flex-col relative overflow-hidden group hover:shadow-[0_8px_30px_rgb(0,0,0,0.08)] transition-all duration-300">
+      <section className={cn(DS.card, "min-w-0 p-4 sm:p-6")}>
         {/* Glow de fondo sofisticado */}
-        <div className="absolute -left-12 -bottom-12 w-72 h-72 bg-indigo-500/10 rounded-full blur-3xl pointer-events-none group-hover:scale-125 transition-transform duration-700"></div>
-        <div className="absolute -right-12 -top-12 w-72 h-72 bg-blue-500/10 rounded-full blur-3xl pointer-events-none group-hover:scale-125 transition-transform duration-700"></div>
 
         {/* Cabecera del Módulo */}
-        <div className="mb-6 relative z-10 flex flex-col md:flex-row justify-between items-start md:items-center gap-4 border-b border-slate-100 pb-5">
-          <div className="flex items-center gap-3.5">
-            <div className="w-11 h-11 rounded-2xl bg-gradient-to-br from-indigo-600 to-blue-600 flex items-center justify-center text-white shadow-md shadow-indigo-600/20">
+        <div className="mb-4 relative z-10 flex flex-col md:flex-row justify-between items-start md:items-center gap-4 border-b border-slate-100 pb-5">
+          <div className="flex min-w-0 items-start gap-3">
+            <div className="hidden sm:flex shrink-0 w-11 h-11 rounded-2xl bg-slate-800 flex items-center justify-center text-white shadow-md shadow-indigo-600/20">
               <BookOpen size={22} />
             </div>
             <div>
-              <div className="flex items-center gap-2">
-                <h3 className="text-xl font-black text-slate-900 tracking-tight">
-                  Evolución del Temario & Rendimiento de Estudio
-                </h3>
+              <div className="flex flex-wrap items-center gap-2">
+                <h2 className={DS.titleSection}>
+                  Evolución del temario
+                </h2>
                 <span className="text-xs font-black uppercase tracking-wider px-2.5 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-200">
                   {vitals.studiedCount} temas analizados
                 </span>
               </div>
               <p className="text-xs sm:text-sm text-slate-500 font-medium mt-0.5">
-                Curva de aprendizaje, aceleración de tiempos de repaso y seguimiento de dificultad tema a tema
+                Consulta las sesiones, el tiempo y la dificultad que has registrado.
               </p>
             </div>
           </div>
@@ -742,9 +461,10 @@ export function TopicsEvolutionSection({
           <div className="flex items-center gap-2">
             <div className="relative">
               <select
+                aria-label="Materia para la evolución del temario"
                 value={selectedSubjectFilter}
                 onChange={(e) => setSelectedSubjectFilter(e.target.value)}
-                className="appearance-none bg-white border border-slate-200 text-slate-800 text-xs font-bold rounded-xl px-3.5 py-2 pr-8 shadow-sm hover:border-slate-300 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 cursor-pointer"
+                className="min-h-11 max-w-full appearance-none bg-white border border-slate-200 text-slate-800 text-xs font-bold rounded-xl px-3.5 py-2 pr-8 shadow-sm hover:border-slate-300 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 cursor-pointer"
               >
                 <option value="all">Todas las materias</option>
                 {initialSubjects.map((s) => (
@@ -761,17 +481,24 @@ export function TopicsEvolutionSection({
           </div>
         </div>
 
+        <div className="mb-5 rounded-xl border border-slate-200 bg-slate-50/50">
+          <button type="button" aria-expanded={showAnalytics} aria-controls="topic-evolution-analytics" onClick={() => setShowAnalytics(value => !value)} className="flex min-h-11 w-full items-center justify-between gap-3 px-4 py-3 text-left text-sm font-semibold text-slate-800">
+            Métricas y gráficos de estudio
+            {showAnalytics ? <ChevronUp size={18} aria-hidden="true" /> : <ChevronDown size={18} aria-hidden="true" />}
+          </button>
+          {showAnalytics && <div id="topic-evolution-analytics" className="min-w-0 p-3 sm:p-4">
+          <p className="mb-4 text-sm leading-relaxed text-slate-600">Son resúmenes descriptivos. Menos tiempo o dificultad no demuestra mayor recuerdo. Las actividades sin sesiones muestran —. Los tiempos no son predicciones personales.</p>
         {/* 1. VITALS / DIAGNÓSTICO TELEMÉTRICO BENTO GRID */}
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3.5 sm:gap-4 mb-6 relative z-10">
+        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3.5 sm:gap-4 mb-6 relative z-10">
           {/* Card 1: Tiempo Medio de Tema Nuevo */}
           <div className="bg-slate-50/80 border border-slate-200/70 rounded-2xl p-4.5 flex flex-col justify-between">
-            <div className="flex items-center justify-between gap-2 mb-2">
-              <span className="text-[11px] font-black text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+              <span className="text-xs font-black text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
                 <Clock size={13} className="text-indigo-600" />
-                Tema Nuevo (1ª Vuelta)
+                Estudio inicial
               </span>
-              <span className="text-[10px] font-black px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-100">
-                Media Real
+              <span className="text-xs font-black px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-100">
+                Media observada
               </span>
             </div>
             <div>
@@ -780,11 +507,11 @@ export function TopicsEvolutionSection({
                   {vitals.avgNewTopicMinutesFormatted}
                 </h4>
               </div>
-              <p className="text-[11px] text-slate-500 font-medium mt-1 leading-tight">
-                Tiempo de asimilación inicial y preparación del tema
+              <p className="text-xs text-slate-500 font-medium mt-1 leading-tight">
+                Minutos registrados en estudio inicial por tema
               </p>
             </div>
-            <div className="mt-3 pt-2.5 border-t border-slate-200/50 flex items-center justify-between text-[10px] font-bold text-slate-400">
+            <div className="mt-3 pt-2.5 border-t border-slate-200/50 flex items-center justify-between text-xs font-bold text-slate-400">
               <span>{vitals.studiedCount} temas iniciados</span>
               <span className="text-indigo-600">Ritmo base</span>
             </div>
@@ -792,13 +519,13 @@ export function TopicsEvolutionSection({
 
           {/* Card 2: Tiempo Medio de Repaso & Aceleración */}
           <div className="bg-slate-50/80 border border-slate-200/70 rounded-2xl p-4.5 flex flex-col justify-between">
-            <div className="flex items-center justify-between gap-2 mb-2">
-              <span className="text-[11px] font-black text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+              <span className="text-xs font-black text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
                 <Zap size={13} className="text-blue-600" />
                 Tiempo de Repaso
               </span>
               {vitals.globalTimeReductionPct > 0 && (
-                <span className="text-[10px] font-black px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 flex items-center gap-0.5">
+                <span className="text-xs font-black px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 flex items-center gap-0.5">
                   <TrendingDown size={11} strokeWidth={3} />
                   -{vitals.globalTimeReductionPct}%
                 </span>
@@ -810,57 +537,57 @@ export function TopicsEvolutionSection({
                   {vitals.avgReviewMinutesFormatted}
                 </h4>
               </div>
-              <p className="text-[11px] text-slate-500 font-medium mt-1 leading-tight">
-                Aceleración promedio en vueltas sucesivas
+              <p className="text-xs text-slate-500 font-medium mt-1 leading-tight">
+                Duración media de sesiones registradas
               </p>
             </div>
-            <div className="mt-3 pt-2.5 border-t border-slate-200/50 flex items-center justify-between text-[10px] font-bold text-slate-400">
-              <span>Ahorro: ~{Math.max(0, Math.round((vitals.avgNewTopicHours - 1.3) * 10) / 10)}h / tema</span>
-              <span className="text-emerald-600 font-black">Alta Retención</span>
+            <div className="mt-3 pt-2.5 border-t border-slate-200/50 flex items-center justify-between text-xs font-bold text-slate-400">
+              <span>{vitals.reviewDurationSamples} temas con duración de repaso medida</span>
+              <span className="text-emerald-600 font-black">No mide retención</span>
             </div>
           </div>
 
           {/* Card 3: Evolución de Dificultad */}
           <div className="bg-slate-50/80 border border-slate-200/70 rounded-2xl p-4.5 flex flex-col justify-between">
-            <div className="flex items-center justify-between gap-2 mb-2">
-              <span className="text-[11px] font-black text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+              <span className="text-xs font-black text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
                 <TrendingDown size={13} className="text-emerald-600" />
                 Tasa de Mejora
               </span>
-              <span className="text-[10px] font-black px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
-                {vitals.improvedPct}% mejorados
+              <span className="text-xs font-black px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200">
+                {reportedMetric(vitals.improvedPct, "%")} con menor dificultad
               </span>
             </div>
             <div>
               <div className="flex items-baseline gap-2">
                 <span className="text-xl sm:text-2xl font-black text-slate-400 line-through">
-                  {vitals.initialAvgDiff}
+                  {reportedMetric(vitals.initialAvgDiff, "", 1)}
                 </span>
                 <ArrowRight size={14} className="text-slate-400" />
                 <span className="text-2xl sm:text-3xl font-black text-emerald-600 tracking-tight">
-                  {vitals.currentAvgDiff}
+                  {reportedMetric(vitals.currentAvgDiff, "", 1)}
                 </span>
                 <span className="text-xs font-bold text-slate-400">/ 10</span>
               </div>
-              <p className="text-[11px] text-slate-500 font-medium mt-1 leading-tight">
-                {vitals.improvedTopicsCount} temas han reducido dificultad (media -{vitals.avgDifficultyDrop} pts)
+              <p className="text-xs text-slate-500 font-medium mt-1 leading-tight">
+                {vitals.improvedTopicsCount} temas han reducido dificultad (media -{reportedMetric(vitals.avgDifficultyDrop, "", 1)} pts)
               </p>
             </div>
-            <div className="mt-3 pt-2.5 border-t border-slate-200/50 flex items-center justify-between text-[10px] font-bold text-slate-400">
-              <span>{vitals.masteredTopicsCount} dominados</span>
+            <div className="mt-3 pt-2.5 border-t border-slate-200/50 flex items-center justify-between text-xs font-bold text-slate-400">
+              <span>{vitals.masteredTopicsCount} con dificultad ≤4 y 2+ vueltas</span>
               <span className="text-slate-600 font-black">Escala 1-10</span>
             </div>
           </div>
 
           {/* Card 4: Alerta Temprana & Focos Rojos */}
           <div className="bg-slate-50/80 border border-slate-200/70 rounded-2xl p-4.5 flex flex-col justify-between">
-            <div className="flex items-center justify-between gap-2 mb-2">
-              <span className="text-[11px] font-black text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+              <span className="text-xs font-black text-slate-400 uppercase tracking-wider flex items-center gap-1.5">
                 <AlertTriangle size={13} className="text-amber-500" />
                 Temas en Foco
               </span>
               <span className={cn(
-                "text-[10px] font-black px-2 py-0.5 rounded-full border",
+                "text-xs font-black px-2 py-0.5 rounded-full border",
                 vitals.hardTopicsCount > 0
                   ? "bg-amber-50 text-amber-700 border-amber-200"
                   : "bg-emerald-50 text-emerald-700 border-emerald-200"
@@ -878,71 +605,75 @@ export function TopicsEvolutionSection({
                 </h4>
                 <span className="text-xs font-bold text-slate-400">temas (dif ≥ 8)</span>
               </div>
-              <p className="text-[11px] text-slate-500 font-medium mt-1 leading-tight">
+              <p className="text-xs text-slate-500 font-medium mt-1 leading-tight">
                 Prioridad para repaso espaciado y refuerzo de esquemas
               </p>
             </div>
-            <div className="mt-3 pt-2.5 border-t border-slate-200/50 flex items-center justify-between text-[10px] font-bold text-slate-400">
+            <div className="mt-3 pt-2.5 border-t border-slate-200/50 flex items-center justify-between text-xs font-bold text-slate-400">
               <span>{studiedTopics.filter(t => t.vueltas >= 3).length} en 3ª+ vuelta</span>
-              <span className="text-indigo-600 font-black">Auto-optimizado</span>
+              <span className="text-indigo-600 font-black">Historial registrado</span>
             </div>
           </div>
         </div>
 
         {/* 2. SELECTOR DE VISOR ANALÍTICO DE GRÁFICAS */}
         <div className="mb-4 relative z-10 flex flex-wrap items-center justify-between gap-3 bg-slate-50/80 p-1.5 rounded-2xl border border-slate-200/60">
-          <div className="flex items-center gap-1 overflow-x-auto no-scrollbar">
+          <div className="flex min-w-0 flex-wrap items-center gap-1">
             <button
               onClick={() => setActiveMetricTab("metodo_preparador")}
+              aria-pressed={activeMetricTab === "metodo_preparador"}
               className={cn(
-                "px-3.5 py-2 rounded-xl text-xs font-black transition-all flex items-center gap-1.5 whitespace-nowrap",
+                "min-h-11 px-3 py-2 rounded-xl text-xs font-semibold transition-all flex items-center gap-1.5",
                 activeMetricTab === "metodo_preparador"
                   ? "bg-white text-slate-900 shadow-sm border border-slate-200/80"
                   : "text-slate-500 hover:text-slate-800"
               )}
             >
               <Sparkles size={14} className="text-amber-500" />
-              Método Preparador (3 Refrescos & Vueltas)
+              Etapas de estudio
             </button>
             <button
               onClick={() => setActiveMetricTab("aceleracion")}
+              aria-pressed={activeMetricTab === "aceleracion"}
               className={cn(
-                "px-3.5 py-2 rounded-xl text-xs font-black transition-all flex items-center gap-1.5 whitespace-nowrap",
+                "min-h-11 px-3 py-2 rounded-xl text-xs font-semibold transition-all flex items-center gap-1.5",
                 activeMetricTab === "aceleracion"
                   ? "bg-white text-slate-900 shadow-sm border border-slate-200/80"
                   : "text-slate-500 hover:text-slate-800"
               )}
             >
               <TrendingDown size={14} className="text-indigo-600" />
-              Curva de Aceleración
+              Tiempos por vuelta
             </button>
             <button
               onClick={() => setActiveMetricTab("materias")}
+              aria-pressed={activeMetricTab === "materias"}
               className={cn(
-                "px-3.5 py-2 rounded-xl text-xs font-black transition-all flex items-center gap-1.5 whitespace-nowrap",
+                "min-h-11 px-3 py-2 rounded-xl text-xs font-semibold transition-all flex items-center gap-1.5",
                 activeMetricTab === "materias"
                   ? "bg-white text-slate-900 shadow-sm border border-slate-200/80"
                   : "text-slate-500 hover:text-slate-800"
               )}
             >
               <Clock size={14} className="text-blue-600" />
-              Tema Nuevo por Materia
+              Por materia
             </button>
             <button
               onClick={() => setActiveMetricTab("tendencia")}
+              aria-pressed={activeMetricTab === "tendencia"}
               className={cn(
-                "px-3.5 py-2 rounded-xl text-xs font-black transition-all flex items-center gap-1.5 whitespace-nowrap",
+                "min-h-11 px-3 py-2 rounded-xl text-xs font-semibold transition-all flex items-center gap-1.5",
                 activeMetricTab === "tendencia"
                   ? "bg-white text-slate-900 shadow-sm border border-slate-200/80"
                   : "text-slate-500 hover:text-slate-800"
               )}
             >
               <Layers size={14} className="text-emerald-600" />
-              Histórico de Eficiencia
+              Por semana
             </button>
           </div>
-          <span className="text-[11px] font-bold text-slate-400 px-3 hidden lg:inline-block">
-            Protocolo: Estudio ➔ 3 Refrescos ➔ Cante ➔ Repaso Mensual (~30d)
+          <span className="text-xs font-bold text-slate-400 px-3 hidden lg:inline-block">
+            Estudio · Refrescos · Cante · Revisiones sugeridas
           </span>
         </div>
 
@@ -953,65 +684,65 @@ export function TopicsEvolutionSection({
               {/* Pipeline Cards: Embudo del Preparador */}
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
                 <div className="p-3 bg-slate-50/80 rounded-xl border border-slate-200/60 flex flex-col justify-between">
-                  <div className="flex items-center justify-between text-[10px] font-black uppercase text-slate-400">
+                  <div className="flex items-center justify-between text-xs font-black uppercase text-slate-400">
                     <span>1. Estudio Inicial</span>
                     <BookOpen size={13} className="text-indigo-600" />
                   </div>
                   <div className="mt-2">
                     <span className="text-xl font-black text-slate-900">{preparadorPipeline.sinIniciar.length}</span>
-                    <span className="text-[10px] font-bold text-slate-400 ml-1">temas nuevos pendientes</span>
+                    <span className="text-xs font-bold text-slate-400 ml-1">temas nuevos pendientes</span>
                   </div>
-                  <p className="text-[10px] font-medium text-slate-500 mt-1">Fijación en profundidad</p>
+                  <p className="text-xs font-medium text-slate-500 mt-1">Fijación en profundidad</p>
                 </div>
 
                 <div className="p-3 bg-amber-50/60 rounded-xl border border-amber-200/70 flex flex-col justify-between">
-                  <div className="flex items-center justify-between text-[10px] font-black uppercase text-amber-700">
-                    <span>2. Ciclo 3 Refrescos</span>
+                  <div className="flex items-center justify-between text-xs font-black uppercase text-amber-700">
+                    <span>2. Refrescos observados</span>
                     <Flame size={13} className="text-amber-600" />
                   </div>
                   <div className="mt-2">
                     <span className="text-xl font-black text-amber-900">{preparadorPipeline.enRefrescos.length}</span>
-                    <span className="text-[10px] font-bold text-amber-700 ml-1">en 3 días seguidos</span>
+                    <span className="text-xs font-bold text-amber-700 ml-1">temas con contactos registrados</span>
                   </div>
-                  <p className="text-[10px] font-medium text-amber-800 mt-1">Lectura + intento de canto</p>
+                  <p className="text-xs font-medium text-amber-800 mt-1">Lectura + intento de canto</p>
                 </div>
 
                 <div className="p-3 bg-fuchsia-50/60 rounded-xl border border-fuchsia-200/70 flex flex-col justify-between">
-                  <div className="flex items-center justify-between text-[10px] font-black uppercase text-fuchsia-700">
-                    <span>3. Listos p/ Cantar</span>
+                  <div className="flex items-center justify-between text-xs font-black uppercase text-fuchsia-700">
+                    <span>3. Cantes registrados</span>
                     <CheckCircle2 size={13} className="text-fuchsia-600" />
                   </div>
                   <div className="mt-2">
                     <span className="text-xl font-black text-fuchsia-900">{preparadorPipeline.listosCantar.length}</span>
-                    <span className="text-[10px] font-bold text-fuchsia-700 ml-1">3/3 completados</span>
+                    <span className="text-xs font-bold text-fuchsia-700 ml-1">temas con cante</span>
                   </div>
-                  <p className="text-[10px] font-medium text-fuchsia-800 mt-1">Examen ante preparador (V1)</p>
+                  <p className="text-xs font-medium text-fuchsia-800 mt-1">Actuaciones observadas; no certifican dominio</p>
                 </div>
 
                 <div className="p-3 bg-indigo-50/60 rounded-xl border border-indigo-200/70 flex flex-col justify-between">
-                  <div className="flex items-center justify-between text-[10px] font-black uppercase text-indigo-700">
-                    <span>4. Repaso Mensual</span>
+                  <div className="flex items-center justify-between text-xs font-black uppercase text-indigo-700">
+                    <span>4. Revisión sugerida</span>
                     <Calendar size={13} className="text-indigo-600" />
                   </div>
                   <div className="mt-2">
                     <span className="text-xl font-black text-indigo-900">
                       {preparadorPipeline.repasoPendiente.length + preparadorPipeline.repasoVencido.length}
                     </span>
-                    <span className="text-[10px] font-bold text-indigo-700 ml-1">en fecha (~30d)</span>
+                    <span className="text-xs font-bold text-indigo-700 ml-1">con fecha orientativa</span>
                   </div>
-                  <p className="text-[10px] font-medium text-indigo-800 mt-1">
+                  <p className="text-xs font-medium text-indigo-800 mt-1">
                     {preparadorPipeline.consolidadoMes.length} al día / {preparadorPipeline.repasoVencido.length} vencidos
                   </p>
                 </div>
               </div>
 
               {/* Sub-header de la gráfica */}
-              <div className="flex justify-between items-center px-1 pt-1">
+              <div className="flex flex-wrap justify-between items-center gap-2 px-1 pt-1">
                 <span className="text-xs font-black text-slate-700">
-                  Desglose de Tiempo del Método (Estudio Inicial ➔ 3 Refrescos Consecutivos ➔ Canto ➔ Repaso Mensual)
+                  Duraciones por actividad · medias de sesiones observadas
                 </span>
-                <span className="text-[11px] font-bold text-amber-700 bg-amber-50 border border-amber-200/60 px-2 py-0.5 rounded-full">
-                  Ahorro en Refresco 3: -{preparadorPipeline.refrescoSavingPct}% vs estudio inicial
+                <span className="text-xs font-bold text-amber-700 bg-amber-50 border border-amber-200/60 px-2 py-0.5 rounded-full">
+                  Sin muestras se muestra —; las actividades pueden tener distinta cobertura
                 </span>
               </div>
 
@@ -1024,12 +755,12 @@ export function TopicsEvolutionSection({
                       dataKey="etapa"
                       axisLine={false}
                       tickLine={false}
-                      tick={{ fontSize: 10, fill: "#334155", fontWeight: 800 }}
+                      tick={{ fontSize: 12, fill: "#334155", fontWeight: 800 }}
                     />
                     <YAxis
                       axisLine={false}
                       tickLine={false}
-                      tick={{ fontSize: 10, fill: "#64748b" }}
+                      tick={{ fontSize: 12, fill: "#64748b" }}
                       unit="m"
                     />
                     <Tooltip
@@ -1040,10 +771,10 @@ export function TopicsEvolutionSection({
                           return (
                             <div className="bg-slate-900 text-white p-3 rounded-xl shadow-xl border border-slate-800 text-xs">
                               <p className="font-black text-amber-400">{data.etapa}</p>
-                              <p className="text-[11px] text-slate-300 mb-1.5">{data.sublabel}</p>
+                              <p className="text-xs text-slate-300 mb-1.5">{data.sublabel}</p>
                               <div className="space-y-1 font-bold">
                                 <div className="flex justify-between gap-4">
-                                  <span className="text-slate-400">Tiempo medio:</span>
+                                  <span className="text-slate-400">{data.muestras > 0 ? "Tiempo medio observado:" : "Sin mediciones:"}</span>
                                   <span className="text-white">{data.minutos} min ({data.horas}h)</span>
                                 </div>
                                 <div className="flex justify-between gap-4">
@@ -1070,12 +801,12 @@ export function TopicsEvolutionSection({
 
           {activeMetricTab === "aceleracion" && (
             <div className="w-full h-full flex flex-col">
-              <div className="flex justify-between items-center mb-2 px-2">
+              <div className="flex flex-wrap justify-between items-center gap-2 mb-2 px-2">
                 <span className="text-xs font-black text-slate-700">
-                  Evolución del tiempo medio por vuelta (Curva de aprendizaje)
+                  Tiempo medio según el orden de las sesiones
                 </span>
-                <span className="text-[11px] font-bold text-indigo-600">
-                  Mayor reducción: 1ª vuelta ➔ 2ª vuelta (-{accelerationCurveData[1]?.ahorroPct || 0}%)
+                <span className="text-xs font-bold text-indigo-600">
+                  Comparación descriptiva; no demuestra una mejora de aprendizaje
                 </span>
               </div>
               <div className="w-full h-72 min-h-[280px] mt-2">
@@ -1086,12 +817,12 @@ export function TopicsEvolutionSection({
                       dataKey="fase"
                       axisLine={false}
                       tickLine={false}
-                      tick={{ fontSize: 11, fill: "#475569", fontWeight: 700 }}
+                      tick={{ fontSize: 12, fill: "#475569", fontWeight: 700 }}
                     />
                     <YAxis
                       axisLine={false}
                       tickLine={false}
-                      tick={{ fontSize: 11, fill: "#64748b", fontWeight: 600 }}
+                      tick={{ fontSize: 12, fill: "#64748b", fontWeight: 600 }}
                       unit=" min"
                     />
                     <Tooltip
@@ -1102,19 +833,13 @@ export function TopicsEvolutionSection({
                           return (
                             <div className="bg-slate-900 text-white p-3.5 rounded-2xl shadow-xl border border-slate-800 text-xs">
                               <p className="font-black text-sm text-indigo-300">{data.fase}</p>
-                              <p className="text-[11px] text-slate-400 mb-2">{data.sublabel}</p>
+                              <p className="text-xs text-slate-400 mb-2">{data.sublabel}</p>
                               <div className="space-y-1 font-bold">
                                 <div className="flex justify-between gap-4">
-                                  <span className="text-slate-400">Tiempo medio:</span>
+                                  <span className="text-slate-400">{data.muestras > 0 ? "Tiempo medio observado:" : "Sin mediciones:"}</span>
                                   <span className="text-white">{data.horas} horas ({data.minutos} min)</span>
                                 </div>
-                                {data.ahorroPct > 0 && (
-                                  <div className="flex justify-between gap-4 text-emerald-400">
-                                    <span>Ahorro respecto a 1ª vuelta:</span>
-                                    <span>-{data.ahorroPct}%</span>
-                                  </div>
-                                )}
-                                <div className="flex justify-between gap-4 text-slate-400 text-[10px] pt-1 border-t border-slate-800">
+                                <div className="flex justify-between gap-4 text-slate-400 text-xs pt-1 border-t border-slate-800">
                                   <span>Muestras registradas:</span>
                                   <span>{data.muestras} sesiones</span>
                                 </div>
@@ -1138,11 +863,11 @@ export function TopicsEvolutionSection({
 
           {activeMetricTab === "materias" && (
             <div className="w-full h-full flex flex-col">
-              <div className="flex justify-between items-center mb-2 px-2">
+              <div className="flex flex-wrap justify-between items-center gap-2 mb-2 px-2">
                 <span className="text-xs font-black text-slate-700">
                   Tiempo medio de tema nuevo según la rama del Derecho (Horas / tema)
                 </span>
-                <span className="text-[11px] font-bold text-blue-600">
+                <span className="text-xs font-bold text-blue-600">
                   Referencia para estimar las vueltas restantes
                 </span>
               </div>
@@ -1158,7 +883,7 @@ export function TopicsEvolutionSection({
                       type="number"
                       axisLine={false}
                       tickLine={false}
-                      tick={{ fontSize: 10, fill: "#64748b" }}
+                      tick={{ fontSize: 12, fill: "#64748b" }}
                       unit="h"
                     />
                     <YAxis
@@ -1166,7 +891,7 @@ export function TopicsEvolutionSection({
                       type="category"
                       axisLine={false}
                       tickLine={false}
-                      tick={{ fontSize: 11, fill: "#1e293b", fontWeight: 700 }}
+                      tick={{ fontSize: 12, fill: "#1e293b", fontWeight: 700 }}
                       width={110}
                     />
                     <Tooltip
@@ -1213,11 +938,11 @@ export function TopicsEvolutionSection({
 
           {activeMetricTab === "tendencia" && (
             <div className="w-full h-full flex flex-col">
-              <div className="flex justify-between items-center mb-2 px-2">
+              <div className="flex flex-wrap justify-between items-center gap-2 mb-2 px-2">
                 <span className="text-xs font-black text-slate-700">
                   Evolución temporal del tiempo medio y dificultad por sesión
                 </span>
-                <span className="text-[11px] font-bold text-emerald-600">
+                <span className="text-xs font-bold text-emerald-600">
                   La técnica y retención aceleran tu velocidad
                 </span>
               </div>
@@ -1225,7 +950,7 @@ export function TopicsEvolutionSection({
                 {efficiencyTimelineData.length > 0 ? (
                   <div className="w-full h-full flex flex-col">
                     {efficiencyTimelineData.length === 1 && (
-                      <div className="mb-2 px-3 py-1.5 rounded-lg bg-indigo-50/70 border border-indigo-100 flex items-center justify-between text-[11px]">
+                      <div className="mb-2 px-3 py-1.5 rounded-lg bg-indigo-50/70 border border-indigo-100 flex items-center justify-between text-xs">
                         <span className="font-bold text-indigo-900">
                           📍 {efficiencyTimelineData[0].periodo}: {efficiencyTimelineData[0].tiempoMedioMin} min de media ({efficiencyTimelineData[0].sesiones} sesiones).
                         </span>
@@ -1242,13 +967,13 @@ export function TopicsEvolutionSection({
                             dataKey="periodo"
                             axisLine={false}
                             tickLine={false}
-                            tick={{ fontSize: 10, fill: "#64748b", fontWeight: 700 }}
+                            tick={{ fontSize: 12, fill: "#64748b", fontWeight: 700 }}
                           />
                           <YAxis
                             yAxisId="left"
                             axisLine={false}
                             tickLine={false}
-                            tick={{ fontSize: 10, fill: "#64748b" }}
+                            tick={{ fontSize: 12, fill: "#64748b" }}
                             unit="m"
                           />
                           <YAxis
@@ -1257,7 +982,7 @@ export function TopicsEvolutionSection({
                             domain={[0, 10]}
                             axisLine={false}
                             tickLine={false}
-                            tick={{ fontSize: 10, fill: "#10b981" }}
+                            tick={{ fontSize: 12, fill: "#10b981" }}
                           />
                           <Tooltip
                             contentStyle={{
@@ -1304,7 +1029,7 @@ export function TopicsEvolutionSection({
                     <p className="text-xs text-slate-500 max-w-md mb-4 leading-relaxed font-medium">
                       Esta gráfica traza la evolución de tus minutos de estudio frente a la dificultad percibida a medida que avanzas por semanas de preparación.
                     </p>
-                    <div className="flex flex-wrap items-center justify-center gap-3 text-[11px] font-bold">
+                    <div className="flex flex-wrap items-center justify-center gap-3 text-xs font-bold">
                       <span className="px-3 py-1 bg-indigo-50 text-indigo-700 rounded-full border border-indigo-200/60 flex items-center gap-1.5">
                         <span className="w-2 h-2 rounded-full bg-indigo-600 inline-block" />
                         Minutos por sesión (eje izq.)
@@ -1321,18 +1046,21 @@ export function TopicsEvolutionSection({
           )}
         </div>
 
+          </div>}
+        </div>
+
         {/* 4. RANKING Y MATRIZ DE TEMAS: DIFICULTAD, MEJORA Y TIEMPO INVERTIDO */}
         <div className="relative z-10">
           <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 mb-4">
             <div>
-              <h4 className="text-base font-black text-slate-900 tracking-tight flex items-center gap-2">
-                Ranking y Diagnóstico por Tema
-                <span className="text-[11px] font-bold text-slate-400">
+              <h4 className="text-base font-semibold text-slate-900 tracking-tight flex flex-wrap items-center gap-2">
+                Explorar temas
+                <span className="text-xs font-bold text-slate-400">
                   ({filteredRankedTopics.length} temas mostrados)
                 </span>
               </h4>
               <p className="text-xs text-slate-500">
-                Consulta qué temas fueron más difíciles, cómo han mejorado y cuántas horas les has dedicado
+                Filtra por actividad, dificultad percibida o tiempo registrado.
               </p>
             </div>
 
@@ -1344,15 +1072,17 @@ export function TopicsEvolutionSection({
               />
               <input
                 type="text"
-                placeholder="Buscar tema por nº o título..."
+                aria-label="Buscar en la evolución de temas"
+                placeholder="Buscar tema por número o título…"
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
-                className="w-full pl-9 pr-3 py-1.5 bg-slate-50 border border-slate-200/80 rounded-xl text-xs font-bold text-slate-800 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
+                className="min-h-11 w-full pl-9 pr-12 py-2 bg-slate-50 border border-slate-200/80 rounded-xl text-xs font-bold text-slate-800 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
               />
               {searchTerm && (
                 <button
                   onClick={() => setSearchTerm("")}
-                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                  aria-label="Limpiar búsqueda en evolución"
+                  className="absolute right-0 top-0 min-h-11 min-w-11 flex items-center justify-center text-slate-400 hover:text-slate-600"
                 >
                   <X size={12} />
                 </button>
@@ -1361,11 +1091,23 @@ export function TopicsEvolutionSection({
           </div>
 
           {/* Filtros de Categorías / Ranking */}
-          <div className="flex flex-wrap items-center gap-1.5 mb-4">
+          <select aria-label="Filtrar y ordenar la evolución de temas" value={rankingFilter} onChange={event => setRankingFilter(event.target.value as typeof rankingFilter)} className="mb-4 min-h-11 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm text-slate-800 sm:hidden">
+            <option value="metodo_preparador">Prioridad del preparador</option>
+            <option value="en_refrescos">Refrescos</option>
+            <option value="listos_canto">Preparación de cante</option>
+            <option value="repaso_pendiente">Revisión sugerida pendiente</option>
+            <option value="dificiles">Mayor dificultad</option>
+            <option value="mejorados">Dificultad reducida</option>
+            <option value="tiempo">Mayor tiempo registrado</option>
+            <option value="dominados">Dificultad ≤4 y 2+ vueltas</option>
+            <option value="todos">Todos</option>
+          </select>
+          <div role="group" aria-label="Categorías de evolución" className="hidden sm:flex flex-wrap items-center gap-1.5 mb-4">
             <button
               onClick={() => setRankingFilter("metodo_preparador")}
+              aria-pressed={rankingFilter === "metodo_preparador"}
               className={cn(
-                "px-3 py-1.5 rounded-xl text-xs font-black transition-all flex items-center gap-1.5",
+                "min-h-11 px-3 py-2 rounded-xl text-xs font-semibold transition-all flex items-center gap-1.5",
                 rankingFilter === "metodo_preparador"
                   ? "bg-slate-900 text-white shadow-sm"
                   : "bg-amber-50 text-amber-900 hover:bg-amber-100 border border-amber-200/60"
@@ -1377,47 +1119,51 @@ export function TopicsEvolutionSection({
 
             <button
               onClick={() => setRankingFilter("en_refrescos")}
+              aria-pressed={rankingFilter === "en_refrescos"}
               className={cn(
-                "px-3 py-1.5 rounded-xl text-xs font-black transition-all flex items-center gap-1.5",
+                "min-h-11 px-3 py-2 rounded-xl text-xs font-semibold transition-all flex items-center gap-1.5",
                 rankingFilter === "en_refrescos"
                   ? "bg-slate-900 text-white shadow-sm"
                   : "bg-slate-100 text-slate-600 hover:bg-slate-200"
               )}
             >
               <Flame size={13} className={rankingFilter === "en_refrescos" ? "text-amber-400" : "text-amber-500"} />
-              En 3 Refrescos ({preparadorPipeline.enRefrescos.length})
+              Refrescos ({preparadorPipeline.enRefrescos.length})
             </button>
 
             <button
               onClick={() => setRankingFilter("listos_canto")}
+              aria-pressed={rankingFilter === "listos_canto"}
               className={cn(
-                "px-3 py-1.5 rounded-xl text-xs font-black transition-all flex items-center gap-1.5",
+                "min-h-11 px-3 py-2 rounded-xl text-xs font-semibold transition-all flex items-center gap-1.5",
                 rankingFilter === "listos_canto"
                   ? "bg-slate-900 text-white shadow-sm"
                   : "bg-slate-100 text-slate-600 hover:bg-slate-200"
               )}
             >
               <CheckCircle2 size={13} className={rankingFilter === "listos_canto" ? "text-fuchsia-400" : "text-fuchsia-600"} />
-              Listos p/ Canto ({preparadorPipeline.listosCantar.length})
+              Preparación de cante ({preparadorPipeline.listosCantar.length})
             </button>
 
             <button
               onClick={() => setRankingFilter("repaso_pendiente")}
+              aria-pressed={rankingFilter === "repaso_pendiente"}
               className={cn(
-                "px-3 py-1.5 rounded-xl text-xs font-black transition-all flex items-center gap-1.5",
+                "min-h-11 px-3 py-2 rounded-xl text-xs font-semibold transition-all flex items-center gap-1.5",
                 rankingFilter === "repaso_pendiente"
                   ? "bg-slate-900 text-white shadow-sm"
                   : "bg-slate-100 text-slate-600 hover:bg-slate-200"
               )}
             >
               <Calendar size={13} className={rankingFilter === "repaso_pendiente" ? "text-indigo-400" : "text-indigo-500"} />
-              Repasos Mensuales (~30d) ({preparadorPipeline.repasoPendiente.length + preparadorPipeline.repasoVencido.length})
+              Revisión sugerida ({preparadorPipeline.repasoPendiente.length + preparadorPipeline.repasoVencido.length})
             </button>
 
             <button
               onClick={() => setRankingFilter("dificiles")}
+              aria-pressed={rankingFilter === "dificiles"}
               className={cn(
-                "px-3 py-1.5 rounded-xl text-xs font-black transition-all flex items-center gap-1.5",
+                "min-h-11 px-3 py-2 rounded-xl text-xs font-semibold transition-all flex items-center gap-1.5",
                 rankingFilter === "dificiles"
                   ? "bg-slate-900 text-white shadow-sm"
                   : "bg-slate-100 text-slate-600 hover:bg-slate-200"
@@ -1429,8 +1175,9 @@ export function TopicsEvolutionSection({
 
             <button
               onClick={() => setRankingFilter("mejorados")}
+              aria-pressed={rankingFilter === "mejorados"}
               className={cn(
-                "px-3 py-1.5 rounded-xl text-xs font-black transition-all flex items-center gap-1.5",
+                "min-h-11 px-3 py-2 rounded-xl text-xs font-semibold transition-all flex items-center gap-1.5",
                 rankingFilter === "mejorados"
                   ? "bg-slate-900 text-white shadow-sm"
                   : "bg-slate-100 text-slate-600 hover:bg-slate-200"
@@ -1442,8 +1189,9 @@ export function TopicsEvolutionSection({
 
             <button
               onClick={() => setRankingFilter("tiempo")}
+              aria-pressed={rankingFilter === "tiempo"}
               className={cn(
-                "px-3 py-1.5 rounded-xl text-xs font-black transition-all flex items-center gap-1.5",
+                "min-h-11 px-3 py-2 rounded-xl text-xs font-semibold transition-all flex items-center gap-1.5",
                 rankingFilter === "tiempo"
                   ? "bg-slate-900 text-white shadow-sm"
                   : "bg-slate-100 text-slate-600 hover:bg-slate-200"
@@ -1455,21 +1203,23 @@ export function TopicsEvolutionSection({
 
             <button
               onClick={() => setRankingFilter("dominados")}
+              aria-pressed={rankingFilter === "dominados"}
               className={cn(
-                "px-3 py-1.5 rounded-xl text-xs font-black transition-all flex items-center gap-1.5",
+                "min-h-11 px-3 py-2 rounded-xl text-xs font-semibold transition-all flex items-center gap-1.5",
                 rankingFilter === "dominados"
                   ? "bg-slate-900 text-white shadow-sm"
                   : "bg-slate-100 text-slate-600 hover:bg-slate-200"
               )}
             >
               <CheckCircle2 size={13} className={rankingFilter === "dominados" ? "text-emerald-400" : "text-emerald-500"} />
-              Dominados
+              Dificultad ≤4 y 2+ vueltas
             </button>
 
             <button
               onClick={() => setRankingFilter("todos")}
+              aria-pressed={rankingFilter === "todos"}
               className={cn(
-                "px-3 py-1.5 rounded-xl text-xs font-black transition-all flex items-center gap-1.5",
+                "min-h-11 px-3 py-2 rounded-xl text-xs font-semibold transition-all flex items-center gap-1.5",
                 rankingFilter === "todos"
                   ? "bg-slate-900 text-white shadow-sm"
                   : "bg-slate-100 text-slate-600 hover:bg-slate-200"
@@ -1490,23 +1240,23 @@ export function TopicsEvolutionSection({
                   <div
                     key={t.id}
                     onClick={() => setInspectingTopicId(t.id)}
-                    className="bg-white hover:bg-slate-50 border border-slate-200/80 hover:border-indigo-300 p-4 rounded-2xl transition-all cursor-pointer shadow-sm hover:shadow-md group flex flex-col justify-between relative"
+                    className={cn(DS.cardInteractive, "min-w-0 p-4 cursor-pointer group flex flex-col justify-between relative")}
                   >
                     <div>
                       {/* Top badges */}
-                      <div className="flex items-center justify-between gap-2 mb-2">
+                      <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
                         <div className="flex items-center gap-1.5">
-                          <span className="text-[10px] font-black px-2 py-0.5 rounded-md bg-slate-900 text-white">
+                          <span className="text-xs font-black px-2 py-0.5 rounded-md bg-slate-900 text-white">
                             Tema {t.number}
                           </span>
-                          <span className="text-[10px] font-bold px-2 py-0.5 rounded-md bg-slate-100 text-slate-600 truncate max-w-[110px]">
+                          <span className="text-xs font-bold px-2 py-0.5 rounded-md bg-slate-100 text-slate-600 truncate max-w-[110px]">
                             {t.subjectName.replace("Derecho ", "")}
                           </span>
                         </div>
 
                         {/* Badge de fase del Preparador */}
                         <span className={cn(
-                          "text-[10px] font-black px-2 py-0.5 rounded-full border flex items-center gap-1",
+                          "text-xs font-black px-2 py-0.5 rounded-full border flex items-center gap-1",
                           t.cycleInfo.phaseBadgeClass
                         )}>
                           {t.cycleInfo.phase === "en_refrescos" && (
@@ -1520,43 +1270,20 @@ export function TopicsEvolutionSection({
                       </div>
 
                       {/* Título del tema */}
-                      <h5 className="text-xs font-black text-slate-900 line-clamp-2 group-hover:text-indigo-600 transition-colors mb-2.5">
-                        {t.title}
+                      <h5 className="text-sm font-semibold text-slate-900 leading-snug mb-2.5">
+                        <button type="button" onClick={event => { event.stopPropagation(); setInspectingTopicId(t.id); }} aria-label={`Consultar historial del tema ${t.number}`} className="min-h-11 text-left hover:underline">{t.title}</button>
                       </h5>
-
-                      {/* Pill interactiva del ciclo preparador si está en proceso */}
-                      {t.cycleInfo.phase === "en_refrescos" && (
-                        <div className="mb-2.5 px-2.5 py-1.5 rounded-xl bg-amber-50/80 border border-amber-200/60 flex items-center justify-between">
-                          <span className="text-[10px] font-bold text-amber-900">Progreso 3 Refrescos:</span>
-                          <div className="flex items-center gap-1">
-                            {[1, 2, 3].map((step) => (
-                              <div
-                                key={step}
-                                className={cn(
-                                  "w-2 h-2 rounded-full",
-                                  step <= t.cycleInfo.refrescosCount
-                                    ? "bg-amber-500"
-                                    : "bg-amber-200"
-                                )}
-                              />
-                            ))}
-                            <span className="text-[10px] font-black text-amber-700 ml-1">
-                              {t.cycleInfo.refrescosCount}/3
-                            </span>
-                          </div>
-                        </div>
-                      )}
 
                       {/* Medidor de Dificultad: Inicial vs Actual */}
                       <div className="bg-slate-50 rounded-xl p-2.5 border border-slate-100 mb-3">
-                        <div className="flex items-center justify-between text-[11px] mb-1.5">
+                        <div className="flex items-center justify-between text-xs mb-1.5">
                           <span className="font-bold text-slate-500">Dificultad:</span>
                           <div className="flex items-center gap-1.5 font-black">
                             <span className="text-slate-400">Dif. {t.initialDifficulty}</span>
                             <ArrowRight size={12} className="text-slate-400" />
                             <span
                               className={cn(
-                                "px-1.5 py-0.5 rounded-md text-white text-[10px]",
+                                "px-1.5 py-0.5 rounded-md text-white text-xs",
                                 t.currentDifficulty >= 8
                                   ? "bg-rose-500"
                                   : t.currentDifficulty >= 5
@@ -1587,7 +1314,7 @@ export function TopicsEvolutionSection({
                     </div>
 
                     {/* Vitals inferiores del tema */}
-                    <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-[11px] font-bold text-slate-500">
+                    <div className="pt-2 border-t border-slate-100 flex flex-wrap gap-2 items-center justify-between text-xs font-bold text-slate-500">
                       <div className="flex items-center gap-1">
                         <Clock size={12} className="text-slate-400" />
                         <span>Total: {totalH > 0 ? `${totalH}h ${totalM}m` : `${totalM}m`}</span>
@@ -1618,14 +1345,14 @@ export function TopicsEvolutionSection({
             </div>
           )}
         </div>
-      </div>
+      </section>
 
       {/* ============================================================================ */}
       {/* MODAL DE HISTORIAL DETALLADO DEL TEMA INSPECCIONADO */}
       {/* ============================================================================ */}
       <AnimatePresence>
         {inspectingTopic && (
-          <div className="fixed inset-0 z-[100] flex items-center justify-center p-3 sm:p-4 md:p-6 bg-slate-900/50 backdrop-blur-md animate-in fade-in duration-200">
+          <div ref={historyDialogRef} id="topic-evolution-history-dialog" role="dialog" aria-modal="true" aria-labelledby="topic-evolution-history-title" className="fixed inset-0 z-[100] flex items-center justify-center p-3 sm:p-4 md:p-6 bg-slate-900/50 backdrop-blur-md animate-in fade-in duration-200">
             <motion.div
               initial={{ opacity: 0, scale: 0.95, y: 12 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
@@ -1633,34 +1360,35 @@ export function TopicsEvolutionSection({
               className="bg-white rounded-[2rem] shadow-2xl w-full max-w-2xl relative overflow-hidden flex flex-col border border-slate-200 max-h-[88vh]"
             >
               {/* Header Modal */}
-              <div className="px-6 py-4 border-b border-slate-100 flex justify-between items-start bg-slate-50/70">
+              <div className="px-4 sm:px-6 py-4 border-b border-slate-100 flex justify-between items-start bg-slate-50/70">
                 <div>
                   <div className="flex items-center gap-2 mb-1">
-                    <span className="text-[10px] font-black px-2 py-0.5 rounded-md bg-slate-900 text-white">
+                    <span className="text-xs font-black px-2 py-0.5 rounded-md bg-slate-900 text-white">
                       Tema {inspectingTopic.number}
                     </span>
-                    <span className="text-[10px] font-bold text-slate-500">
+                    <span className="text-xs font-bold text-slate-500">
                       {inspectingTopic.subjectName}
                     </span>
                   </div>
-                  <h3 className="text-base font-black text-slate-900 leading-snug">
+                  <h3 id="topic-evolution-history-title" className="text-base font-semibold text-slate-900 leading-snug">
                     {inspectingTopic.title}
                   </h3>
                 </div>
                 <button
                   onClick={() => setInspectingTopicId(null)}
-                  className="w-8 h-8 rounded-full bg-slate-200/60 hover:bg-slate-200 text-slate-600 flex items-center justify-center transition-colors"
+                  aria-label="Cerrar historial del tema"
+                  className="shrink-0 w-11 h-11 rounded-full bg-slate-200/60 hover:bg-slate-200 text-slate-600 flex items-center justify-center transition-colors"
                 >
                   <X size={16} />
                 </button>
               </div>
 
               {/* Contenido Modal */}
-              <div className="p-6 overflow-y-auto space-y-5">
+              <div className="p-4 sm:p-6 overflow-y-auto space-y-5">
                 {/* Stats rápidos */}
-                <div className="grid grid-cols-3 gap-3">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                   <div className="bg-slate-50 p-3 rounded-xl border border-slate-100 text-center">
-                    <span className="text-[10px] font-black uppercase text-slate-400">Dificultad</span>
+                    <span className="text-xs font-black uppercase text-slate-400">Dificultad</span>
                     <div className="flex items-center justify-center gap-1.5 mt-1">
                       <span className="text-xs text-slate-400 font-bold">{inspectingTopic.initialDifficulty}</span>
                       <ArrowRight size={12} className="text-slate-400" />
@@ -1675,14 +1403,14 @@ export function TopicsEvolutionSection({
                   </div>
 
                   <div className="bg-slate-50 p-3 rounded-xl border border-slate-100 text-center">
-                    <span className="text-[10px] font-black uppercase text-slate-400">Tiempo Total</span>
+                    <span className="text-xs font-black uppercase text-slate-400">Tiempo Total</span>
                     <p className="text-base font-black text-slate-900 mt-1">
                       {Math.floor(inspectingTopic.totalMinutes / 60)}h {Math.round(inspectingTopic.totalMinutes % 60)}m
                     </p>
                   </div>
 
                   <div className="bg-slate-50 p-3 rounded-xl border border-slate-100 text-center">
-                    <span className="text-[10px] font-black uppercase text-slate-400">Vueltas Consolidadas</span>
+                    <span className="text-xs font-black uppercase text-slate-400">Vueltas registradas</span>
                     <p className="text-base font-black text-indigo-600 mt-1">
                       {inspectingTopic.vueltas} v • {inspectingTopic.sessionsCount} ses.
                     </p>
@@ -1692,43 +1420,23 @@ export function TopicsEvolutionSection({
                 {/* Tarjeta Diagnóstico del Método del Preparador */}
                 <div className="p-4 rounded-2xl bg-gradient-to-br from-amber-50/70 via-white to-amber-50/30 border border-amber-200/80 shadow-sm">
                   <div className="flex items-center justify-between gap-2 mb-2.5">
-                    <span className="text-[11px] font-black text-amber-900 uppercase tracking-wider flex items-center gap-1.5">
+                    <span className="text-xs font-black text-amber-900 uppercase tracking-wider flex items-center gap-1.5">
                       <Sparkles size={14} className="text-amber-600" />
-                      Método Preparador (Ciclo Activo)
+                      Historial de contactos y próxima acción
                     </span>
                     <span className={cn(
-                      "text-[10px] font-black px-2.5 py-0.5 rounded-full border",
+                      "text-xs font-black px-2.5 py-0.5 rounded-full border",
                       inspectingTopic.cycleInfo.phaseBadgeClass
                     )}>
                       {inspectingTopic.cycleInfo.phaseLabel}
                     </span>
                   </div>
 
-                  {/* Pasos de los 3 refrescos */}
-                  <div className="grid grid-cols-3 gap-2 mb-3">
-                    {[1, 2, 3].map((step) => {
-                      const isCompleted = step <= inspectingTopic.cycleInfo.refrescosCount;
-                      const isCurrent = step === inspectingTopic.cycleInfo.refrescosCount + 1 && inspectingTopic.cycleInfo.phase === 'en_refrescos';
-                      return (
-                        <div
-                          key={step}
-                          className={cn(
-                            "p-2 rounded-xl border text-center transition-all",
-                            isCompleted
-                              ? "bg-amber-100/80 border-amber-300 text-amber-950 font-bold"
-                              : isCurrent
-                              ? "bg-white border-amber-500 ring-2 ring-amber-400/20 text-slate-900 font-extrabold"
-                              : "bg-slate-50 border-slate-200 text-slate-400"
-                          )}
-                        >
-                          <span className="text-[10px] block uppercase font-black">Refresco {step}/3</span>
-                          <span className="text-[10px] font-medium">
-                            {isCompleted ? "✓ Completado" : isCurrent ? "→ Toca hoy" : "Pendiente"}
-                          </span>
-                        </div>
-                      );
-                    })}
-                  </div>
+                  <p className="mb-3 text-sm text-slate-700">
+                    {inspectingTopic.cycleInfo.refrescosCount} días de refresco registrados.
+                    {inspectingTopic.cycleInfo.refrescoDates.length > 0 && <span className="block mt-1">{inspectingTopic.cycleInfo.refrescoDates.join(', ')}</span>}
+                    <span className="block mt-1 text-xs">La agenda muestra las obligaciones del protocolo elegido. Este historial no demuestra dominio ni añade contactos pendientes.</span>
+                  </p>
 
                   {/* Próxima Acción & Repaso Mensual */}
                   <div className="pt-2 border-t border-amber-200/60 flex flex-wrap items-center justify-between text-xs gap-2">
@@ -1739,8 +1447,8 @@ export function TopicsEvolutionSection({
                       </span>
                     </div>
                     {inspectingTopic.cycleInfo.nextMonthlyReviewDate && (
-                      <div className="text-[11px] font-bold text-amber-800">
-                        Repaso mensual: {inspectingTopic.cycleInfo.nextMonthlyReviewDate} ({inspectingTopic.cycleInfo.daysUntilMonthlyReview > 0 ? `en ${inspectingTopic.cycleInfo.daysUntilMonthlyReview}d` : `hace ${Math.abs(inspectingTopic.cycleInfo.daysUntilMonthlyReview)}d`})
+                      <div className="text-xs font-bold text-amber-800">
+                        Revisión sugerida: {inspectingTopic.cycleInfo.nextMonthlyReviewDate} ({(inspectingTopic.cycleInfo.daysUntilMonthlyReview ?? 0) > 0 ? `en ${inspectingTopic.cycleInfo.daysUntilMonthlyReview}d` : `hace ${Math.abs(inspectingTopic.cycleInfo.daysUntilMonthlyReview ?? 0)}d`})
                       </div>
                     )}
                   </div>
@@ -1761,31 +1469,31 @@ export function TopicsEvolutionSection({
                           className="bg-slate-50 p-3 rounded-xl border border-slate-100 flex items-center justify-between text-xs"
                         >
                           <div className="flex items-center gap-2.5">
-                            <span className="w-5 h-5 rounded-full bg-indigo-100 text-indigo-700 flex items-center justify-center font-black text-[10px]">
+                            <span className="w-5 h-5 rounded-full bg-indigo-100 text-indigo-700 flex items-center justify-center font-black text-xs">
                               {idx + 1}
                             </span>
                             <div>
                               <p className="font-bold text-slate-800 capitalize">
                                 {s.type ? s.type.replace("_", " ") : "Estudio"}
                               </p>
-                              <p className="text-[10px] text-slate-400">{s.date}</p>
+                              <p className="text-xs text-slate-400">{s.date}</p>
                             </div>
                           </div>
 
                           <div className="flex items-center gap-4 text-right">
                             <div>
                               <span className="font-black text-slate-900">
-                                {s.durationMinutes || s.duration || 0} min
+                                {sessionDurationMinutes(s) > 0 ? `${Number(sessionDurationMinutes(s).toFixed(2))} min` : "Sin duración registrada"}
                               </span>
                               {s.difficulty && (
-                                <p className="text-[10px] font-bold text-slate-500">
+                                <p className="text-xs font-bold text-slate-500">
                                   Dif: {s.difficulty}/10
                                 </p>
                               )}
                             </div>
 
                             {s.completesVuelta && (
-                              <span className="text-[9px] font-black px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-700">
+                              <span className="text-xs font-black px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-700">
                                 Vuelta +1
                               </span>
                             )}
@@ -1800,11 +1508,11 @@ export function TopicsEvolutionSection({
               </div>
 
               {/* Footer Modal */}
-              <div className="px-6 py-3.5 bg-slate-50 border-t border-slate-100 flex justify-end gap-2">
+              <div className="px-4 sm:px-6 py-3.5 bg-slate-50 border-t border-slate-100 flex flex-wrap justify-end gap-2">
                 <button
                   type="button"
                   onClick={() => setInspectingTopicId(null)}
-                  className="px-4 py-2 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-200/60 transition-colors"
+                  className="min-h-11 px-4 py-2 rounded-xl text-xs font-bold text-slate-600 hover:bg-slate-200/60 transition-colors"
                 >
                   Cerrar
                 </button>
@@ -1816,7 +1524,7 @@ export function TopicsEvolutionSection({
                       setInspectingTopicId(null);
                       onSelectTopic(id);
                     }}
-                    className="px-4 py-2 rounded-xl text-xs font-black bg-slate-900 hover:bg-black text-white transition-all shadow-sm flex items-center gap-1.5"
+                    className="min-h-11 px-4 py-2 rounded-xl text-xs font-black bg-slate-900 hover:bg-black text-white transition-all shadow-sm flex items-center gap-1.5"
                   >
                     <span>Abrir en Temario</span>
                     <ArrowRight size={13} />

@@ -1,12 +1,12 @@
+import { useDialogAccessibility } from '../../hooks/useDialogAccessibility';
 import React, { useMemo, useState } from "react";
 import { X, Brain, Plus, AlertCircle, TrendingDown, Clock, Check, Mic, Sparkles } from "lucide-react";
 import { Topic } from "../../types";
 import { TopicProgressData } from "../../lib/prediction";
-import { evaluateTopicPreparation } from "../../lib/preparationScore";
-import { getCanonicalTopic, buildCanonicalTopicMap, CanonicalTopic } from "../../lib/canonicalTopicService";
-import { calculateAdaptiveRetention, buildLearnerProfile } from "../../lib/adaptiveLearningEngine";
-import { sessionMatchesTopic } from "../../lib/cantoUtils";
-import { safeParseDate, cn } from "../../lib/utils";
+import type { CanonicalTopic } from "../../lib/canonicalTopicService";
+import { calculateCanonicalRetention, getCanonicalReviewDate } from "../../lib/ebbinghaus";
+import { useFirebase } from "../../lib/FirebaseProvider";
+import { getLocalDateString, cn } from "../../lib/utils";
 import { playSound } from "../../lib/sound";
 import { DayPlan } from "../../lib/plannerEngine";
 import { motion } from "motion/react";
@@ -30,64 +30,65 @@ export const EbbinghausRecommendationsModal: React.FC<EbbinghausRecommendationsM
   weekDays,
   onAddReviewTask
 }) => {
+  const { topicState } = useFirebase();
   const [selectedTargetDay, setSelectedTargetDay] = useState<string>(
     weekDays[1]?.date || weekDays[0]?.date || ""
   );
 
   // Analizar todos los temas con el motor adaptativo de Ebbinghaus
   const urgentTopics = useMemo(() => {
-    const canonicalMap = buildCanonicalTopicMap(allTopics, userProgress, recentSessions);
-    const profile = buildLearnerProfile(recentSessions, canonicalMap);
+    const today = getLocalDateString();
+    const horizon = weekDays.at(-1)?.date || today;
 
     const list: Array<{
       canonical: CanonicalTopic;
       retentionPct: number;
-      overallScore: number;
       daysSinceTouch: number;
       isUrgent: boolean;
       activeRetrieval: boolean;
       explanation: string;
-      evidenceLevel: "canto_evaluado" | "repaso_activo" | "estudio_reciente" | "sin_evidencia";
+      retention: ReturnType<typeof calculateCanonicalRetention>;
+      recommendedDate: string;
     }> = [];
 
     for (const topic of allTopics) {
-      const prog = userProgress[topic.id];
-      const sessions = recentSessions.filter((s) => sessionMatchesTopic(s, topic));
-      if (!prog && sessions.length === 0) continue;
+      const canonical = topicState.get(topic.id);
+      if (!canonical) continue;
+      const retention = calculateCanonicalRetention(canonical);
+      const recommendedDate = getCanonicalReviewDate(canonical, retention);
+      if (!retention.hasData || !recommendedDate) continue;
+      const adaptive = retention.adaptive;
+      const daysSinceTouch = adaptive?.daysSinceContact ?? retention.daysSinceLastAction;
+      const activeRetrieval = adaptive?.target === 'recall' && adaptive.topicEvidenceCount > 0;
 
-      const canonical = canonicalMap.get(topic.id) || getCanonicalTopic(topic.id, allTopics, userProgress, recentSessions);
-      const adaptive = calculateAdaptiveRetention(canonical, recentSessions, profile);
-
-      const daysSinceTouch = adaptive.daysSinceLastTouch;
-      const activeRetrieval = adaptive.evidenceLevel === "canto_evaluado";
-
-      // Incluir si la retención es baja (< 75%) o lleva más de 25 días sin repasar
-      if (adaptive.retentionPct < 75 || daysSinceTouch >= 25 || adaptive.isUrgent) {
+      // Use the same suggestion as every other view, including overdue checks.
+      if (recommendedDate <= horizon) {
         list.push({
           canonical,
-          retentionPct: adaptive.retentionPct,
-          overallScore: prog?.lastScore || 6.0,
+          retentionPct: retention.currentRetention,
           daysSinceTouch,
-          isUrgent: adaptive.isUrgent || adaptive.retentionPct < 60 || daysSinceTouch >= 35,
+          isUrgent: recommendedDate <= today,
           activeRetrieval,
-          explanation: adaptive.recommendedAction,
-          evidenceLevel: adaptive.evidenceLevel
+          explanation: retention.actionAdvice,
+          retention,
+          recommendedDate,
         });
       }
     }
 
-    return list.sort((a, b) => a.retentionPct - b.retentionPct).slice(0, 25);
-  }, [allTopics, userProgress, recentSessions]);
+    return list.sort((a, b) => a.recommendedDate.localeCompare(b.recommendedDate) || a.retentionPct - b.retentionPct).slice(0, 25);
+  }, [allTopics, topicState, weekDays]);
 
+  const dialogRef = useDialogAccessibility({ isOpen: isOpen, onClose });
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-900/40 backdrop-blur-xs">
-      <motion.div
+    <div className="wp-modal-overlay fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-900/40 backdrop-blur-xs">
+      <motion.div ref={dialogRef} role="dialog" aria-modal="true" aria-label="Revisiones recomendadas"
         initial={{ opacity: 0, scale: 0.95, y: 10 }}
         animate={{ opacity: 1, scale: 1, y: 0 }}
         exit={{ opacity: 0, scale: 0.95, y: 10 }}
-        className="bg-white rounded-3xl p-5 sm:p-6 border border-slate-200/90 shadow-2xl max-w-xl w-full max-h-[85vh] flex flex-col overflow-hidden"
+        className="wp-modal-panel bg-white rounded-3xl p-5 sm:p-6 border border-slate-200/90 shadow-2xl max-w-xl w-full max-h-[90dvh] flex flex-col overflow-hidden"
       >
         {/* Header */}
         <div className="flex items-center justify-between pb-3.5 border-b border-slate-100 shrink-0">
@@ -97,16 +98,17 @@ export const EbbinghausRecommendationsModal: React.FC<EbbinghausRecommendationsM
             </div>
             <div>
               <h3 className="text-base font-black font-serif text-slate-900">
-                Repasos Recomendados (Curva de Ebbinghaus Adaptativa)
+                Revisiones sugeridas según tu historial
               </h3>
               <p className="text-xs text-slate-500">
-                Temas priorizados según decaimiento de retención, cantes orales y días sin repasar
+                Estimaciones orientativas para la semana seleccionada. Los cantes ya fijados mantienen su fecha.
               </p>
             </div>
           </div>
           <button
             type="button"
             onClick={onClose}
+              aria-label="Cerrar diálogo"
             className="p-1.5 text-slate-400 hover:text-slate-600 rounded-xl hover:bg-slate-100"
           >
             <X size={18} />
@@ -135,7 +137,7 @@ export const EbbinghausRecommendationsModal: React.FC<EbbinghausRecommendationsM
         <div className="flex-1 overflow-y-auto py-3 space-y-2 pr-1">
           {urgentTopics.length === 0 ? (
             <div className="p-8 text-center border border-dashed border-slate-200 rounded-2xl text-xs text-slate-500">
-              ¡Excelente! No tienes temas con decaimiento crítico de retención ni repasos mensuales pendientes.
+              No hay revisiones sugeridas para esta semana con los datos disponibles.
             </div>
           ) : (
             urgentTopics.map((item) => (
@@ -159,12 +161,12 @@ export const EbbinghausRecommendationsModal: React.FC<EbbinghausRecommendationsM
                     {item.activeRetrieval && (
                       <span className="text-[9px] font-black uppercase px-1.5 py-0.2 rounded-full bg-purple-100 text-purple-800 border border-purple-200 flex items-center gap-0.5">
                         <Mic size={9} />
-                        Cante previo
+                        Recuerdo evaluado
                       </span>
                     )}
                     {item.isUrgent && (
                       <span className="text-[9px] font-black uppercase px-1.5 py-0.2 rounded-full bg-rose-100 text-rose-800 border border-rose-200">
-                        Urgente
+                        Revisión sugerida hoy
                       </span>
                     )}
                   </div>
@@ -182,17 +184,21 @@ export const EbbinghausRecommendationsModal: React.FC<EbbinghausRecommendationsM
                       "font-bold",
                       item.retentionPct < 60 ? "text-rose-600" : "text-amber-600"
                     )}>
-                      Retención: {item.retentionPct}%
+                      Estimación: ≈{item.retentionPct}%
                     </span>
                     <span>·</span>
                     <span>Hace {item.daysSinceTouch} días</span>
                     <span>·</span>
                     <span>V{item.canonical.vueltas || 0}</span>
                   </div>
+                  <p className="text-[11px] text-slate-500 mt-1">Fecha sugerida: {item.recommendedDate}
+                    {item.retention.adaptive && ` · ${item.retention.adaptive.target === 'grade_proxy' ? 'Aproximación por nota de cante' : item.retention.adaptive.target === 'prior' ? 'Sin evaluación de recuerdo' : 'Evaluaciones de recuerdo'} · Confianza ${item.retention.adaptive.confidence}`}
+                  </p>
                 </div>
 
                 <button
                   type="button"
+                  disabled={!selectedTargetDay}
                   onClick={() => {
                     playSound.success();
                     onAddReviewTask(item.canonical.id, selectedTargetDay);

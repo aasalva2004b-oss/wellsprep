@@ -1,5 +1,11 @@
-import { TopicProgressData } from "./prediction";
+import type { TopicProgressData } from "./prediction";
+import type { Topic } from "../types";
+import { getCanonicalTopic, type CanonicalTopic } from "./canonicalTopicService";
+import { compareSessionsAsc } from "./cantoUtils";
+import { parseAeroFocusTopicIdPrefix } from "./topicResolver";
 import { getLocalDateString } from "./utils";
+import { estimateRetention, type RetentionEstimate, type RetentionRequest } from './retentionModel';
+import { getRetentionContext } from './retentionContext';
 
 export interface EbbinghausFactorBreakdown {
   // 1. Study Hours
@@ -68,7 +74,10 @@ export interface EbbinghausPoint {
 export type TopicMemoryStatus = 'excelente' | 'bueno' | 'atencion' | 'critico';
 
 export interface EbbinghausAnalysis {
+  adaptive?: RetentionEstimate;
   hasData: boolean;
+  evidence: 'recorded' | 'legacy' | 'none';
+  coverageScope: 'whole_topic' | 'studied_portion' | 'unknown';
   // Current state
   currentRetention: number; // 0 - 100%
   status: TopicMemoryStatus;
@@ -111,30 +120,125 @@ export interface EbbinghausAnalysis {
  * 5. Calificación / Nota del cante (altas notas = huella mnemotécnica intacta; suspensos = lagunas críticas)
  * 6. Refrescos diarios (3 primeros días) y vueltas mensuales de repaso espaciado
  */
-export function calculateEbbinghausCurve(
+/** One retention service for every view. History and master overrides come from the canonical topic. */
+export function calculateLegacyCanonicalRetention(topic: CanonicalTopic | undefined, asOf = new Date()): EbbinghausAnalysis {
+  if (!topic) return createEmptyAnalysis(5, 0);
+  const state = topic as CanonicalTopic & Record<string, any>;
+  const sessions = Array.isArray(state.sessions) ? state.sessions : [];
+  const legacy = state.legacyProgress || {};
+  const lastContact = state.lastContactDate || state.lastReviewDate || state.firstStudyDate;
+  if (!lastContact && sessions.length === 0) return createEmptyAnalysis(topic.difficulty, topic.pages);
+  const studyMinutes = sessions.length
+    ? sessions.filter((session: any) => ['estudio_inicial', 'primer_estudio', 'estudio', 'repaso'].includes(session.type))
+      .reduce((sum: number, session: any) => sum + Number(session.durationMinutes || 0), 0)
+    : Number(legacy.studyTimeHours || topic.totalStudyMinutes / 60 || 0) * 60;
+  const bestSeconds = Number(topic.mejorTiempoCantoSegundos || 0);
+  const progress = {
+    ...legacy, pages: topic.pages, difficulty: topic.difficulty, studyTimeHours: studyMinutes / 60,
+    vueltas: topic.vueltas, firstStudyDate: topic.firstStudyDate || '', lastReviewDate: topic.lastReviewDate || '',
+    mejorTiempoCantoMinutos: Math.floor(bestSeconds / 60), mejorTiempoCantoSegundos: bestSeconds % 60,
+  } as TopicProgressData;
+  const result = calculateRetentionFromEvidence(topic.id, topic.pages, topic.difficulty, progress, sessions.filter(session => session.date < asOf.toISOString().slice(0, 10)), asOf);
+  const coverage = state.initialStudyCoverage;
+  result.evidence = sessions.length ? 'recorded' : result.hasData ? 'legacy' : 'none';
+  result.coverageScope = coverage?.studiedPages === topic.pages && topic.pages > 0 ? 'whole_topic'
+    : typeof coverage?.studiedPages === 'number' && coverage.studiedPages > 0 ? 'studied_portion' : 'unknown';
+  if (result.hasData && result.coverageScope !== 'whole_topic') {
+    result.diagnostic = `${result.coverageScope === 'studied_portion' ? 'La cobertura inicial es parcial.' : 'No se conoce la cobertura inicial exacta.'} Estimación heurística basada en el historial registrado. ${result.diagnostic}`;
+  }
+  return result;
+}
+
+/** The shared review-date policy. Missing initial coverage never becomes an invented full-topic deadline. */
+export function getCanonicalReviewDate(topic: CanonicalTopic, analysis = calculateCanonicalRetention(topic)): string | null {
+  return analysis.adaptive?.recommendedDate || null;
+}
+
+/** The UI adapter retains its historical shape; the legacy formula is only a benchmark. */
+export function calculateCanonicalRetention(topic: CanonicalTopic | undefined,
+  options: Partial<Omit<RetentionRequest, 'topic'>> = {}): EbbinghausAnalysis {
+  const empty = createEmptyAnalysis(topic?.difficulty || 0, topic?.pages || 0);
+  if (!topic) return empty;
+  const asOf = options.asOf || new Date();
+  if (!Number.isFinite(asOf.getTime())) return empty;
+  const context = getRetentionContext(topic);
+  const adaptive = !Object.keys(options).length && topic.retentionEstimate?.generatedAt.slice(0, 10) === asOf.toISOString().slice(0, 10)
+    ? topic.retentionEstimate : estimateRetention({ topic,
+      history: context?.history || topic.sessions, topics: context?.topics || new Map([[topic.id, topic]]),
+      ...options, config: { ...(context?.config || topic.retentionEstimate?.policy), ...options.config }, asOf });
+  const hasData = adaptive.probability !== null;
+  if (!hasData) return { ...empty, adaptive, diagnostic: adaptive.reasons.join(' '), statusTitle: 'Sin estimación disponible' };
+  const value = Math.round(adaptive.probability! * 20) * 5;
+  const due = adaptive.recommendedDate;
+  const today = asOf.toISOString().slice(0, 10);
+  const daysUntil = due ? Math.round((Date.parse(due) - Date.parse(today)) / 86_400_000) : 0;
+  const isDue = !!due && due <= today;
+  const status: TopicMemoryStatus = isDue ? 'atencion' : adaptive.confidence === 'baja' ? 'bueno' : 'excelente';
+  const diagnostic = adaptive.reasons.join(' ');
+  const title = isDue ? 'Conviene comprobar el recuerdo' : adaptive.confidence === 'baja' ? 'Estimación con incertidumbre alta' : 'Próximo control sugerido';
+  const lastCanto = topic.cantoSessions.at(-1);
+  const anchor = adaptive.lastEvidenceDate || adaptive.lastContactDate;
+  const daysSinceEvidence = anchor ? Math.max(0, (Date.parse(asOf.toISOString().slice(0, 10)) - Date.parse(anchor)) / 86_400_000) : 0;
+  const factors: EbbinghausFactorBreakdown = {
+    ...empty.factors, studyHoursTotal: topic.totalRecordedMinutes / 60,
+    studyHoursImpactLabel: 'Tiempo observado; no mide eficacia de recuerdo',
+    difficulty: topic.difficulty, difficultyImpactLabel: adaptive.featuresUsed.includes('difficulty') ? 'Evidencia comparable por dificultad' : 'Efecto sin estimar',
+    cantosCount: topic.cantoSessions.length, cantosImpactLabel: 'Los cantes sin evaluación no demuestran recuerdo',
+    lastCantoGrade: topic.lastCantoGrade ?? null,
+    lastCantoMinutes: lastCanto?.durationMinutes ?? null, lastCantoSeconds: (lastCanto as any)?.cantoSeconds ?? null,
+    cantoSpeedImpactLabel: 'La velocidad oral no se usa como eficacia', cantoGradeImpactLabel: 'Nota como señal indirecta, no porcentaje de memoria',
+    refrescosCompleted: Math.min(3, new Set(topic.refreshSessions.map(session => session.date)).size),
+    refrescosImpactLabel: 'Contactos observados, sin bonificación fija', vueltas: topic.vueltas,
+    vueltasImpactLabel: adaptive.featuresUsed.includes('vueltas') ? 'Contexto comparable de vueltas registradas' : 'Sin efecto aprendido de vueltas',
+    stabilityDays: adaptive.stabilityDays, anchorDate: anchor, anchorType: lastCanto?.date === anchor ? 'canto' : 'repaso',
+    daysSinceAnchor: daysSinceEvidence, effectiveDaysElapsed: daysSinceEvidence,
+    hasMasteryBonus: false, brakeType: undefined,
+  };
+  const chartData: EbbinghausPoint[] = [];
+  if (anchor) for (let offset = 0; offset <= Math.max(30, Math.min(180, daysSinceEvidence + 14)); offset++) {
+    const fullDate = new Date(Date.parse(anchor) + offset * 86_400_000).toISOString().slice(0, 10);
+    const baseline = adaptive.target === 'grade_proxy' ? adaptive.probability! : Math.min(1, adaptive.probability! / Math.pow(.5, daysSinceEvidence / adaptive.stabilityDays));
+    const retention = Math.round(baseline * (adaptive.target === 'grade_proxy' ? 1 : Math.pow(.5, offset / adaptive.stabilityDays)) * 20) * 5;
+    chartData.push({ day: offset, label: `${offset}d`, dateStr: fullDate.slice(5), fullDate, retention,
+      isToday: fullDate === today, isAnchor: offset === 0, isThreshold80: fullDate === due, retentionFormatted: `≈ ${retention}%` });
+  }
+  return { ...empty, adaptive, hasData, evidence: topic.sessions.length ? 'recorded' : 'legacy', coverageScope: adaptive.coverageScope,
+    currentRetention: value, status, statusTitle: title, statusSummary: diagnostic, diagnostic,
+    statusBadgeClass: isDue ? 'bg-amber-500/20 text-amber-300 border-amber-500/30' : empty.statusBadgeClass,
+    daysSinceLastAction: Math.floor(adaptive.daysSinceContact || 0), daysUntilCritical80: daysUntil,
+    critical80DateStr: due, isBelowCritical80: isDue,
+    actionAdvice: isDue ? 'Comprueba el recuerdo sin apuntes y registra el resultado para ajustar la próxima recomendación.' : `Contacto flexible sugerido: ${due}.`,
+    actionUrgency: isDue ? 'alta' : 'baja', stabilityDays: adaptive.stabilityDays, factors, chartData };
+}
+
+/** Compatibility entry; callers still receive exactly the canonical calculation. */
+export function calculateEbbinghausCurve(topicId: string, pages = 0, difficulty = 5, progress?: TopicProgressData, sessions: any[] = []): EbbinghausAnalysis {
+  const identity = parseAeroFocusTopicIdPrefix(topicId);
+  const base = { id: topicId, title: (progress as any)?.customTitle || topicId, pages, difficulty,
+    subjectId: identity?.subjectId || progress?.subjectId || '', number: identity?.number || 0 } as Topic;
+  const canonical = getCanonicalTopic(base, [base], progress ? { [topicId]: progress } : {}, sessions);
+  return calculateCanonicalRetention(canonical);
+}
+
+function calculateRetentionFromEvidence(
   topicId: string,
-  pages: number = 15,
+  pages: number = 0,
   difficulty: number = 5,
   progress?: TopicProgressData,
-  sessions: any[] = []
+  sessions: any[] = [],
+  asOf = new Date()
 ): EbbinghausAnalysis {
-  const todayStr = getLocalDateString();
+  const todayStr = getLocalDateString(asOf);
   const todayDate = new Date(todayStr);
 
   // Filtrar y ordenar sesiones cronológicas de este tema
   // Nota: si las sesiones ya vienen filtradas desde el diálogo, s.topicId puede ser undefined, por lo que se acepta !s.topicId || s.topicId === topicId
   const topicSessions = (sessions || [])
-    .filter((s) => !s.topicId || s.topicId === topicId)
-    .sort((a, b) => {
-      const dateCmp = (a.date || "").localeCompare(b.date || "");
-      if (dateCmp !== 0) return dateCmp;
-      const timeA = a.createdAt?.toMillis ? a.createdAt.toMillis() : (a.createdAt || 0);
-      const timeB = b.createdAt?.toMillis ? b.createdAt.toMillis() : (b.createdAt || 0);
-      return timeA - timeB;
-    });
+    .filter((s) => s && (!s.topicId || s.topicId === topicId))
+    .sort(compareSessionsAsc);
 
   const estudioSessions = topicSessions.filter(
-    (s) => s.type === "estudio_inicial" || s.type === "primer_estudio"
+    (s) => s.type === "estudio_inicial" || s.type === "primer_estudio" || s.type === "estudio"
   );
   const cantosSessions = topicSessions.filter((s) => {
     const t = (s.type || '').toLowerCase();
@@ -223,11 +327,11 @@ export function calculateEbbinghausCurve(
       .reduce((acc, s) => acc + (s.duration || s.durationMinutes || 0), 0);
     studyHoursTotal = Math.round((totalMinsEstudio / 60) * 10) / 10;
   }
-  const expectedHours = Math.max(2, (pages || 15) * 0.55);
-  const hoursRatio = studyHoursTotal > 0 ? (studyHoursTotal / expectedHours) : 0.7;
+  const expectedHours = pages > 0 ? Math.max(2, pages * 0.55) : null;
+  const hoursRatio = expectedHours !== null && studyHoursTotal > 0 ? studyHoursTotal / expectedHours : null;
   
-  const studyHoursFactor = Math.min(1.75, Math.max(0.70, 0.70 + 0.45 * Math.sqrt(Math.max(0.1, hoursRatio))));
-  const studyHoursImpactLabel = studyHoursFactor >= 1.25 
+  const studyHoursFactor = hoursRatio === null ? 1 : Math.min(1.75, Math.max(0.70, 0.70 + 0.45 * Math.sqrt(Math.max(0.1, hoursRatio))));
+  const studyHoursImpactLabel = hoursRatio === null ? "Volumen o tiempo inicial sin medir: factor neutro" : studyHoursFactor >= 1.25
     ? `+${Math.round((studyHoursFactor - 1) * 100)}% (Estudio profundo)` 
     : studyHoursFactor >= 1.0 
       ? `+${Math.round((studyHoursFactor - 1) * 100)}% (Tiempo óptimo)` 
@@ -390,7 +494,9 @@ export function calculateEbbinghausCurve(
   // =========================================================================
   // FACTOR 6: REFRESCOS Y REPASOS (La Ley de los 3 Refrescos y Repetición Espaciada)
   // =========================================================================
-  const refrescosCompleted = Math.min(3, refrescosSessions.length);
+  const refrescoDays = new Set(refrescosSessions.map(session => String(session.date || '').slice(0, 10))
+    .filter(date => /^\d{4}-\d{2}-\d{2}$/.test(date) && !!firstStudyDate && date > firstStudyDate && date <= todayStr));
+  const refrescosCompleted = Math.min(3, refrescoDays.size);
   let refrescosFactor = 1.0;
   let refrescosImpactLabel = "Sin refrescos iniciales";
 
@@ -412,7 +518,9 @@ export function calculateEbbinghausCurve(
   // FACTOR 7: VUELTAS MENSUALES (Consolidador Sináptico de Largo Plazo)
   // REFORZADO: V0: 1.0x | V1: 1.85x | V2: 3.10x | V3: 4.60x | V4+: hasta 6.20x
   // =========================================================================
-  const vueltas = Math.max(0, progress?.vueltas || (repasosSessions.length + (cantosCount > 0 ? 1 : 0)));
+  const vueltas = typeof progress?.vueltas === 'number' && Number.isFinite(progress.vueltas)
+    ? Math.max(0, progress.vueltas)
+    : topicSessions.filter(session => session.completesVuelta === true || (session.completesVuelta === undefined && ['repaso', 'canto', 'simulacro'].includes(session.type))).length;
   let vueltasFactor = 1.0;
   if (vueltas === 1) {
     vueltasFactor = 1.85;
@@ -555,7 +663,7 @@ export function calculateEbbinghausCurve(
 
   // Diagnóstico sobre refrescos y horas
   if (refrescosCompleted === 3) {
-    diagParts.push(`Completaste con éxito los 3 refrescos diarios consecutivos, protegiendo el tema del olvido inicial.`);
+    diagParts.push(`Constan refrescos en tres días diferentes posteriores al estudio inicial.`);
   } else if (refrescosCompleted > 0 && vueltas === 0) {
     diagParts.push(`Llevas ${refrescosCompleted}/3 refrescos iniciales: termina los refrescos pendientes para afianzar la estructura.`);
   } else if (refrescosCompleted === 0 && vueltas === 0) {
@@ -670,6 +778,8 @@ export function calculateEbbinghausCurve(
 
   return {
     hasData: true,
+    evidence: topicSessions.length ? 'recorded' : 'legacy',
+    coverageScope: 'unknown',
     currentRetention,
     status,
     statusTitle,
@@ -693,6 +803,8 @@ export function calculateEbbinghausCurve(
 function createEmptyAnalysis(difficulty: number, pages: number): EbbinghausAnalysis {
   return {
     hasData: false,
+    evidence: 'none',
+    coverageScope: 'unknown',
     currentRetention: 0,
     status: 'critico',
     statusTitle: 'Sin Estudiar',
@@ -703,10 +815,10 @@ function createEmptyAnalysis(difficulty: number, pages: number): EbbinghausAnaly
     daysSinceLastAction: 0,
     daysUntilCritical80: 0,
     critical80DateStr: null,
-    isBelowCritical80: true,
+    isBelowCritical80: false,
     diagnostic: 'Aún no has registrado el estudio inicial de este tema. Para activar el motor de retención de Ebbinghaus y calibrar tu curva con horas, dificultad y cantes, registra tu primera sesión de estudio.',
     actionAdvice: 'Comienza realizando la lectura comprensiva y subrayado del tema (Estudio Inicial).',
-    actionUrgency: 'inmediata',
+    actionUrgency: 'baja',
     stabilityDays: 3.5,
     factors: {
       studyHoursTotal: 0,

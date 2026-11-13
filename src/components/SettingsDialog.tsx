@@ -1,3 +1,4 @@
+import { authenticatedFetch } from '../lib/authenticatedApi';
 import { motion } from "motion/react";
 import {
   X,
@@ -23,15 +24,19 @@ import {
   ArrowRight
 } from "lucide-react";
 import { useTheme } from "../lib/ThemeProvider";
-import React, { ReactNode, useRef, useState, useEffect } from "react";
+import React, { ReactNode, useId, useRef, useState, useEffect } from "react";
 import { cn, getLocalDateString } from "../lib/utils";
 import { toast } from "sonner";
 import { useFirebase } from "../lib/FirebaseProvider";
 import { initialSubjects } from "../data/initialData";
 import { WebhookSyncRecord } from "../lib/webhookTypes";
+import { DEFAULT_RETENTION_CONFIG } from "../lib/retentionModel";
+import { useDialogAccessibility } from "../hooks/useDialogAccessibility";
+import { DS } from "../lib/designSystem";
 
-export function SettingsDialog({ onClose }: { onClose: () => void }) {
-  const [activeTab, setActiveTab] = useState<'webhook' | 'general' | 'data'>('webhook');
+export function SettingsDialog({ onClose, returnFocusRef }: { onClose: () => void; returnFocusRef?: React.RefObject<HTMLElement | null> }) {
+  const [activeTab, setActiveTab] = useState<'webhook' | 'general' | 'data'>('general');
+  const dialogId = useId();
   const jsonInputRef = useRef<HTMLInputElement>(null);
   const [isImporting, setIsImporting] = useState(false);
   const [isCopiedUrl, setIsCopiedUrl] = useState(false);
@@ -56,10 +61,38 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
     isSyncingWebhooks,
     aerofocusBetaEnabled,
     setAerofocusBetaEnabled,
-    purgeAllAeroFocusData,
-    recoverHistoricalUserData,
-    auditAndRestoreTopicIntegrity,
   } = useFirebase();
+
+  const [retentionForm, setRetentionForm] = useState({ stability: '', initialRecall: '', threshold: '' });
+  const [savingRetention, setSavingRetention] = useState(false);
+  const savingChanges = isImporting || savingRetention;
+  const dialogRef = useDialogAccessibility<HTMLDivElement>({ onClose, returnFocusRef, disabled: savingChanges });
+  useEffect(() => {
+    const policy = { ...DEFAULT_RETENTION_CONFIG, ...userSettings?.retention };
+    setRetentionForm({ stability: String(policy.initialStabilityDays), initialRecall: String(policy.initialRecallProbability * 100), threshold: String(policy.reviewThreshold * 100) });
+  }, [user?.uid, userSettings?.retention]);
+
+  const saveRetentionSettings = async () => {
+    const initialStabilityDays = Number(retentionForm.stability);
+    const initialRecallProbability = Number(retentionForm.initialRecall) / 100;
+    const reviewThreshold = Number(retentionForm.threshold) / 100;
+    if (!retentionForm.stability.trim() || !retentionForm.initialRecall.trim() || !retentionForm.threshold.trim()
+      || !Number.isFinite(initialStabilityDays) || initialStabilityDays < .25 || initialStabilityDays > 365
+      || !Number.isFinite(initialRecallProbability) || initialRecallProbability < .05 || initialRecallProbability > .99
+      || !Number.isFinite(reviewThreshold) || reviewThreshold < .05 || reviewThreshold > .95) {
+      toast.error('Indica una semivida entre 0,25 y 365 días, recuerdo inicial entre 5 y 99%, y umbral entre 5 y 95%.');
+      return;
+    }
+    setSavingRetention(true);
+    try {
+      await updateUserSettings({ retention: { ...userSettings?.retention, initialStabilityDays, initialRecallProbability, reviewThreshold } });
+      toast.success('Criterios de retención guardados. Las estimaciones se han recalculado.');
+    } catch {
+      toast.error('No se han podido guardar los criterios de retención.');
+    } finally {
+      setSavingRetention(false);
+    }
+  };
 
   const activeSubjects = userSettings?.activeSubjects || initialSubjects.map((s) => s.id);
   const defaultSubject = userSettings?.defaultSubject || activeSubjects[0] || initialSubjects[0].id;
@@ -73,7 +106,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const fetchWebhookLogs = async () => {
     try {
       setLoadingLogs(true);
-      const res = await fetch('/api/webhook/events?limit=15');
+      const res = await authenticatedFetch('/api/webhook/events?limit=15');
       if (res.ok) {
         const text = await res.text();
         try {
@@ -126,11 +159,10 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const handleSimulateTest = async () => {
     try {
       setIsTestingWebhook(true);
-      const res = await fetch("/api/webhook/aerofocus", {
+      const res = await authenticatedFetch("/api/webhook/aerofocus", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "Authorization": `Bearer ${webhookToken || "wp_qLXi6WFkFY_live"}`
         },
         body: JSON.stringify({
           isTest: true,
@@ -225,13 +257,17 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   };
 
   return (
-    <div className="fixed inset-0 z-[100] flex items-center justify-center p-3 sm:p-4 md:p-6 bg-slate-900/50 backdrop-blur-2xl animate-in fade-in duration-300">
+    <div className="wp-modal-overlay fixed inset-0 z-[100] flex items-center justify-center p-3 sm:p-4 md:p-6 bg-slate-900/50 backdrop-blur-sm">
       <motion.div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={`${dialogId}-title`}
         initial={{ opacity: 0, scale: 0.95, y: 12 }}
         animate={{ opacity: 1, scale: 1, y: 0 }}
         exit={{ opacity: 0, scale: 0.95, y: 12 }}
         transition={{ type: "spring", stiffness: 350, damping: 30 }}
-        className="bg-white rounded-[2.5rem] shadow-[0_25px_70px_-15px_rgba(0,0,0,0.35)] w-full max-w-2xl relative overflow-hidden flex flex-col border border-slate-200/70 max-h-[92vh]"
+        className="wp-modal-panel bg-white rounded-2xl shadow-xl w-full max-w-2xl relative overflow-hidden flex flex-col border border-slate-200/70 max-h-[calc(100dvh-2rem)]"
       >
         {/* Header */}
         <div className="px-6 py-4 border-b border-slate-200/60 flex justify-between items-center bg-white/80 backdrop-blur-xl sticky top-0 z-10">
@@ -240,117 +276,53 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
               <Settings size={18} />
             </div>
             <div>
-              <h2 className="text-base font-black text-slate-900 tracking-tight">
+              <h2 id={`${dialogId}-title`} className="text-lg font-semibold text-slate-900 tracking-tight">
                 Ajustes & Conexiones
               </h2>
-              <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
-                Configuración del Sistema Wellsprep
+              <p className="text-xs text-slate-500">
+                Preferencias, datos e integración con AeroFocus
               </p>
             </div>
           </div>
           <button
+            aria-label="Cerrar ajustes"
             onClick={onClose}
-            className="w-8 h-8 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-500 hover:text-slate-800 transition-all flex items-center justify-center active:scale-95 shadow-xs"
+            disabled={savingChanges}
+            className="size-11 shrink-0 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-500 hover:text-slate-800 transition-all flex items-center justify-center"
           >
             <X size={16} strokeWidth={2.5} />
           </button>
         </div>
 
         {/* Tab Navigation */}
-        <div className="flex items-center gap-1 px-4 sm:px-6 pt-3 pb-2 border-b border-slate-100 bg-slate-50/50 overflow-x-auto no-scrollbar whitespace-nowrap">
-          <button
-            type="button"
-            onClick={() => setActiveTab('webhook')}
-            className={cn(
-              "flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-black transition-all",
-              activeTab === 'webhook'
-                ? "bg-indigo-600 text-white shadow-sm"
-                : "text-slate-600 hover:text-slate-900 hover:bg-slate-200/60"
-            )}
-          >
-            <Radio size={14} />
-            AeroFocus Pro (Modo Prueba)
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab('general')}
-            className={cn(
-              "flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-black transition-all",
-              activeTab === 'general'
-                ? "bg-slate-900 text-white shadow-sm"
-                : "text-slate-600 hover:text-slate-900 hover:bg-slate-200/60"
-            )}
-          >
-            <Layers size={14} />
-            Materias & Apariencia
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab('data')}
-            className={cn(
-              "flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-black transition-all",
-              activeTab === 'data'
-                ? "bg-slate-900 text-white shadow-sm"
-                : "text-slate-600 hover:text-slate-900 hover:bg-slate-200/60"
-            )}
-          >
-            <Server size={14} />
-            Datos & Respaldo
-          </button>
-        </div>
+        <nav aria-label="Secciones de ajustes" className="flex shrink-0 items-center gap-1 px-4 sm:px-6 py-2 border-b border-slate-100 bg-slate-50/50 overflow-x-auto whitespace-nowrap">
+          {([['general', 'Materias & Apariencia', Layers], ['data', 'Datos & Respaldo', Server], ['webhook', 'AeroFocus', Radio]] as const).map(([tab, label, Icon]) => <button key={tab} type="button" onClick={() => setActiveTab(tab)} aria-pressed={activeTab === tab} className={`${activeTab === tab ? DS.btnPrimary : DS.btnGhost} shrink-0`}><Icon size={16} aria-hidden="true" />{label}</button>)}
+        </nav>
 
         {/* Tab Content */}
-        <div className="p-6 overflow-y-auto no-scrollbar space-y-6">
+        <div className="min-h-0 flex-1 p-4 sm:p-6 overflow-y-auto overscroll-contain space-y-6">
           {activeTab === 'webhook' && (
             <div className="space-y-6 animate-in fade-in duration-200">
               {/* Quarantine Status & Beta Toggle Card */}
-              <div className="bg-gradient-to-br from-slate-900 via-indigo-950 to-slate-900 text-white rounded-2xl p-5 shadow-sm relative overflow-hidden space-y-4">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <span className={cn("w-2.5 h-2.5 rounded-full", aerofocusBetaEnabled ? "bg-amber-400 animate-pulse" : "bg-emerald-400")} />
-                    <span className="text-[11px] font-black tracking-widest uppercase text-slate-300">
-                      {aerofocusBetaEnabled ? "Modo Prueba (Beta Activa)" : "Función en Cuarentena (Desactivada)"}
-                    </span>
-                  </div>
-                  <span className={cn("text-[10px] font-bold px-2.5 py-0.5 rounded-full border", aerofocusBetaEnabled ? "bg-amber-500/20 text-amber-300 border-amber-500/40" : "bg-emerald-500/20 text-emerald-300 border-emerald-500/40")}>
-                    {aerofocusBetaEnabled ? "Beta ON" : "Cuarentena Segura"}
-                  </span>
-                </div>
-                <div>
-                  <h3 className="text-base font-black tracking-tight text-white mb-1">
-                    Integración AeroFocus Pro (En Cuarentena / Modo Prueba)
-                  </h3>
-                  <p className="text-xs text-indigo-100/90 leading-relaxed font-normal">
-                    La sincronización automática está <span className="font-bold text-amber-300">desactivada y en cuarentena</span> para proteger tu progreso oficial. Puedes realizar pings en el sandbox o habilitar la beta si deseas probar la recepción sin alterar tus estadísticas.
-                  </p>
-                </div>
-                <div className="flex items-center justify-between pt-3 border-t border-indigo-900/60">
-                  <span className="text-xs font-bold text-slate-200">
-                    Activar Sincronización AeroFocus (Modo Prueba)
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => setAerofocusBetaEnabled(!aerofocusBetaEnabled)}
-                    className={cn(
-                      "w-11 h-6 flex items-center rounded-full p-1 transition-colors duration-200 ease-in-out cursor-pointer",
-                      aerofocusBetaEnabled ? "bg-amber-500 justify-end" : "bg-slate-700 justify-start"
-                    )}
-                  >
-                    <div className="w-4 h-4 bg-white rounded-full shadow-md" />
-                  </button>
-                </div>
-              </div>
+              <section className={`${DS.cardSubtle} p-4 space-y-3`}>
+                <div><h3 className={DS.titleSection}>Recepción de AeroFocus</h3><p className={`${DS.subtitle} mt-1`}>Revisa los temas y minutos recibidos en la bandeja antes de incorporarlos a tu historial.</p></div>
+                <div className="flex items-center justify-between gap-3 border-t border-slate-200 pt-2"><span className="text-sm font-medium text-slate-700">Recepción beta</span><button type="button" role="switch" aria-label="Recepción beta de AeroFocus" aria-checked={aerofocusBetaEnabled} onClick={() => setAerofocusBetaEnabled(!aerofocusBetaEnabled)} className={`${DS.iconButton} gap-2`}><span className="text-xs">{aerofocusBetaEnabled ? 'Habilitada' : 'Deshabilitada'}</span><span aria-hidden="true" className={cn('flex h-6 w-11 items-center rounded-full p-1', aerofocusBetaEnabled ? 'justify-end bg-slate-900' : 'justify-start bg-slate-300')}><span className="size-4 rounded-full bg-white" /></span></button></div>
+              </section>
 
+              <details className={`${DS.cardSubtle} p-4`}>
+                <summary className="min-h-11 cursor-pointer text-sm font-semibold text-slate-800">Configurar conexión</summary>
+                <div className="mt-3 space-y-4">
               {/* Endpoint URL Field */}
               <div className="bg-slate-50/80 rounded-2xl p-5 border border-slate-200/70 space-y-3">
                 <div className="flex items-center justify-between">
-                  <label className="text-[11px] font-black text-slate-500 uppercase tracking-wider flex items-center gap-1.5">
+                  <label htmlFor={`${dialogId}-url`} className="text-xs font-semibold text-slate-600 flex items-center gap-1.5">
                     <Radio size={13} className="text-indigo-600" /> URL del Endpoint Webhook
                   </label>
                   <span className="text-[10px] font-bold text-slate-400">Método POST</span>
                 </div>
                 <div className="flex items-center gap-2">
                   <input
+                    id={`${dialogId}-url`}
                     type="text"
                     readOnly
                     value={webhookUrl}
@@ -378,7 +350,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
               {/* API Token Field */}
               <div className="bg-slate-50/80 rounded-2xl p-5 border border-slate-200/70 space-y-3">
                 <div className="flex items-center justify-between">
-                  <label className="text-[11px] font-black text-slate-500 uppercase tracking-wider flex items-center gap-1.5">
+                  <label htmlFor={`${dialogId}-token`} className="text-xs font-semibold text-slate-600 flex items-center gap-1.5">
                     <Key size={13} className="text-indigo-600" /> Token de Autorización / API Key
                   </label>
                   <button
@@ -391,7 +363,8 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                 </div>
                 <div className="flex items-center gap-2">
                   <input
-                    type="text"
+                    id={`${dialogId}-token`}
+                    type="password"
                     readOnly
                     value={webhookToken}
                     className="w-full bg-white border border-slate-200 rounded-xl px-3.5 py-2.5 text-xs font-mono text-slate-800 font-semibold focus:outline-none select-all"
@@ -424,7 +397,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                   className="flex items-center justify-center gap-2 px-4 py-3 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-xl text-xs font-black border border-indigo-200/80 transition-all shadow-xs active:scale-[0.98] disabled:opacity-50"
                 >
                   <Zap size={15} className="text-indigo-600" />
-                  {isTestingWebhook ? "Simulando envío..." : "⚡ Probar Conexión (Simular Vuelo Demo)"}
+                  {isTestingWebhook ? "Comprobando…" : "Comprobar conexión"}
                 </button>
                 <button
                   type="button"
@@ -433,9 +406,11 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                   className="flex items-center justify-center gap-2 px-4 py-3 bg-white hover:bg-slate-100 text-slate-800 rounded-xl text-xs font-black border border-slate-200/80 transition-all shadow-xs active:scale-[0.98] disabled:opacity-50"
                 >
                   <RefreshCw size={14} className={cn("text-slate-600", isSyncingWebhooks && "animate-spin")} />
-                  {isSyncingWebhooks ? "Sincronizando..." : "Re-sincronizar Sesiones Pendientes"}
+                  {isSyncingWebhooks ? "Actualizando…" : "Buscar transmisiones pendientes"}
                 </button>
               </div>
+                </div>
+              </details>
 
               {/* Recent Sync Logs */}
               <div className="bg-slate-50/70 rounded-2xl p-5 border border-slate-200/60">
@@ -493,7 +468,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                             +{log.totalFlightEffectiveHours || Math.round(log.totalFlightEffectiveMinutes / 60)}h
                           </div>
                           <span className="text-[9px] font-bold text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-100">
-                            200 OK
+                            {log.status === 'processed' ? 'Incorporado' : 'Por revisar'}
                           </span>
                         </div>
                       </div>
@@ -506,6 +481,22 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
 
           {activeTab === 'general' && (
             <div className="space-y-6 animate-in fade-in duration-200">
+              <section className="bg-slate-50/70 rounded-2xl p-5 border border-slate-200/60">
+                <h3 className="text-sm font-bold text-slate-800 mb-2">Criterios de retención y repaso</h3>
+                <p className="text-xs text-slate-600 mb-4">Estos valores son supuestos iniciales y criterios de planificación. No son mediciones de tu memoria. Las recuperaciones sin ayuda registradas permiten ajustar el modelo con evidencia.</p>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <label className="text-xs font-bold text-slate-700">Semivida inicial (días)
+                    <input aria-label="Semivida inicial en días" type="number" min="0.25" max="365" step="0.25" value={retentionForm.stability} onChange={event => setRetentionForm(previous => ({ ...previous, stability: event.target.value }))} className="mt-1 w-full rounded-xl border border-slate-200 bg-white p-2.5 font-mono" />
+                  </label>
+                  <label className="text-xs font-bold text-slate-700">Recuerdo inicial supuesto (%)
+                    <input aria-label="Recuerdo inicial supuesto en porcentaje" type="number" min="5" max="99" step="1" value={retentionForm.initialRecall} onChange={event => setRetentionForm(previous => ({ ...previous, initialRecall: event.target.value }))} className="mt-1 w-full rounded-xl border border-slate-200 bg-white p-2.5 font-mono" />
+                  </label>
+                  <label className="text-xs font-bold text-slate-700">Umbral para proponer repaso (%)
+                    <input aria-label="Umbral para proponer repaso en porcentaje" type="number" min="5" max="95" step="1" value={retentionForm.threshold} onChange={event => setRetentionForm(previous => ({ ...previous, threshold: event.target.value }))} className="mt-1 w-full rounded-xl border border-slate-200 bg-white p-2.5 font-mono" />
+                  </label>
+                </div>
+                <button type="button" disabled={savingRetention || !user} onClick={saveRetentionSettings} className="mt-4 rounded-xl bg-slate-900 px-4 py-2.5 text-xs font-bold text-white disabled:opacity-50">{savingRetention ? 'Guardando…' : 'Guardar criterios de retención'}</button>
+              </section>
               {/* APARIENCIA */}
               <section className="bg-slate-50/70 rounded-2xl p-5 border border-slate-200/60">
                 <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3.5 flex items-center gap-2">
@@ -592,86 +583,6 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
 
           {activeTab === 'data' && (
             <div className="space-y-6 animate-in fade-in duration-200">
-              {/* VINCULACIÓN CON CUENTA DE GOOGLE & HISTORIAL */}
-              <section className="bg-indigo-50/50 rounded-2xl p-5 border border-indigo-200/60 shadow-xs">
-                <div className="flex items-center justify-between mb-2">
-                  <h3 className="text-[10px] font-black text-indigo-900 uppercase tracking-widest flex items-center gap-2">
-                    <ShieldCheck size={14} className="text-indigo-600" /> Cuenta de Google & Sincronización en Nube
-                  </h3>
-                  <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 border border-emerald-200/60">
-                    {user?.email || "Conectado"}
-                  </span>
-                </div>
-                <div className="flex items-center gap-4 py-2 px-3 bg-white/70 rounded-xl border border-indigo-100 mb-3 text-xs">
-                  <div>
-                    <span className="text-[10px] font-bold text-slate-400 block uppercase">Temas con Progreso</span>
-                    <span className="font-mono font-black text-indigo-900">{Object.keys(userProgress).length}</span>
-                  </div>
-                  <div className="w-px h-6 bg-slate-200" />
-                  <div>
-                    <span className="text-[10px] font-bold text-slate-400 block uppercase">Sesiones en la Nube</span>
-                    <span className="font-mono font-black text-indigo-900">{recentSessions.length}</span>
-                  </div>
-                </div>
-                <p className="text-[11px] text-indigo-950/80 mb-3.5 font-medium leading-relaxed">
-                  Tus datos están protegidos en tu cuenta de Google. Si has utilizado esta aplicación en meses anteriores, puedes sincronizar y recuperar todo tu historial de temas, cantes y vueltas de forma instantánea.
-                </p>
-                <button
-                  type="button"
-                  onClick={() => recoverHistoricalUserData(false)}
-                  className="flex items-center justify-center gap-2 w-full py-2.5 px-4 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold transition-all shadow-sm active:scale-[0.98]"
-                >
-                  <RefreshCw size={14} />
-                  <span>Vincular y Recuperar Historial de Google</span>
-                </button>
-              </section>
-
-              {/* AUDITORÍA DE INTEGRIDAD DE MATERIAS (MERCANTIL / CONSTITUCIONAL) */}
-              <section className="bg-emerald-50/50 rounded-2xl p-5 border border-emerald-200/60 shadow-xs">
-                <div className="flex items-center justify-between mb-2">
-                  <h3 className="text-[10px] font-black text-emerald-900 uppercase tracking-widest flex items-center gap-2">
-                    <CheckCircle2 size={14} className="text-emerald-600" /> Auditoría de Integridad de Materias
-                  </h3>
-                  <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 border border-emerald-200/60">
-                    Mercantil (17) · Const. (29)
-                  </span>
-                </div>
-                <p className="text-[11px] text-emerald-950/80 mb-3.5 font-medium leading-relaxed">
-                  Comprueba que tus temas de Derecho Mercantil y Derecho Constitucional estén perfectamente separados y que no existan sesiones cruzadas ni renombradas indebidamente.
-                </p>
-                <button
-                  type="button"
-                  onClick={auditAndRestoreTopicIntegrity}
-                  className="flex items-center justify-center gap-2 w-full py-2.5 px-4 bg-emerald-700 hover:bg-emerald-800 text-white rounded-xl text-xs font-bold transition-all shadow-sm active:scale-[0.98]"
-                >
-                  <ShieldCheck size={14} />
-                  <span>Auditar y Verificar Integridad del Temario</span>
-                </button>
-              </section>
-
-              {/* PURGA DE DATOS DE AEROFOCUS (MODO DE PRUEBA) */}
-              <section className="bg-amber-50/50 rounded-2xl p-5 border border-amber-200/60 shadow-xs">
-                <div className="flex items-center justify-between mb-2">
-                  <h3 className="text-[10px] font-black text-amber-900 uppercase tracking-widest flex items-center gap-2">
-                    <Zap size={14} className="text-amber-600" /> Purga de Datos de Prueba (AeroFocus)
-                  </h3>
-                  <span className="text-[10px] font-black px-2 py-0.5 rounded-full bg-amber-200/70 text-amber-900 border border-amber-300">
-                    Modo Prueba
-                  </span>
-                </div>
-                <p className="text-[11px] text-amber-950/80 mb-3.5 font-medium leading-relaxed">
-                  Elimina todas las sesiones automáticas importadas por error desde AeroFocus y recalcula las horas reales de estudio y vueltas de tus temas de Judicatura.
-                </p>
-                <button
-                  type="button"
-                  onClick={purgeAllAeroFocusData}
-                  className="flex items-center justify-center gap-2 w-full py-2.5 px-4 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-bold transition-all shadow-sm active:scale-[0.98]"
-                >
-                  <AlertTriangle size={14} />
-                  <span>Limpiar y Purgar Sesiones de AeroFocus</span>
-                </button>
-              </section>
-
               {/* BACKUP Y RESTAURACIÓN (JSON) */}
               <section className="bg-slate-50/70 rounded-2xl p-5 border border-slate-200/60">
                 <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 flex items-center gap-2">
@@ -733,6 +644,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
             </div>
           )}
         </div>
+        <footer className="flex shrink-0 justify-end border-t border-slate-200 bg-white px-4 py-3 sm:px-6" style={{ paddingBottom: 'max(.75rem, env(safe-area-inset-bottom))' }}><button type="button" onClick={onClose} disabled={savingChanges} className={DS.btnPrimary}>Listo</button></footer>
       </motion.div>
     </div>
   );

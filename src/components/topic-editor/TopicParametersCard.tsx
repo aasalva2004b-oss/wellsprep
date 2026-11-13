@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { BookOpen, Save } from "lucide-react";
 import { Topic } from "../../types";
 import { toast } from "sonner";
@@ -6,13 +6,14 @@ import { toast } from "sonner";
 interface TopicParametersCardProps {
   topic: Topic;
   customTitle: string;
+  officialTitle?: string;
   setCustomTitle: (val: string) => void;
   pages: string;
   setPages: (val: string) => void;
   numeroPalabras: string;
   setNumeroPalabras: (val: string) => void;
-  difficulty: number;
-  setDifficulty: (val: number) => void;
+  difficulty: number | "";
+  setDifficulty: (val: number | "") => void;
   initialEpigrafes?: string;
   updateTopicProgress: (id: string, data: any) => Promise<void>;
 }
@@ -20,6 +21,7 @@ interface TopicParametersCardProps {
 export const TopicParametersCard: React.FC<TopicParametersCardProps> = ({
   topic,
   customTitle,
+  officialTitle,
   setCustomTitle,
   pages,
   setPages,
@@ -32,20 +34,24 @@ export const TopicParametersCard: React.FC<TopicParametersCardProps> = ({
 }) => {
   const [epigrafes, setEpigrafes] = useState<string>(initialEpigrafes);
   const [isSaving, setIsSaving] = useState(false);
+  useEffect(() => setEpigrafes(initialEpigrafes), [topic.id, initialEpigrafes]);
 
   const handleSave = async () => {
     try {
       setIsSaving(true);
-      const parsedPages = parseFloat(String(pages).replace(",", ".")) || 0;
+      const parsedPages = pages.trim() ? Number(pages.replace(",", ".")) : undefined;
       const parsedPalabras = numeroPalabras.trim() ? parseInt(numeroPalabras, 10) : undefined;
       const parsedEpigrafes = epigrafes.trim() ? parseInt(epigrafes, 10) : undefined;
-      
+      if (parsedPages !== undefined && (!Number.isFinite(parsedPages) || parsedPages <= 0)) throw new Error("La extensión debe ser un número positivo.");
+      if (parsedPalabras !== undefined && (!Number.isFinite(parsedPalabras) || parsedPalabras <= 0)) throw new Error("Las palabras deben ser un número positivo.");
+      if (parsedEpigrafes !== undefined && (!Number.isFinite(parsedEpigrafes) || parsedEpigrafes < 0)) throw new Error("Los epígrafes deben ser un número válido.");
+
       await updateTopicProgress(topic.id, {
         customTitle: customTitle.trim() || topic.title,
         pages: parsedPages,
         numeroPalabras: parsedPalabras,
         epigrafes: parsedEpigrafes,
-        difficulty: Number(difficulty) || 5,
+        difficulty: difficulty === "" ? undefined : Number(difficulty),
       });
       toast.success("Parámetros del tema guardados en la nube");
     } catch (err: any) {
@@ -70,14 +76,16 @@ export const TopicParametersCard: React.FC<TopicParametersCardProps> = ({
       <div className="space-y-3">
         <div>
           <label className="text-[10px] font-black text-slate-500 uppercase tracking-wider mb-1 block">
-            Título Oficial / Personalizado
+            Título personalizado
           </label>
           <input
             type="text"
+            aria-label="Título personalizado del tema"
             value={customTitle}
             onChange={(e) => setCustomTitle(e.target.value)}
             className="w-full text-xs font-bold text-slate-800 bg-slate-50/90 border border-slate-200/80 rounded-xl px-3 py-2 outline-none focus:ring-2 focus:ring-slate-900/10 focus:border-slate-800 transition-all"
           />
+          {officialTitle && <p className="mt-1 text-[10px] text-slate-500">Título oficial: {officialTitle}</p>}
         </div>
 
         <div className="grid grid-cols-2 gap-2.5">
@@ -89,6 +97,9 @@ export const TopicParametersCard: React.FC<TopicParametersCardProps> = ({
               <input
                 type="number"
                 step="0.5"
+                min="0.5"
+                aria-label="Páginas totales del tema"
+                placeholder="Sin medir"
                 value={pages}
                 onChange={(e) => setPages(e.target.value)}
                 className="w-full text-xs font-bold font-mono tabular-nums text-slate-800 bg-slate-50/90 border border-slate-200/80 rounded-xl px-3 py-2 pr-9 outline-none focus:ring-2 focus:ring-slate-900/10 focus:border-slate-800 transition-all"
@@ -106,6 +117,9 @@ export const TopicParametersCard: React.FC<TopicParametersCardProps> = ({
             <div className="relative">
               <input
                 type="number"
+                aria-label="Palabras totales del tema"
+                placeholder="Sin medir"
+                min="1"
                 value={numeroPalabras}
                 onChange={(e) => setNumeroPalabras(e.target.value)}
                 className="w-full text-xs font-bold font-mono tabular-nums text-slate-800 bg-slate-50/90 border border-slate-200/80 rounded-xl px-3 py-2 pr-9 outline-none focus:ring-2 focus:ring-slate-900/10 focus:border-slate-800 transition-all"
@@ -125,9 +139,10 @@ export const TopicParametersCard: React.FC<TopicParametersCardProps> = ({
             <div className="relative">
               <input
                 type="number"
+                aria-label="Epígrafes totales del tema"
+                min="0"
                 value={epigrafes}
                 onChange={(e) => setEpigrafes(e.target.value)}
-                placeholder="5"
                 className="w-full text-xs font-bold font-mono tabular-nums text-slate-800 bg-slate-50/90 border border-slate-200/80 rounded-xl px-3 py-2 pr-9 outline-none focus:ring-2 focus:ring-slate-900/10 focus:border-slate-800 transition-all"
               />
               <span className="absolute right-2.5 top-2 text-[10px] font-bold text-slate-400 uppercase">
@@ -145,8 +160,10 @@ export const TopicParametersCard: React.FC<TopicParametersCardProps> = ({
                 type="number"
                 min="1"
                 max="10"
+                aria-label="Dificultad del tema"
+                placeholder="Sin valorar"
                 value={difficulty}
-                onChange={(e) => setDifficulty(Math.max(1, Math.min(10, parseInt(e.target.value) || 5)))}
+                onChange={(e) => setDifficulty(e.target.value === "" ? "" : Math.max(1, Math.min(10, Number(e.target.value))))}
                 className="w-full text-xs font-bold font-mono tabular-nums text-slate-800 bg-slate-50/90 border border-slate-200/80 rounded-xl px-3 py-2 pr-8 outline-none focus:ring-2 focus:ring-slate-900/10 focus:border-slate-800 transition-all"
               />
               <span className="absolute right-2.5 top-2 text-[10px] font-bold text-slate-400 uppercase">

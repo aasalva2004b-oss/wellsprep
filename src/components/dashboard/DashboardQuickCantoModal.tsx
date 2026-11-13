@@ -1,3 +1,4 @@
+import { useDialogAccessibility } from '../../hooks/useDialogAccessibility';
 import React, { useState, useEffect, useRef } from "react";
 import {
   Mic,
@@ -39,6 +40,7 @@ interface DashboardQuickCantoModalProps {
   }) => Promise<void>;
   isSaving: boolean;
   initialTopicId?: string;
+  onSelectTopic?: (topicId: string) => void;
   initialMode?: "simulator" | "manual";
 }
 
@@ -49,15 +51,16 @@ export const DashboardQuickCantoModal: React.FC<DashboardQuickCantoModalProps> =
   onSaveCanto,
   isSaving,
   initialTopicId,
+  onSelectTopic,
   initialMode = "simulator",
 }) => {
   const [activeTab, setActiveTab] = useState<"simulator" | "manual">(initialMode);
   const [topicId, setTopicId] = useState(initialTopicId || "");
   const [searchTopicQuery, setSearchTopicQuery] = useState("");
   const [date, setDate] = useState(getLocalDateString());
-  const [min, setMin] = useState("12");
-  const [sec, setSec] = useState("30");
-  const [grade, setGrade] = useState("7.5");
+  const [min, setMin] = useState("");
+  const [sec, setSec] = useState("");
+  const [grade, setGrade] = useState("");
   const [difficulty, setDifficulty] = useState(5);
   const [mistakes, setMistakes] = useState("");
 
@@ -81,7 +84,10 @@ export const DashboardQuickCantoModal: React.FC<DashboardQuickCantoModalProps> =
   // Reset or initialize when opened
   useEffect(() => {
     if (isOpen) {
-      if (initialTopicId) setTopicId(initialTopicId);
+      setTopicId(initialTopicId || "");
+      onSelectTopic?.(initialTopicId || "");
+      setMin(""); setSec(""); setGrade(""); setMistakes("");
+      setDate(getLocalDateString());
       setActiveTab(initialMode);
     } else {
       // Clear interval on close
@@ -134,6 +140,7 @@ export const DashboardQuickCantoModal: React.FC<DashboardQuickCantoModalProps> =
     };
   }, [isRunning, soundEnabled]);
 
+  const dialogRef = useDialogAccessibility({ isOpen: isOpen, onClose, disabled: isSaving });
   if (!isOpen) return null;
 
   // Formatting Stopwatch
@@ -188,18 +195,8 @@ export const DashboardQuickCantoModal: React.FC<DashboardQuickCantoModalProps> =
     if (incidentMuletillas > 0) incidentParts.push(`${incidentMuletillas} muletillas`);
     if (incidentEstructura > 0) incidentParts.push(`${incidentEstructura} desajustes de epígrafe`);
 
-    const totalIncidents = incidentDudas + incidentArticulos + incidentMuletillas + incidentEstructura;
-    const isOptimalTime = elapsedSeconds >= 660 && elapsedSeconds <= 820;
-
-    // Suggest a realistic grade
-    let suggestedGrade = 7.5;
-    if (isOptimalTime && totalIncidents === 0) suggestedGrade = 9.0;
-    else if (isOptimalTime && totalIncidents <= 2) suggestedGrade = 8.0;
-    else if (isOptimalTime && totalIncidents <= 4) suggestedGrade = 6.5;
-    else if (!isOptimalTime) suggestedGrade = Math.max(3.0, 5.0 - totalIncidents * 0.5);
-    else suggestedGrade = Math.max(2.0, 5.0 - totalIncidents * 0.7);
-
-    setGrade(suggestedGrade.toFixed(1));
+    // A timer measures duration; the learner supplies the oral evaluation.
+    setGrade("");
 
     const autoSummary = [
       `Simulacro cronometrado oficial (${m}m ${s}s).`,
@@ -230,29 +227,33 @@ export const DashboardQuickCantoModal: React.FC<DashboardQuickCantoModalProps> =
       toast.error("Selecciona un tema para el cante");
       return;
     }
-    const minsNum = parseInt(min, 10) || 0;
-    const secsNum = parseInt(sec, 10) || 0;
-    if (minsNum === 0 && secsNum === 0) {
+    const minsNum = min.trim() ? Number(min) : 0;
+    const secsNum = sec.trim() ? Number(sec) : 0;
+    if ((!min.trim() && !sec.trim()) || !Number.isInteger(minsNum) || !Number.isInteger(secsNum) || minsNum < 0 || secsNum < 0 || secsNum > 59 || minsNum + secsNum === 0) {
       toast.error("Introduce la duración de la exposición");
       return;
     }
 
-    const gradeNum = parseFloat(grade);
+    const gradeNum = grade.trim() ? Number(grade) : undefined;
+    if (gradeNum !== undefined && (!Number.isFinite(gradeNum) || gradeNum < 0 || gradeNum > 10)) {
+      toast.error("La nota debe estar entre 0 y 10.");
+      return;
+    }
     playSound.success();
     await onSaveCanto({
       topicId,
       date,
       durationMinutes: minsNum,
       durationSeconds: secsNum,
-      grade: !isNaN(gradeNum) ? gradeNum : undefined,
+      grade: gradeNum,
       difficulty,
       mistakes: mistakes.trim() || undefined,
     });
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-900/70 backdrop-blur-md animate-in fade-in duration-200">
-      <div className="bg-white rounded-3xl max-w-xl w-full shadow-2xl border border-slate-200/90 flex flex-col overflow-hidden animate-in zoom-in-95 duration-200 max-h-[92vh]">
+    <div className="wp-modal-overlay fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-900/70 backdrop-blur-md animate-in fade-in duration-200">
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="Registrar cante real" className="wp-modal-panel bg-white rounded-3xl max-w-xl w-full shadow-2xl border border-slate-200/90 flex flex-col overflow-hidden animate-in zoom-in-95 duration-200 max-h-[92vh]">
         {/* Header */}
         <div className="px-5 py-3.5 border-b border-slate-100 flex items-center justify-between bg-gradient-to-r from-slate-50 via-white to-slate-50">
           <div className="flex items-center gap-3">
@@ -270,6 +271,7 @@ export const DashboardQuickCantoModal: React.FC<DashboardQuickCantoModalProps> =
           </div>
           <button
             onClick={onClose}
+              aria-label="Cerrar diálogo"
             className="w-8 h-8 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-500 flex items-center justify-center transition-colors"
           >
             <X size={16} />
@@ -338,7 +340,7 @@ export const DashboardQuickCantoModal: React.FC<DashboardQuickCantoModalProps> =
             <div className="relative">
               <select
                 value={topicId}
-                onChange={(e) => setTopicId(e.target.value)}
+                onChange={(e) => { setTopicId(e.target.value); onSelectTopic?.(e.target.value); }}
                 className="w-full p-2.5 rounded-xl border border-slate-200 text-xs font-bold text-slate-800 focus:outline-none focus:ring-2 focus:ring-fuchsia-500/20 bg-white"
               >
                 <option value="">-- Selecciona el tema de la oposición --</option>
@@ -541,10 +543,11 @@ export const DashboardQuickCantoModal: React.FC<DashboardQuickCantoModalProps> =
                       type="number"
                       min="0"
                       max="60"
+                      aria-label="Minutos reales del cante"
                       value={min}
                       onChange={(e) => setMin(e.target.value)}
                       className="w-full p-2.5 pr-10 rounded-xl border border-slate-200 text-sm font-black font-mono tabular-nums text-slate-900 focus:outline-none focus:ring-2 focus:ring-fuchsia-500/20"
-                      placeholder="12"
+                      placeholder="Minutos reales"
                     />
                     <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs font-bold text-slate-400">
                       min
@@ -556,10 +559,11 @@ export const DashboardQuickCantoModal: React.FC<DashboardQuickCantoModalProps> =
                       type="number"
                       min="0"
                       max="59"
+                      aria-label="Segundos reales del cante"
                       value={sec}
                       onChange={(e) => setSec(e.target.value)}
                       className="w-full p-2.5 pr-10 rounded-xl border border-slate-200 text-sm font-black font-mono tabular-nums text-slate-900 focus:outline-none focus:ring-2 focus:ring-fuchsia-500/20"
-                      placeholder="30"
+                      placeholder="Segundos"
                     />
                     <span className="absolute right-3 top-1/2 -translate-y-1/2 text-xs font-bold text-slate-400">
                       seg
@@ -586,7 +590,7 @@ export const DashboardQuickCantoModal: React.FC<DashboardQuickCantoModalProps> =
                     value={grade}
                     onChange={(e) => setGrade(e.target.value)}
                     className="w-24 p-2.5 rounded-xl border border-slate-200 text-sm font-black font-mono tabular-nums text-slate-900 focus:outline-none focus:ring-2 focus:ring-fuchsia-500/20"
-                    placeholder="7.5"
+                    placeholder="Sin evaluar"
                   />
                   <div className="flex gap-1 flex-wrap">
                     {[5, 6, 7, 7.5, 8, 8.5, 9, 10].map((val) => (

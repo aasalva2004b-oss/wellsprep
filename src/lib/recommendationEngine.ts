@@ -2,6 +2,8 @@ import { Topic } from "../types";
 import { TopicProgressData } from "./prediction";
 import { buildSubjectTelemetryIndex, FastTopicTelemetry } from "./performanceCache";
 import { getLocalDateString, safeParseDate } from "./utils";
+import { buildCanonicalTopicMap, type CanonicalTopic, sessionDurationMinutes } from "./canonicalTopicService";
+import { estimatePersonalizedDuration } from "./personalizedEstimator";
 
 export interface TodayActivityData {
   dateStr: string;
@@ -65,7 +67,10 @@ export interface RecommendedStudyTask {
   };
   reason: string;
   subReason: string;
-  estimatedMinutes: number;
+  estimatedMinutes: number | null;
+  estimateInterval?: { low: number; high: number } | null;
+  estimateEvidenceCount?: number;
+  estimateMethod?: string;
   telemetry?: FastTopicTelemetry;
   actionType: "refresco" | "repaso" | "canto" | "estudio";
   actionLabel: string;
@@ -262,16 +267,20 @@ export function computeWeeklyConsistency(
 export function computeTodayStudyQueue(
   topics: Topic[],
   userProgress: Record<string, TopicProgressData>,
-  recentSessions: any[]
+  recentSessions: any[],
+  topicState?: Map<string, CanonicalTopic>,
 ): {
   tasks: RecommendedStudyTask[];
   refrescoTasks: RecommendedStudyTask[];
   repasoTasks: RecommendedStudyTask[];
   cantoTasks: RecommendedStudyTask[];
   nuevoTasks: RecommendedStudyTask[];
-  totalEstimatedMinutes: number;
+  totalEstimatedMinutes: number | null;
+  hasUnknownEstimates: boolean;
 } {
-  const telemetryIndex = buildSubjectTelemetryIndex(topics, userProgress, recentSessions);
+  const canonicalMap = topicState || buildCanonicalTopicMap(topics, userProgress, recentSessions);
+  const estimateFor = (topicId: string, activity: "estudio_nuevo" | "refresco" | "repaso" | "cante") => estimatePersonalizedDuration({ topic: canonicalMap.get(topicId)!, activity, history: recentSessions, topics: canonicalMap, asOf: new Date() });
+  const telemetryIndex = buildSubjectTelemetryIndex(topics, userProgress, recentSessions, canonicalMap);
   const tasks: RecommendedStudyTask[] = [];
 
   const refrescoTasks: RecommendedStudyTask[] = [];
@@ -287,13 +296,15 @@ export function computeTodayStudyQueue(
     if (!telemetry) continue;
 
     const { cycle, srs, ebbinghaus, reviewEstimate } = telemetry;
-    const prog = userProgress[topic.id];
-    const hasStarted = !!(prog && (prog.firstStudyDate || prog.studyTimeHours > 0 || prog.vueltas > 0));
+    const canonical = telemetry.canonical;
+    const hasStarted = canonical.hasStarted;
+    const wholeInitialKnown = canonical.initialStudyCoverage.remainingPages === 0;
 
     // 1. Refrescos Diarios
     if (cycle.phase === "en_refrescos") {
-      if (!cycle.isRefreshedToday) {
-        const estMins = 30;
+      if (cycle.isDueToday && !cycle.isRefreshedToday) {
+        const prediction = estimateFor(topic.id, "refresco");
+        const estMins = prediction.estimatedMinutes;
         const task: RecommendedStudyTask = {
           id: `refresco_${topic.id}`,
           topic,
@@ -309,7 +320,7 @@ export function computeTodayStudyQueue(
           },
           reason: "Fijación activa a corto plazo antes de que la curva de retención decaiga.",
           subReason: `Paso ${cycle.refrescosCount + 1} de 3 hacia la Vuelta 1 oficial`,
-          estimatedMinutes: estMins,
+          estimatedMinutes: estMins, estimateInterval: prediction.interval, estimateEvidenceCount: prediction.evidenceCount, estimateMethod: prediction.method,
           telemetry,
           actionType: "refresco",
           actionLabel: "Iniciar Refresco",
@@ -319,15 +330,16 @@ export function computeTodayStudyQueue(
     }
 
     // 2. Repasos Mensuales SRS
-    else if (
+    else if (hasStarted && wholeInitialKnown && ebbinghaus.hasData && (
       cycle.phase === "repaso_pendiente" ||
       cycle.phase === "repaso_vencido" ||
       srs.isDueToday ||
       srs.isOverdue ||
       ebbinghaus.retention < 68
-    ) {
+    )) {
       const isUrgent = srs.isOverdue || cycle.phase === "repaso_vencido" || ebbinghaus.retention < 50;
-      const estMins = reviewEstimate?.predictedMinutes || 45;
+      const prediction = estimateFor(topic.id, "repaso");
+      const estMins = prediction.estimatedMinutes;
       const daysOverdue = srs.daysDiff !== null && srs.daysDiff < 0 ? Math.abs(srs.daysDiff) : 0;
 
       const task: RecommendedStudyTask = {
@@ -335,7 +347,7 @@ export function computeTodayStudyQueue(
         topic,
         priority: 2,
         category: "repaso",
-        categoryTitle: "Repaso Mensual Programado",
+        categoryTitle: "Repaso recomendado",
         badgeLabel: isUrgent ? (daysOverdue > 0 ? `Vencido ${daysOverdue}d` : "Alerta de Memoria") : "Repaso SRS Hoy",
         badgeTheme: {
           bg: isUrgent ? "bg-rose-500/10" : "bg-indigo-500/10",
@@ -343,18 +355,19 @@ export function computeTodayStudyQueue(
           border: isUrgent ? "border-rose-500/30" : "border-indigo-500/30",
           accent: isUrgent ? "#e11d48" : "#6366f1",
         },
-        reason: `Retención estimada: ${ebbinghaus.retention}%. Momento óptimo de reactivación sináptica.`,
-        subReason: `Suma 1 Vuelta completa. Tiempo estimado: ${estMins} min`,
-        estimatedMinutes: estMins,
+        reason: telemetry.memory.adaptive?.reasons.join(' ') || telemetry.memory.actionAdvice,
+        subReason: "Registra el tiempo real y confirma qué contenido has repasado. La recomendación no demuestra cuánto recuerdas.",
+        estimatedMinutes: estMins, estimateInterval: prediction.interval, estimateEvidenceCount: prediction.evidenceCount, estimateMethod: prediction.method,
         telemetry,
         actionType: "repaso",
-        actionLabel: "+1 Vuelta Rápida",
+        actionLabel: "Registrar repaso",
       };
       repasoTasks.push(task);
     }
 
     // 3. Listo para Cantar
     else if (cycle.phase === "listo_para_cantar") {
+      const prediction = estimateFor(topic.id, "cante");
       const task: RecommendedStudyTask = {
         id: `canto_${topic.id}`,
         topic,
@@ -370,7 +383,7 @@ export function computeTodayStudyQueue(
         },
         reason: "Completaste los 3 refrescos. El tema está maduro para cantarse y sellar la Vuelta 1.",
         subReason: "Pon a prueba tu dicción, ritmo (130-150 ppm) y tiempo de exposición",
-        estimatedMinutes: 15,
+        estimatedMinutes: prediction.estimatedMinutes, estimateInterval: prediction.interval, estimateEvidenceCount: prediction.evidenceCount, estimateMethod: prediction.method,
         telemetry,
         actionType: "canto",
         actionLabel: "Cantar Ahora",
@@ -379,21 +392,22 @@ export function computeTodayStudyQueue(
     }
 
     // 4. Candidate for next unstarted topic
-    if (!hasStarted && !nextTopicCandidate) {
+    if ((!hasStarted || canonical.initialStudyCoverage.remainingPages !== 0) && !nextTopicCandidate) {
       nextTopicCandidate = topic;
     }
   }
 
   // Add next unstarted topic if we have room or to recommend progression
   if (nextTopicCandidate) {
-    const estMins = 90; // Standard deep study session for unstarted topic
+    const prediction = estimateFor(nextTopicCandidate.id, "estudio_nuevo");
+    const estMins = prediction.estimatedMinutes;
     const telemetry = telemetryIndex.get(nextTopicCandidate.id);
     const task: RecommendedStudyTask = {
       id: `nuevo_${nextTopicCandidate.id}`,
       topic: nextTopicCandidate,
       priority: 4,
       category: "nuevo",
-      categoryTitle: "Avance de Temario (Nuevo)",
+      categoryTitle: "Estudio inicial pendiente",
       badgeLabel: "Siguiente Tema",
       badgeTheme: {
         bg: "bg-emerald-500/10",
@@ -401,9 +415,9 @@ export function computeTodayStudyQueue(
         border: "border-emerald-500/30",
         accent: "#10b981",
       },
-      reason: "Tema nuevo según el orden del programa oficial para mantener la progresión.",
-      subReason: "Estudio inicial a fondo. Iniciará automáticamente el ciclo de 3 refrescos.",
-      estimatedMinutes: estMins,
+      reason: "La cobertura inicial del tema está incompleta o pendiente de precisar.",
+      subReason: "Registra las páginas realmente estudiadas; repasar no completa el estudio inicial.",
+      estimatedMinutes: estMins, estimateInterval: prediction.interval, estimateEvidenceCount: prediction.evidenceCount, estimateMethod: prediction.method,
       telemetry,
       actionType: "estudio",
       actionLabel: "Iniciar Estudio",
@@ -422,7 +436,8 @@ export function computeTodayStudyQueue(
   });
 
   const combinedTasks = [...refrescoTasks, ...repasoTasks, ...cantoTasks, ...nuevoTasks];
-  const totalEstimatedMinutes = combinedTasks.reduce((acc, t) => acc + t.estimatedMinutes, 0);
+  const hasUnknownEstimates = combinedTasks.some(task => task.estimatedMinutes === null);
+  const totalEstimatedMinutes = hasUnknownEstimates ? null : combinedTasks.reduce((acc, task) => acc + (task.estimatedMinutes ?? 0), 0);
 
   return {
     tasks: combinedTasks,
@@ -430,6 +445,6 @@ export function computeTodayStudyQueue(
     repasoTasks,
     cantoTasks,
     nuevoTasks,
-    totalEstimatedMinutes,
+    totalEstimatedMinutes, hasUnknownEstimates,
   };
 }

@@ -2,9 +2,22 @@ export interface Session {
   id: string;
   topicId: string;
   date: string;
-  type: 'primer_estudio' | 'repaso' | 'refresco' | 'canto';
+  type: 'primer_estudio' | 'estudio_inicial' | 'estudio' | 'repaso' | 'refresco' | 'canto' | 'simulacro';
   durationMinutes: number; // Duration in minutes
   
+  // Measured historical coverage. Counts alone never identify unique pages.
+  startPage?: number;
+  endPage?: number;
+  fromPage?: number;
+  toPage?: number;
+  pagesCount?: number;
+  pagesStudied?: number;
+  pagesNumbers?: number[];
+  pageRanges?: Array<{ startPage: number; endPage: number }>;
+  studyBlocks?: Array<{ id: string; completed: boolean; startPage?: number; endPage?: number }>;
+  totalPagesAtSession?: number;
+  isTopicCompleted?: boolean;
+  plannerTaskId?: string;
   // Advanced Metadata
   difficulty?: number; // 1-10 scale
   dificultadReal?: number; // 1-10 scale
@@ -33,6 +46,7 @@ export interface Topic {
   subjectId: string;
   number: number;
   title: string;
+  officialTitle?: string;
   fullTitle?: string;
   pages: number;
   difficulty: TopicDifficulty;

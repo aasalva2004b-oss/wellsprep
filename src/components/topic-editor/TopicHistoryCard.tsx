@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { History, Clock, BookOpen, Mic, Target, Trash2, Layers, Edit2, CheckCircle2, RotateCw, AlertTriangle, Sparkles, Check, X } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { cn, safeParseDate } from "../../lib/utils";
+import { sessionDurationMinutes } from "../../lib/canonicalTopicService";
 
 interface TopicHistoryCardProps {
   sessionsCount: number;
@@ -38,8 +39,9 @@ export const TopicHistoryCard: React.FC<TopicHistoryCardProps> = ({
   const [isMergeMode, setIsMergeMode] = useState(false);
   const [selectedSessionIds, setSelectedSessionIds] = useState<string[]>([]);
   const [isMerging, setIsMerging] = useState(false);
-  const [mergeCompletesVuelta, setMergeCompletesVuelta] = useState(true);
-  const [mergeDifficulty, setMergeDifficulty] = useState<number>(5);
+  const [mergeCompletesVuelta, setMergeCompletesVuelta] = useState(false);
+  const [mergeDifficulty, setMergeDifficulty] = useState<number | undefined>();
+  const [mergeError, setMergeError] = useState('');
   const [deletingId, setDeletingId] = useState<string | null>(null);
 
   // Extract all individual flat sessions
@@ -63,10 +65,8 @@ export const TopicHistoryCard: React.FC<TopicHistoryCardProps> = ({
     try {
       setIsMerging(true);
       const chosenSessions = flatSessions.filter((s) => selectedSessionIds.includes(s.id));
-      const totalMinutes = chosenSessions.reduce(
-        (acc, s) => acc + (s.durationMinutes || s.durationReal || s.duration || 0),
-        0
-      );
+      setMergeError('');
+      const totalMinutes = chosenSessions.reduce((acc, session) => acc + sessionDurationMinutes(session), 0);
       const combinedNotes = chosenSessions
         .map((s) => s.notes)
         .filter(Boolean)
@@ -87,7 +87,7 @@ export const TopicHistoryCard: React.FC<TopicHistoryCardProps> = ({
       setSelectedSessionIds([]);
       setIsMergeMode(false);
     } catch (e) {
-      console.error(e);
+      setMergeError(e instanceof Error ? e.message : 'No se han podido fusionar las sesiones.');
     } finally {
       setIsMerging(false);
     }
@@ -203,7 +203,7 @@ export const TopicHistoryCard: React.FC<TopicHistoryCardProps> = ({
                 </span>
                 <span>•</span>
                 <span className="font-bold text-slate-700">
-                  {subSession.durationMinutes || subSession.durationReal || subSession.duration || 0} min
+                  {sessionDurationMinutes(subSession) > 0 ? `${Number(sessionDurationMinutes(subSession).toFixed(2))} min` : 'Sin duración registrada'}
                 </span>
 
                 {/* Difficulty display or tag */}
@@ -364,6 +364,9 @@ export const TopicHistoryCard: React.FC<TopicHistoryCardProps> = ({
             type="button"
             onClick={() => {
               setIsMergeMode(!isMergeMode);
+              setMergeCompletesVuelta(false);
+              setMergeDifficulty(undefined);
+              setMergeError('');
               setSelectedSessionIds([]);
             }}
             className={cn(
@@ -442,7 +445,7 @@ export const TopicHistoryCard: React.FC<TopicHistoryCardProps> = ({
 
               <div className="space-y-1">
                 <label className="text-[11px] font-black uppercase tracking-wider text-indigo-950">
-                  Dificultad Global (1 - 10): <span className="font-mono">{mergeDifficulty}/10</span>
+                  Dificultad Global (1 - 10): <span className="font-mono">{mergeDifficulty === undefined ? 'Sin nueva valoración' : `${mergeDifficulty}/10`}</span>
                 </label>
                 <div className="flex gap-1 overflow-x-auto no-scrollbar">
                   {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((num) => (
@@ -464,6 +467,7 @@ export const TopicHistoryCard: React.FC<TopicHistoryCardProps> = ({
               </div>
             </div>
 
+            {mergeError && <p role="alert" className="text-sm text-red-700">{mergeError}</p>}
             <div className="pt-2 flex justify-end">
               <button
                 type="button"

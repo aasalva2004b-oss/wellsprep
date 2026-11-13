@@ -335,48 +335,39 @@ export function extractTopicNumber(idOrTitle?: string | number): number | null {
 /**
  * Extrae minutos netos de estudio desde cualquier objeto de tema o sesión de AeroFocus Pro
  */
-export function extractMinutesFromAeroItem(item: any, fallbackMinutes: number = 45): number {
-  if (!item || typeof item !== 'object') return fallbackMinutes;
-
-  // 1. Minutos explícitos directos
-  const directMins = item.minutosEfectivos ?? item.effectiveMinutes ?? item.effectiveStudyMinutes ??
-    item.studyMinutes ?? item.durationMinutes ?? item.duration_minutes ?? item.minutes ?? item.minutos ??
-    item.netMinutes ?? item.minutosNetos ?? item.grossMinutes ?? item.minutosBrutos ??
-    item.totalMinutes ?? item.minutosTotales;
-  if (directMins !== undefined && directMins !== null && !isNaN(Number(directMins)) && Number(directMins) > 0) {
-    return Math.round(Number(directMins));
+export function extractMinutesFromAeroItem(item: any, fallbackMinutes = 0): number {
+  const positive = (value: unknown): number | undefined => {
+    if (typeof value !== 'number' && typeof value !== 'string') return undefined;
+    if (typeof value === 'string' && !/^\d+(?:[.,]\d+)?$/.test(value.trim())) return undefined;
+    const parsed = Number(typeof value === 'string' ? value.replace(',', '.') : value);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+  };
+  const first = (values: unknown[]) => values.map(positive).find(value => value !== undefined);
+  const fallback = positive(fallbackMinutes) ?? 0;
+  if (!item || typeof item !== 'object') return fallback;
+  const minutes = first([item.minutosEfectivos, item.effectiveMinutes, item.effectiveStudyMinutes,
+    item.studyMinutes, item.durationMinutes, item.duration_minutes, item.minutes, item.minutos,
+    item.netMinutes, item.minutosNetos, item.grossMinutes, item.minutosBrutos, item.totalMinutes, item.minutosTotales]);
+  if (minutes !== undefined) return minutes;
+  const seconds = first([item.effectiveSeconds, item.segundosEfectivos, item.durationSeconds]);
+  if (seconds !== undefined) return seconds / 60;
+  const hours = first([item.horasEfectivas, item.effectiveHours, item.hours, item.horas, item.studyHours, item.horasEstudio]);
+  if (hours !== undefined) return hours * 60;
+  const raw = item.duration ?? item.time ?? item.tiempo ?? item.timeFormatted ?? item.tiempoFormateado;
+  if (typeof raw === 'number') return positive(raw) ?? fallback;
+  if (typeof raw !== 'string') return fallback;
+  const text = raw.trim().toLowerCase();
+  const hms = text.match(/^(\d+):([0-5]\d):([0-5]\d)$/);
+  if (hms) return Number(hms[1]) * 60 + Number(hms[2]) + Number(hms[3]) / 60;
+  const two = text.match(/^(\d+):([0-5]\d)$/);
+  if (two) {
+    if (item.timeFormat === 'mm:ss') return Number(two[1]) + Number(two[2]) / 60;
+    if (item.timeFormat === 'hh:mm') return Number(two[1]) * 60 + Number(two[2]);
+    return fallback; // An unlabelled 12:30 does not identify hours or minutes.
   }
-
-  // 2. Horas explícitas directas
-  const directHours = item.horasEfectivas ?? item.effectiveHours ?? item.hours ?? item.horas ?? item.studyHours ?? item.horasEstudio;
-  if (directHours !== undefined && directHours !== null && !isNaN(Number(directHours)) && Number(directHours) > 0) {
-    return Math.round(Number(directHours) * 60);
-  }
-
-  // 3. Cadena de tiempo o duración (ej. "45m", "1h 30m", "01:30:00", "90")
-  const timeRaw = item.duration ?? item.time ?? item.tiempo ?? item.timeFormatted ?? item.tiempoFormateado;
-  if (typeof timeRaw === 'number' && timeRaw > 0) {
-    return Math.round(timeRaw);
-  }
-  if (typeof timeRaw === 'string' && timeRaw.trim()) {
-    const str = timeRaw.trim().toLowerCase();
-    const colonMatch = str.match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/);
-    if (colonMatch) {
-      return parseInt(colonMatch[1], 10) * 60 + parseInt(colonMatch[2], 10);
-    }
-    const hMatch = str.match(/(\d+(?:[.,]\d+)?)\s*(?:h|horas?)/);
-    const mMatch = str.match(/(\d+)\s*(?:m|mins?|minutos?)/);
-    if (hMatch || mMatch) {
-      let parsed = 0;
-      if (hMatch) parsed += Math.round(parseFloat(hMatch[1].replace(',', '.')) * 60);
-      if (mMatch) parsed += parseInt(mMatch[1], 10);
-      if (parsed > 0) return parsed;
-    }
-    const pureNum = parseInt(str, 10);
-    if (!isNaN(pureNum) && pureNum > 0) return pureNum;
-  }
-
-  return fallbackMinutes;
+  const labelled = text.match(/^(?:(\d+(?:[.,]\d+)?)\s*(?:h|horas?)\s*)?(?:(\d+(?:[.,]\d+)?)\s*(?:m|min|mins|minutos?)\s*)?(?:(\d+(?:[.,]\d+)?)\s*(?:s|seg|segundos?)\s*)?$/);
+  if (labelled && labelled.slice(1).some(Boolean)) return (positive(labelled[1]) ?? 0) * 60 + (positive(labelled[2]) ?? 0) + (positive(labelled[3]) ?? 0) / 60;
+  return positive(text) ?? fallback;
 }
 
 const SPANISH_STOPWORDS = new Set([
@@ -559,34 +550,8 @@ export function resolveAeroFocusTopic(
     }
   }
 
-  // 7. Fallback determinista amigable con búsqueda del tema oficial más cercano
-  let matchedFallback: typeof initialTopics[0] | undefined;
-  if (!activeSubject && topicNum) {
-    matchedFallback = topicsList.find(t => t.number === topicNum);
-  }
-
-  const finalNum = matchedFallback ? matchedFallback.number : (topicNum || 1);
-  const finalSubId = matchedFallback ? matchedFallback.subjectId : (activeSubject || 'constitucional');
-  const officialTitle = matchedFallback 
-    ? matchedFallback.title 
-    : (titleText ? titleText.replace(/^tema\s*\d+[\s:.-]*/i, '').trim() : `Tema ${finalNum}`);
-  const effectiveMins = extractMinutesFromAeroItem(item, 45);
-
-  return {
-    resolvedTopicId: matchedFallback ? matchedFallback.id : `${finalSubId}-${finalNum}`,
-    resolvedSubjectId: finalSubId,
-    resolvedTopicNumber: finalNum,
-    resolvedTopicTitle: `Tema ${finalNum} - ${officialTitle}`,
-    modality: normalizeModality((item as any).modalidad || (item as any).modality || (item as any).type),
-    effectiveHours: Math.round((effectiveMins / 60) * 100) / 100,
-    effectiveMinutes: effectiveMins,
-    plsema: item.plsema,
-    minutesPerPage: item.minutesPerPage ?? item.minutosPorPagina,
-    secondsPerPage: item.secondsPerPage ?? item.segundosPorPagina,
-    pageBreakdown: item.pageBreakdown,
-    tasksBreakdown: item.tasksBreakdown,
-    original: item
-  };
+  // Missing or ambiguous identity stays in quarantine for explicit classification.
+  return null;
 }
 
 function buildResolvedTopic(
@@ -594,7 +559,7 @@ function buildResolvedTopic(
   item: AeroFocusTopicItem | any
 ): WebhookResolvedTopic {
   const rawAny = item as any;
-  const effectiveMinutes = extractMinutesFromAeroItem(rawAny, 45);
+  const effectiveMinutes = extractMinutesFromAeroItem(rawAny, 0);
   const effectiveHours = Math.round((effectiveMinutes / 60) * 100) / 100;
   const effectiveSeconds = typeof rawAny.effectiveSeconds === 'number' ? rawAny.effectiveSeconds :
                            typeof rawAny.segundosEfectivos === 'number' ? rawAny.segundosEfectivos :

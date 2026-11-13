@@ -3,9 +3,7 @@ import { Topic } from "../types";
 import { toast } from "sonner";
 import { BookOpen, Mic, TrendingUp, Layers, Activity, Sparkles, Target } from "lucide-react";
 import { cn, getLocalDateString } from "../lib/utils";
-import { calculateNextSRSState } from "../lib/srs";
 import { useFirebase } from "../lib/FirebaseProvider";
-import { initialTopics } from "../data/initialData";
 import { playSound } from "../lib/sound";
 import {
   computeTodayActivity,
@@ -30,6 +28,9 @@ import { DashboardActivityRingsCard } from "./dashboard/DashboardActivityRingsCa
 import { DashboardWeeklyConsistencyCard } from "./dashboard/DashboardWeeklyConsistencyCard";
 import { DashboardTodayRecommender } from "./dashboard/DashboardTodayRecommender";
 import { DashboardPreparadorExecutiveCard } from "./dashboard/DashboardPreparadorExecutiveCard";
+import { StudySessionDialog, StudySessionTarget } from "./StudySessionDialog";
+import type { PredictionSnapshot } from "../lib/observedSession";
+import { DS } from "../lib/designSystem";
 
 export function DashboardView({ 
   onSelectTopic,
@@ -38,7 +39,7 @@ export function DashboardView({
   onSelectTopic?: (topicId: string) => void;
   onNavigateTab?: (tab: "dashboard" | "temario" | "preparador") => void;
 }) {
-  const { userProgress, recentSessions, deleteStudySession, addStudySession } = useFirebase();
+  const { topics: allTopics, topicState, userProgress, recentSessions, loading, deleteStudySession, addStudySession, estimateDuration, estimateRetentionForTopic } = useFirebase();
 
   // Section switcher: 'hoy' | 'temas' | 'cantos' | 'general' | 'todo'
   const [dashboardSection, setDashboardSection] = useState<"hoy" | "temas" | "cantos" | "general" | "todo">("hoy");
@@ -51,20 +52,6 @@ export function DashboardView({
     setDailyGoalMinutes(newGoal);
   };
 
-  // Merge initial topics with user custom topics
-  const allTopics = useMemo(() => {
-    const customList = Object.entries(userProgress || {})
-      .filter(([_, data]: [string, any]) => data.isCustom && !data.isDeleted)
-      .map(([id, data]: [string, any]) => ({
-        id,
-        subjectId: data.subjectId || "custom",
-        number: data.number || 999,
-        title: data.customTitle || "Tema Personalizado",
-        shortTitle: data.customTitle || "Tema Personalizado",
-      } as unknown as Topic));
-    return [...initialTopics, ...customList];
-  }, [userProgress]);
-
   const topics = allTopics;
 
   // Cantos Filters & Modals
@@ -76,6 +63,9 @@ export function DashboardView({
   const [cantoModalMode, setCantoModalMode] = useState<"simulator" | "manual">("simulator");
   const [activeModalTopicId, setActiveModalTopicId] = useState<string | undefined>(undefined);
   const [isSavingCanto, setIsSavingCanto] = useState(false);
+  const [cantoPrediction, setCantoPrediction] = useState<{ topicId: string; snapshot: PredictionSnapshot; retention: Record<string, any> } | null>(null);
+  const captureCantoPrediction = (topicId: string) => setCantoPrediction(topicId && topicState.has(topicId) ? { topicId, snapshot: estimateDuration(topicId, "cante"), retention: estimateRetentionForTopic(topicId) } : null);
+  const [observedSessionTarget, setObservedSessionTarget] = useState<StudySessionTarget | null>(null);
 
   // --- ANALYTICS ENGINE ---
   const rawSessions = useMemo(() => {
@@ -98,28 +88,12 @@ export function DashboardView({
     // Deduplicate double submits in O(N)
     const unique: typeof mapped = [];
     const seenIds = new Set<string>();
-    const recentByKey = new Map<string, number>();
 
     mapped.forEach((s) => {
       if (seenIds.has(s.id)) return;
       seenIds.add(s.id);
 
-      const timeS = s.createdAt && typeof s.createdAt.toMillis === "function"
-        ? s.createdAt.toMillis()
-        : typeof s.createdAt === "number"
-        ? s.createdAt
-        : 0;
-
-      const compositeKey = `${s.topicId}_${s.type}_${s.date}_${s.duration}_${s.grade || 0}`;
-      const prevTime = recentByKey.get(compositeKey);
-
-      if (prevTime !== undefined && timeS > 0 && Math.abs(timeS - prevTime) < 3000) {
-        return;
-      }
-
-      if (timeS > 0) {
-        recentByKey.set(compositeKey, timeS);
-      }
+      // Equal measurements in different documents do not prove duplicate submissions.
       unique.push(s);
     });
 
@@ -225,12 +199,8 @@ export function DashboardView({
       const prog = userProgress[t.id];
       if (!prog || !prog.firstStudyDate) return;
 
-      const srsState = {
-        easinessFactor: prog.srsEasinessFactor || 2.5,
-        interval: prog.srsInterval || 0,
-        repetitions: prog.srsRepetitions || 0,
-      };
-      const nextDateStr = calculateNextSRSState(prog.difficulty || 5, srsState, prog.lastReviewDate).nextReviewDate;
+      const nextDateStr = prog.nextReviewDate;
+      if (!nextDateStr) return;
       const nextDate = new Date(nextDateStr).getTime();
       const diffDays = Math.round((nextDate - today) / (1000 * 3600 * 24));
 
@@ -269,13 +239,8 @@ export function DashboardView({
     });
 
     Object.values(userProgress).forEach((prog: any) => {
-      if (prog?.lastReviewDate) {
-        const srsState = {
-          easinessFactor: prog.srsEasinessFactor || 2.5,
-          interval: prog.srsInterval || 0,
-          repetitions: prog.srsRepetitions || 0,
-        };
-        const nextDate = calculateNextSRSState(prog.difficulty || 5, srsState, prog.lastReviewDate).nextReviewDate;
+      if (prog?.nextReviewDate) {
+        const nextDate = prog.nextReviewDate;
         const dayObj = days.find((d) => d.dateStr === nextDate);
         if (dayObj) {
           dayObj.count++;
@@ -607,48 +572,28 @@ export function DashboardView({
   }, [rawSessions, dailyGoalMinutes, currentStreak]);
 
   const todayStudyQueue = useMemo(() => {
-    return computeTodayStudyQueue(allTopics, userProgress, recentSessions);
-  }, [allTopics, userProgress, recentSessions]);
+    return computeTodayStudyQueue(allTopics, userProgress, recentSessions, topicState);
+  }, [allTopics, userProgress, recentSessions, topicState]);
 
   // Handlers for Plan del Día
-  const handleTodayQuickReview = async (task: RecommendedStudyTask) => {
-    try {
-      playSound.click();
-      const currentVueltas = userProgress[task.topic.id]?.vueltas || 0;
-      const newVueltas = currentVueltas + 1;
-      await addStudySession({
-        topicId: task.topic.id,
-        date: getLocalDateString(),
-        type: "repaso",
-        durationMinutes: task.estimatedMinutes || 45,
-        difficulty: userProgress[task.topic.id]?.difficulty || task.topic.difficulty || 4,
-        completesVuelta: true,
-        notes: `Repaso rápido oficial (+1 Vuelta) desde Plan del Día. Estimado: ${task.estimatedMinutes} min.`,
-      });
-      playSound.success();
-      toast.success(`🎉 ¡Vuelta ${newVueltas} consolidada para el Tema ${task.topic.number}!`);
-    } catch (err: any) {
-      toast.error("Error al registrar repaso: " + (err.message || err));
-    }
+  const handleTodayQuickReview = (task: RecommendedStudyTask) => {
+    playSound.click();
+    const canonical = topicState.get(task.topic.id);
+    const predictionSnapshot = estimateDuration(task.topic.id, 'repaso');
+    setObservedSessionTarget({ topicId: task.topic.id, title: task.topic.title, type: 'repaso', difficulty: canonical?.difficulty,
+      predictionSnapshot, retentionPrediction: estimateRetentionForTopic(task.topic.id), estimatedMinutes: predictionSnapshot.estimatedMinutes,
+      metadata: { totalPages: canonical?.hasExplicitPages ? canonical.pages : undefined, totalWords: canonical?.numeroPalabras },
+    });
   };
 
-  const handleTodayQuickRefresco = async (task: RecommendedStudyTask) => {
-    try {
-      playSound.click();
-      await addStudySession({
-        topicId: task.topic.id,
-        date: getLocalDateString(),
-        type: "refresco",
-        durationMinutes: task.estimatedMinutes || 30,
-        difficulty: userProgress[task.topic.id]?.difficulty || task.topic.difficulty || 4,
-        completesVuelta: false,
-        notes: `Refresco diario oficial desde Plan del Día.`,
-      });
-      playSound.success();
-      toast.success(`⚡ ¡Refresco registrado para el Tema ${task.topic.number}!`);
-    } catch (err: any) {
-      toast.error("Error al registrar refresco: " + (err.message || err));
-    }
+  const handleTodayQuickRefresco = (task: RecommendedStudyTask) => {
+    playSound.click();
+    const canonical = topicState.get(task.topic.id);
+    const predictionSnapshot = estimateDuration(task.topic.id, 'refresco');
+    setObservedSessionTarget({ topicId: task.topic.id, title: task.topic.title, type: 'refresco', difficulty: canonical?.difficulty,
+      predictionSnapshot, retentionPrediction: estimateRetentionForTopic(task.topic.id), estimatedMinutes: predictionSnapshot.estimatedMinutes,
+      metadata: { totalPages: canonical?.hasExplicitPages ? canonical.pages : undefined, totalWords: canonical?.numeroPalabras },
+    });
   };
 
   const handleOpenLogCanto = (mode: "simulator" | "manual" = "simulator", targetTopicId?: string) => {
@@ -661,6 +606,7 @@ export function DashboardView({
     } else {
       setActiveModalTopicId(undefined);
     }
+    captureCantoPrediction(targetTopicId || (selectedTopicCantoFilter !== "all" ? selectedTopicCantoFilter : ""));
     setIsLoggingCanto(true);
   };
 
@@ -679,6 +625,10 @@ export function DashboardView({
         "canto",
         data.date,
         {
+          prediction: cantoPrediction?.topicId === data.topicId ? cantoPrediction.snapshot : undefined,
+          retentionPrediction: cantoPrediction?.topicId === data.topicId ? cantoPrediction.retention : undefined,
+          totalPagesAtSession: cantoPrediction?.topicId === data.topicId ? cantoPrediction.snapshot.inputs?.totalPages : undefined,
+          wordsAtSession: cantoPrediction?.topicId === data.topicId ? cantoPrediction.snapshot.inputs?.totalWords : undefined,
           cantoGrade: data.grade,
           cantoSeconds: data.durationSeconds,
           mistakes: data.mistakes,
@@ -706,35 +656,36 @@ export function DashboardView({
   };
 
   return (
-    <div className="w-full h-full px-2.5 py-3 sm:p-6 lg:p-8 bg-[#F8FAFC] overflow-y-auto no-scrollbar pb-28 md:pb-8">
+    <div aria-busy={loading} className="w-full min-w-0 h-full px-4 py-5 sm:p-6 lg:p-8 bg-[var(--wp-canvas)] overflow-y-auto pb-28 md:pb-8">
       <div className="max-w-[100rem] mx-auto space-y-4 sm:space-y-6 lg:space-y-7">
         {/* Editorial Top Bar */}
         <div className="flex flex-col lg:flex-row justify-between items-start lg:items-end gap-3 sm:gap-6 mb-1">
           <div>
-            <h1 className="text-2xl sm:text-3xl lg:text-4xl font-black text-slate-900 tracking-tight font-serif">
+            <h1 className={DS.titlePage}>
               Centro de Comando
             </h1>
             <p className="text-slate-500 text-xs sm:text-sm font-medium mt-0.5 flex items-center gap-1.5">
               <Activity size={14} className="text-indigo-600 shrink-0" />
-              Telemetría en tiempo real de tu oposición
+              Tu actividad y próximos pasos
             </p>
           </div>
 
           {/* Section Navigation Tabs */}
-          <div className="w-full lg:w-auto flex items-center bg-white/95 backdrop-blur-xl p-1 rounded-2xl border border-slate-200/80 shadow-xs gap-1 overflow-x-auto no-scrollbar">
+          <div role="group" aria-label="Secciones del dashboard" className="w-full min-w-0 lg:w-auto flex flex-wrap items-center bg-white p-1 rounded-2xl border border-slate-200/80 gap-1">
             <button
               onClick={() => {
                 playSound.click();
                 setDashboardSection("hoy");
               }}
               className={cn(
-                "px-3 py-1.5 sm:py-2 rounded-xl text-xs font-black transition-all flex items-center gap-1.5 shrink-0 active:scale-[0.98]",
+                "min-h-11 px-3 py-2 rounded-xl text-xs font-semibold transition-all flex items-center gap-1.5 shrink-0 active:scale-[0.98]",
                 dashboardSection === "hoy" ? "bg-slate-900 text-white shadow-xs" : "text-slate-600 hover:text-slate-900 hover:bg-slate-100"
               )}
+              aria-pressed={dashboardSection === "hoy"}
             >
               <Target size={13} className={dashboardSection === "hoy" ? "text-indigo-300" : "text-indigo-600"} />
               <span className="sm:hidden">Hoy</span>
-              <span className="hidden sm:inline">Hoy & Plan de Estudio</span>
+              <span className="hidden sm:inline">Hoy</span>
             </button>
             <button
               onClick={() => {
@@ -742,13 +693,14 @@ export function DashboardView({
                 setDashboardSection("temas");
               }}
               className={cn(
-                "px-3 py-1.5 sm:py-2 rounded-xl text-xs font-black transition-all flex items-center gap-1.5 shrink-0 active:scale-[0.98]",
+                "min-h-11 px-3 py-2 rounded-xl text-xs font-semibold transition-all flex items-center gap-1.5 shrink-0 active:scale-[0.98]",
                 dashboardSection === "temas" ? "bg-slate-900 text-white shadow-xs" : "text-slate-600 hover:text-slate-900 hover:bg-slate-100"
               )}
+              aria-pressed={dashboardSection === "temas"}
             >
               <BookOpen size={13} className={dashboardSection === "temas" ? "text-indigo-300" : "text-indigo-600"} />
               <span className="sm:hidden">Temas</span>
-              <span className="hidden sm:inline">Evolución de Temas</span>
+              <span className="hidden sm:inline">Temas</span>
             </button>
             <button
               onClick={() => {
@@ -756,13 +708,14 @@ export function DashboardView({
                 setDashboardSection("cantos");
               }}
               className={cn(
-                "px-3 py-1.5 sm:py-2 rounded-xl text-xs font-black transition-all flex items-center gap-1.5 shrink-0 active:scale-[0.98]",
+                "min-h-11 px-3 py-2 rounded-xl text-xs font-semibold transition-all flex items-center gap-1.5 shrink-0 active:scale-[0.98]",
                 dashboardSection === "cantos" ? "bg-slate-900 text-white shadow-xs" : "text-slate-600 hover:text-slate-900 hover:bg-slate-100"
               )}
+              aria-pressed={dashboardSection === "cantos"}
             >
               <Mic size={13} className={dashboardSection === "cantos" ? "text-fuchsia-300" : "text-fuchsia-600"} />
               <span className="sm:hidden">Cantos</span>
-              <span className="hidden sm:inline">Evolución de Cantos</span>
+              <span className="hidden sm:inline">Cantos</span>
             </button>
             <button
               onClick={() => {
@@ -770,13 +723,14 @@ export function DashboardView({
                 setDashboardSection("general");
               }}
               className={cn(
-                "px-3 py-1.5 sm:py-2 rounded-xl text-xs font-black transition-all flex items-center gap-1.5 shrink-0 active:scale-[0.98]",
+                "min-h-11 px-3 py-2 rounded-xl text-xs font-semibold transition-all flex items-center gap-1.5 shrink-0 active:scale-[0.98]",
                 dashboardSection === "general" ? "bg-slate-900 text-white shadow-xs" : "text-slate-600 hover:text-slate-900 hover:bg-slate-100"
               )}
+              aria-pressed={dashboardSection === "general"}
             >
               <TrendingUp size={13} className={dashboardSection === "general" ? "text-emerald-300" : "text-emerald-600"} />
               <span className="sm:hidden">Agenda</span>
-              <span className="hidden sm:inline">Visión General & Agenda</span>
+              <span className="hidden sm:inline">Agenda</span>
             </button>
             <button
               onClick={() => {
@@ -784,9 +738,10 @@ export function DashboardView({
                 setDashboardSection("todo");
               }}
               className={cn(
-                "px-3 py-1.5 sm:py-2 rounded-xl text-xs font-black transition-all flex items-center gap-1.5 shrink-0 active:scale-[0.98]",
+                "min-h-11 px-3 py-2 rounded-xl text-xs font-semibold transition-all flex items-center gap-1.5 shrink-0 active:scale-[0.98]",
                 dashboardSection === "todo" ? "bg-slate-900 text-white shadow-xs" : "text-slate-600 hover:text-slate-900 hover:bg-slate-100"
               )}
+              aria-pressed={dashboardSection === "todo"}
             >
               <Layers size={13} className={dashboardSection === "todo" ? "text-amber-300" : "text-amber-600"} />
               <span>Todo</span>
@@ -794,32 +749,37 @@ export function DashboardView({
           </div>
         </div>
 
-        {/* 4 Hero KPIs Cards */}
-        <DashboardHeroKPIs
+        {loading && <p role="status" className="text-sm text-slate-600">Cargando tu actividad… Los datos se actualizarán al terminar.</p>}
+
+        {/* Secondary statistics remain available without displacing today's actions. */}
+        <details className={cn(DS.card, "p-4")}>
+          <summary className="min-h-11 cursor-pointer text-sm font-semibold text-slate-800">
+            Resumen de actividad <span className="font-normal text-slate-600">· {totalTopicsStudied} temas iniciados</span>
+          </summary>
+          <div className="pt-4"><DashboardHeroKPIs
           currentStreak={currentStreak}
           totalTopicsStudied={totalTopicsStudied}
           totalTopicsCount={topics.length}
           globalCompletion={globalCompletion}
           totalTimeHours={totalTimeHours}
           avgRecentCanto={avgRecentCanto}
-        />
+          /></div>
+        </details>
 
         {/* BENTO GRID */}
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 auto-rows-auto gap-4 sm:gap-6 mt-3 sm:mt-4 pb-6 sm:pb-8">
           {/* SECCIÓN 0: HOY & PLAN DE ESTUDIO (APPLE HEALTH & SMART RECOMMENDER) */}
           {(dashboardSection === "hoy" || dashboardSection === "todo") && (
             <>
-              {/* Row 1: Apple Health Activity Ring (Col 1) + 7-Day Consistency (Col 2) */}
-              <div className="md:col-span-1 xl:col-span-1">
-                <DashboardActivityRingsCard
-                  activity={todayActivity}
-                  currentStreak={currentStreak}
-                  onGoalChange={handleGoalChange}
+              {/* The next action comes before supporting statistics. */}
+              <div className="min-w-0 md:col-span-2 xl:col-span-3">
+                <DashboardTodayRecommender
+                  tasks={todayStudyQueue.tasks}
+                  onSelectTopic={onSelectTopic}
+                  onQuickReview={handleTodayQuickReview}
+                  onQuickRefresco={handleTodayQuickRefresco}
+                  onQuickCanto={handleTodayQuickCanto}
                 />
-              </div>
-
-              <div className="md:col-span-1 xl:col-span-2">
-                <DashboardWeeklyConsistencyCard weeklyData={weeklyConsistency} />
               </div>
 
               {/* Row 2: Executive Preparador Cante Card */}
@@ -829,16 +789,15 @@ export function DashboardView({
                 />
               </div>
 
-              {/* Row 3: Today's Smart Study Queue (Full width) */}
-              <div className="md:col-span-2 xl:col-span-3">
-                <DashboardTodayRecommender
-                  tasks={todayStudyQueue.tasks}
-                  onSelectTopic={onSelectTopic}
-                  onQuickReview={handleTodayQuickReview}
-                  onQuickRefresco={handleTodayQuickRefresco}
-                  onQuickCanto={handleTodayQuickCanto}
-                />
-              </div>
+              <details className={cn(DS.card, "min-w-0 md:col-span-2 xl:col-span-3 p-4 sm:p-5")}>
+                <summary className="min-h-11 cursor-pointer text-sm font-semibold text-slate-800">
+                  Actividad de hoy y constancia <span className="font-normal text-slate-600">· {Math.round(todayActivity.totalMinutes)} de {dailyGoalMinutes} min</span>
+                </summary>
+                <div className="grid min-w-0 grid-cols-1 gap-4 pt-4 lg:grid-cols-2">
+                  <DashboardActivityRingsCard activity={todayActivity} currentStreak={currentStreak} onGoalChange={handleGoalChange} />
+                  <DashboardWeeklyConsistencyCard weeklyData={weeklyConsistency} />
+                </div>
+              </details>
 
               {/* In 'hoy' mode, also show the SRS Forecast so student sees the 14-day horizon */}
               {dashboardSection === "hoy" && (
@@ -891,6 +850,8 @@ export function DashboardView({
         </div>
       </div>
 
+      {observedSessionTarget && <StudySessionDialog target={observedSessionTarget} onClose={() => setObservedSessionTarget(null)} onSave={async session => { await addStudySession(session as any); playSound.success(); }} />}
+
       {/* MODAL: GESTIÓN DE CANTOS */}
       <DashboardManageCantosModal
         isOpen={isManagingCantos}
@@ -907,6 +868,7 @@ export function DashboardView({
         allTopics={allTopics}
         onSaveCanto={handleSaveNewCanto}
         isSaving={isSavingCanto}
+        onSelectTopic={captureCantoPrediction}
         initialTopicId={activeModalTopicId}
         initialMode={cantoModalMode}
       />

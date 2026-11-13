@@ -1,32 +1,18 @@
 import React, { useState, useMemo } from "react";
-import { 
-  Brain, 
-  Flame, 
-  AlertTriangle, 
-  Clock, 
-  Plus, 
-  Zap, 
-  CheckCircle2, 
-  Search, 
-  Filter, 
-  ArrowUpDown, 
-  BookOpen, 
-  ChevronRight,
-  TrendingDown
-} from "lucide-react";
+import { Brain, Zap, CheckCircle2, Search } from "lucide-react";
 import { Topic, Subject } from "../../types";
-import { initialTopics, initialSubjects } from "../../data/initialData";
-import { evaluateTopicPreparation, TopicPreparationEvaluation } from "../../lib/preparationScore";
-import { calculateTopicCycle } from "../../lib/oposicionCycle";
+import { initialSubjects } from "../../data/initialData";
 import { safeParseDate, cn } from "../../lib/utils";
-import { sessionMatchesTopic, getLatestCantoForTopic, isCantoSession } from "../../lib/cantoUtils";
+import { sessionMatchesTopic } from "../../lib/cantoUtils";
 import { playSound } from "../../lib/sound";
+import { useFirebase } from "../../lib/FirebaseProvider";
+import { calculateCanonicalRetention } from "../../lib/ebbinghaus";
 
 interface PreparadorEbbinghausQueueProps {
   userProgress: Record<string, any>;
   recentSessions: any[];
   onAssignToDay: (topicId: string, day: "lunes" | "jueves") => void;
-  onQuickReview: (topicId: string, durationMinutes: number) => void;
+  onQuickReview: (topicId: string, durationMinutes?: number) => void;
   onOpenTopic?: (topicId: string) => void;
   assignedLunesIds: string[];
   assignedJuevesIds: string[];
@@ -41,6 +27,7 @@ export const PreparadorEbbinghausQueue: React.FC<PreparadorEbbinghausQueueProps>
   assignedLunesIds,
   assignedJuevesIds
 }) => {
+  const { topics, topicState } = useFirebase();
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedSubjectId, setSelectedSubjectId] = useState<string>("all");
   const [filterSeverity, setFilterSeverity] = useState<"all" | "critical" | "warning">("all");
@@ -60,7 +47,7 @@ export const PreparadorEbbinghausQueue: React.FC<PreparadorEbbinghausQueueProps>
     const results: Array<{
       topic: Topic;
       subject?: Subject;
-      evaluation: TopicPreparationEvaluation;
+      retention: ReturnType<typeof calculateCanonicalRetention>;
       vueltas: number;
       daysSinceTouch: number | null;
       lastDateFormatted: string;
@@ -68,27 +55,16 @@ export const PreparadorEbbinghausQueue: React.FC<PreparadorEbbinghausQueueProps>
       isAssignedJueves: boolean;
     }> = [];
 
-    for (const topic of initialTopics) {
+    for (const topic of topics) {
       const prog = userProgress[topic.id];
       const sessions = recentSessions.filter((s) => sessionMatchesTopic(s, topic));
 
       // Only consider topics that have at least 1 session or progress record
       if (!prog && sessions.length === 0) continue;
 
-      const cantoData = getLatestCantoForTopic(recentSessions, topic, prog);
       const sortedSessions = [...sessions].sort(
         (a, b) => safeParseDate(b.date).getTime() - safeParseDate(a.date).getTime()
       );
-
-      const daysSinceCanto = cantoData.date
-        ? Math.max(0, Math.floor((new Date().getTime() - safeParseDate(cantoData.date).getTime()) / (1000 * 3600 * 24)))
-        : null;
-
-      const reviewSession = sortedSessions.find((s) => !isCantoSession(s)) || sortedSessions[0];
-      const lastReviewDate = reviewSession?.date || prog?.lastReviewDate || prog?.firstStudyDate;
-      const daysSinceReview = lastReviewDate
-        ? Math.max(0, Math.floor((new Date().getTime() - safeParseDate(lastReviewDate).getTime()) / (1000 * 3600 * 24)))
-        : null;
 
       const lastDate = sortedSessions[0]?.date || prog?.lastReviewDate || prog?.firstStudyDate;
       const daysSinceTouch = lastDate
@@ -96,25 +72,12 @@ export const PreparadorEbbinghausQueue: React.FC<PreparadorEbbinghausQueueProps>
         : null;
 
       const vueltas = prog?.vueltas || 0;
-      const reviewsCount = sessions.length;
-
-      const evaluation = evaluateTopicPreparation({
-        topicNumber: topic.number,
-        topicTitle: topic.title,
-        totalCantoSecs: cantoData.hasCanto ? cantoData.totalSecs : null,
-        lastGrade: cantoData.grade,
-        daysSinceCanto,
-        daysSinceReview,
-        daysSinceTouch,
-        vueltas,
-        reviewsCount,
-        difficulty: topic.difficulty || 5
-      });
+      const retention = calculateCanonicalRetention(topicState.get(topic.id));
 
       results.push({
         topic,
         subject: subjectMap.get(topic.subjectId),
-        evaluation,
+        retention,
         vueltas,
         daysSinceTouch,
         lastDateFormatted: lastDate ? lastDate.split("T")[0] : "Sin fecha",
@@ -123,15 +86,12 @@ export const PreparadorEbbinghausQueue: React.FC<PreparadorEbbinghausQueueProps>
       });
     }
 
-    // Sort by urgency: lowest retention first and highest decay first
+    // Unknown retention cannot be ranked as evidence of severe forgetting.
     return results.sort((a, b) => {
-      // Priority 1: High decay
-      const decayDiff = b.evaluation.scoreDecay - a.evaluation.scoreDecay;
-      if (Math.abs(decayDiff) > 0.5) return decayDiff;
-      // Priority 2: Lowest retention
-      return a.evaluation.retentionPct - b.evaluation.retentionPct;
+      if (a.retention.hasData !== b.retention.hasData) return a.retention.hasData ? -1 : 1;
+      return a.retention.currentRetention - b.retention.currentRetention;
     });
-  }, [userProgress, recentSessions, subjectMap, assignedLunesIds, assignedJuevesIds]);
+  }, [topics, topicState, userProgress, recentSessions, subjectMap, assignedLunesIds, assignedJuevesIds]);
 
   // Filtered topics
   const filteredQueue = useMemo(() => {
@@ -141,10 +101,10 @@ export const PreparadorEbbinghausQueue: React.FC<PreparadorEbbinghausQueueProps>
         return false;
       }
       // Severity filter
-      if (filterSeverity === "critical" && (item.evaluation.retentionPct >= 50 && item.evaluation.scoreDecay < 1.0)) {
+      if (filterSeverity === "critical" && (!item.retention.hasData || item.retention.currentRetention >= 50)) {
         return false;
       }
-      if (filterSeverity === "warning" && item.evaluation.retentionPct >= 70 && !item.evaluation.isDecayed) {
+      if (filterSeverity === "warning" && (!item.retention.hasData || item.retention.currentRetention >= 70)) {
         return false;
       }
       // Text search
@@ -159,10 +119,10 @@ export const PreparadorEbbinghausQueue: React.FC<PreparadorEbbinghausQueueProps>
     });
   }, [analyzedQueue, selectedSubjectId, filterSeverity, searchQuery]);
 
-  const handleExecuteQuickReview = async (topicId: string, mins: number) => {
+  const handleExecuteQuickReview = async (topicId: string) => {
     setReviewingTopicId(topicId);
     try {
-      await onQuickReview(topicId, mins);
+      await onQuickReview(topicId);
     } finally {
       setReviewingTopicId(null);
     }
@@ -179,13 +139,13 @@ export const PreparadorEbbinghausQueue: React.FC<PreparadorEbbinghausQueueProps>
             </div>
             <div>
               <h3 className="text-base font-black font-serif text-slate-900 tracking-tight flex items-center gap-2">
-                <span>Cola Inteligente de Repaso (Curva de Ebbinghaus)</span>
+                <span>Repasos según retención estimada</span>
                 <span className="text-xs font-mono font-bold text-amber-800 bg-amber-100/70 px-2 py-0.5 rounded-full">
                   {filteredQueue.length} temas en seguimiento
                 </span>
               </h3>
               <p className="text-xs text-slate-500 mt-0.5">
-                Detecta automáticamente los temas con retención neuronal en declive para frenar la curva del olvido antes de tu próximo cante.
+                Prioriza con las estimaciones del historial. El recuerdo real y la fecha adecuada de repaso pueden variar.
               </p>
             </div>
           </div>
@@ -194,12 +154,12 @@ export const PreparadorEbbinghausQueue: React.FC<PreparadorEbbinghausQueueProps>
           <div className="flex items-center gap-3 bg-slate-50 p-2 rounded-xl border border-slate-200/60 shrink-0 text-xs font-bold text-slate-700">
             <div className="flex items-center gap-1.5">
               <span className="w-2 h-2 rounded-full bg-rose-500" />
-              <span>{analyzedQueue.filter(i => i.evaluation.retentionPct < 50).length} Críticos</span>
+              <span>{analyzedQueue.filter(i => i.retention.hasData && i.retention.currentRetention < 50).length} Prioritarios</span>
             </div>
             <span>·</span>
             <div className="flex items-center gap-1.5">
               <span className="w-2 h-2 rounded-full bg-amber-500" />
-              <span>{analyzedQueue.filter(i => i.evaluation.retentionPct >= 50 && i.evaluation.retentionPct < 70).length} Alerta</span>
+              <span>{analyzedQueue.filter(i => i.retention.hasData && i.retention.currentRetention >= 50 && i.retention.currentRetention < 70).length} Por revisar</span>
             </div>
           </div>
         </div>
@@ -250,7 +210,7 @@ export const PreparadorEbbinghausQueue: React.FC<PreparadorEbbinghausQueueProps>
               )}
             >
               <span className="w-1.5 h-1.5 rounded-full bg-rose-500" />
-              <span>Críticos</span>
+              <span>Prioritarios</span>
             </button>
             <button
               type="button"
@@ -261,7 +221,7 @@ export const PreparadorEbbinghausQueue: React.FC<PreparadorEbbinghausQueueProps>
               )}
             >
               <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
-              <span>En Desgaste</span>
+              <span>Por revisar</span>
             </button>
           </div>
         </div>
@@ -270,10 +230,12 @@ export const PreparadorEbbinghausQueue: React.FC<PreparadorEbbinghausQueueProps>
       {/* Topics Queue List */}
       <div className="space-y-2.5">
         {filteredQueue.length > 0 ? (
-          filteredQueue.map(({ topic, subject, evaluation, vueltas, daysSinceTouch, isAssignedLunes, isAssignedJueves }) => {
-            const isCrit = evaluation.retentionPct < 50;
-            const isWarn = evaluation.retentionPct < 70;
+          filteredQueue.map(({ topic, subject, retention, vueltas, daysSinceTouch, isAssignedLunes, isAssignedJueves }) => {
+            const isCrit = retention.hasData && retention.currentRetention < 50;
+            const isWarn = retention.hasData && retention.currentRetention < 70;
             const isBusy = reviewingTopicId === topic.id;
+            const adaptive = retention.adaptive;
+            const percentage = (value: number) => Math.round(value * 20) * 5;
 
             return (
               <div
@@ -321,46 +283,50 @@ export const PreparadorEbbinghausQueue: React.FC<PreparadorEbbinghausQueueProps>
                   </h4>
 
                   {/* Retention Gauge Line */}
-                  <div className="mt-2.5 flex items-center gap-3">
+                  <div className="mt-2.5 flex items-center gap-3 flex-wrap">
+                    {retention.hasData && <>
                     <div className="w-32 sm:w-44 h-1.5 bg-slate-100 rounded-full overflow-hidden shrink-0">
                       <div
                         className={cn(
                           "h-full rounded-full transition-all duration-500",
                           isCrit ? "bg-rose-500" : isWarn ? "bg-amber-500" : "bg-emerald-500"
                         )}
-                        style={{ width: `${Math.max(5, Math.min(100, evaluation.retentionPct))}%` }}
+                        style={{ width: `${Math.max(0, Math.min(100, retention.currentRetention))}%` }}
                       />
                     </div>
                     <span className={cn(
                       "text-xs font-black font-mono tabular-nums",
                       isCrit ? "text-rose-600" : isWarn ? "text-amber-600" : "text-emerald-700"
                     )}>
-                      {evaluation.retentionPct}% retención
+                      ≈{retention.currentRetention}% estimado
                     </span>
-                    {evaluation.isDecayed && (
-                      <span className="text-[11px] font-mono text-rose-600 font-bold flex items-center gap-0.5">
-                        <TrendingDown size={11} />
-                        -{evaluation.scoreDecay.toFixed(1)} pts
-                      </span>
-                    )}
+                    </>}
+                    {!retention.hasData && <span className="text-xs text-slate-500">Sin evidencia suficiente para estimar</span>}
+                    {adaptive?.interval && <span className="text-xs text-slate-500">Rango orientativo: {percentage(adaptive.interval.low)}–{percentage(adaptive.interval.high)}%</span>}
                   </div>
+                  {adaptive && retention.hasData && <p className="text-xs text-slate-500 mt-1.5">
+                    {adaptive.target === 'grade_proxy' ? 'Aproximación basada en cante ≥5/10' : adaptive.target === 'prior' ? 'Referencia sin evaluación de recuerdo' : 'Basado en evaluaciones de recuerdo'}
+                    {' · '}{adaptive.topicEvidenceCount} evaluaciones de este tema
+                    {' · Confianza: '}{adaptive.confidence === 'sin_datos' ? 'sin datos' : adaptive.confidence}
+                    {adaptive.coverageScope !== 'whole_topic' && ` · ${adaptive.coverageScope === 'studied_portion' ? 'Solo parte estudiada' : 'Cobertura sin confirmar'}`}
+                  </p>}
                 </div>
 
                 {/* Direct Action Cockpit */}
                 <div className="flex items-center gap-2 flex-wrap shrink-0 pt-2 md:pt-0 border-t md:border-t-0 border-slate-100">
-                  {/* 1-Click Frenar Olvido (+45m) */}
+                  {/* Open the shared session dialog to record observed work. */}
                   <button
                     type="button"
                     disabled={isBusy}
                     onClick={() => {
                       playSound.click();
-                      handleExecuteQuickReview(topic.id, 45);
+                      handleExecuteQuickReview(topic.id);
                     }}
                     className="px-3 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-black transition-all shadow-2xs flex items-center gap-1.5 active:scale-95 disabled:opacity-50"
-                    title="Registra un repaso de 45 minutos y reinicia la curva de retención neuronal"
+                    title="Indica la duración y las páginas del repaso que has realizado"
                   >
                     <Zap size={13} fill="currentColor" />
-                    <span>{isBusy ? "Guardando..." : "Frenar Olvido (+45m)"}</span>
+                    <span>{isBusy ? "Abriendo..." : "Registrar repaso"}</span>
                   </button>
 
                   {/* Assign to Lunes */}
@@ -399,9 +365,9 @@ export const PreparadorEbbinghausQueue: React.FC<PreparadorEbbinghausQueueProps>
         ) : (
           <div className="bg-white rounded-2xl p-10 text-center border border-dashed border-slate-200">
             <CheckCircle2 size={36} className="mx-auto text-emerald-500 mb-2 opacity-60" />
-            <h4 className="text-sm font-bold text-slate-800">¡Retención neuronal óptima!</h4>
+            <h4 className="text-sm font-bold text-slate-800">No hay temas con estos filtros</h4>
             <p className="text-xs text-slate-500 max-w-md mx-auto mt-1">
-              No tienes temas en zona crítica de olvido con los filtros actuales. Todos tus temas estudiados mantienen una retención consolidada.
+              Prueba otros filtros o registra tus sesiones para disponer de estimaciones.
             </p>
           </div>
         )}

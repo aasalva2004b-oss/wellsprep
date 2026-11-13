@@ -1,197 +1,8 @@
-import fs from 'fs';
-import path from 'path';
-import {
-  WebhookSyncRecord,
-  WebhookResolvedTopic,
-  AeroFocusWebhookPayload,
-  WellsprepAnalyticsV2,
-  WellsprepPageStatV2,
-  WellsprepPlsemaBreakdown,
-  WellsprepSessionTelemetryV2,
-  WellsprepTaskDetailV2,
-  AeroFocusWebhookResponseV2
-} from './webhookTypes';
+import type { WebhookSyncRecord, WebhookResolvedTopic, WellsprepAnalyticsV2, WellsprepPageStatV2, WellsprepPlsemaBreakdown, WellsprepSessionTelemetryV2, WellsprepTaskDetailV2, AeroFocusWebhookResponseV2 } from './webhookTypes';
 import { resolveAeroFocusTopic, extractMinutesFromAeroItem, normalizeCategoryToSubjectId, extractTopicNumber } from './topicResolver';
 
-export const EXPECTED_WEBHOOK_TOKEN = 'wp_qLXi6WFkFY_live';
-
-// Buffer en memoria persistente en el entorno serverless de Vercel y local
-declare global {
-  var __wellsprep_sessions: any[] | undefined;
-  var __wellsprep_analytics: WellsprepAnalyticsV2 | undefined;
-}
-if (!globalThis.__wellsprep_sessions) {
-  globalThis.__wellsprep_sessions = [];
-}
-
-export const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-  'Access-Control-Allow-Headers':
-    'Content-Type, Authorization, X-Requested-With, X-Event, X-API-Key, X-Source, X-Test-Ping, X-Transaction-Id, X-Flight-Id, X-Daily-Date, X-Daily-Hour, X-Schema-Version, X-Incremental, X-Sync-Scope, X-Test-Mode, X-Token, X-Webhook-Token',
-};
-
-// In-memory fallbacks
-let memoryEvents: WebhookSyncRecord[] = [];
-let memoryAnalytics: WellsprepAnalyticsV2 | null = null;
-
-export function getWebhookEventsFilePath(): string {
-  const isServerless = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME || process.env.NOW_REGION);
-  if (isServerless) {
-    const fallback = path.join('/tmp', 'aerofocus_events.json');
-    try {
-      const dir = path.dirname(fallback);
-      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    } catch {}
-    return fallback;
-  }
-
-  try {
-    const primary = path.join(process.cwd(), 'uploads', 'aerofocus_events.json');
-    const dir = path.dirname(primary);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
-    return primary;
-  } catch {
-    const fallback = path.join('/tmp', 'aerofocus_events.json');
-    try {
-      const dir = path.dirname(fallback);
-      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    } catch {}
-    return fallback;
-  }
-}
-
-export function getAnalyticsFilePath(): string {
-  const isServerless = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME || process.env.NOW_REGION);
-  if (isServerless) {
-    const fallback = path.join('/tmp', 'aerofocus_analytics.json');
-    try {
-      const dir = path.dirname(fallback);
-      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    } catch {}
-    return fallback;
-  }
-
-  try {
-    const primary = path.join(process.cwd(), 'uploads', 'aerofocus_analytics.json');
-    const dir = path.dirname(primary);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
-    return primary;
-  } catch {
-    const fallback = path.join('/tmp', 'aerofocus_analytics.json');
-    try {
-      const dir = path.dirname(fallback);
-      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    } catch {}
-    return fallback;
-  }
-}
-
-export function loadWebhookEvents(): WebhookSyncRecord[] {
-  try {
-    const filePath = getWebhookEventsFilePath();
-    if (fs.existsSync(filePath)) {
-      const raw = fs.readFileSync(filePath, 'utf-8');
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) {
-        memoryEvents = parsed;
-        return parsed;
-      }
-    }
-  } catch (e) {
-    console.warn('[AeroFocus Webhook] Fallback reading events from memory:', e);
-  }
-  return memoryEvents;
-}
-
-export function saveWebhookEvents(events: WebhookSyncRecord[]): void {
-  const trimmed = events.slice(-200);
-  memoryEvents = trimmed;
-  if (events.length === 0) {
-    globalThis.__wellsprep_sessions = [];
-  }
-  try {
-    const filePath = getWebhookEventsFilePath();
-    fs.writeFileSync(filePath, JSON.stringify(trimmed, null, 2), 'utf-8');
-  } catch (e) {
-    console.warn('[AeroFocus Webhook] Error writing events to file, preserved in memory:', e);
-  }
-}
-
-export function loadGlobalAnalytics(): WellsprepAnalyticsV2 | null {
-  if (globalThis.__wellsprep_analytics) return globalThis.__wellsprep_analytics;
-  try {
-    const filePath = getAnalyticsFilePath();
-    if (fs.existsSync(filePath)) {
-      const raw = fs.readFileSync(filePath, 'utf-8');
-      const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed === 'object') {
-        memoryAnalytics = parsed;
-        globalThis.__wellsprep_analytics = parsed;
-        return parsed;
-      }
-    }
-  } catch (e) {
-    console.warn('[AeroFocus Analytics] Fallback reading analytics from memory:', e);
-  }
-  return memoryAnalytics;
-}
-
-export function saveGlobalAnalytics(analytics: WellsprepAnalyticsV2): void {
-  if (!analytics || typeof analytics !== 'object') return;
-  memoryAnalytics = analytics;
-  globalThis.__wellsprep_analytics = analytics;
-  try {
-    const filePath = getAnalyticsFilePath();
-    fs.writeFileSync(filePath, JSON.stringify(analytics, null, 2), 'utf-8');
-  } catch (e) {
-    console.warn('[AeroFocus Analytics] Error writing analytics to file, preserved in memory:', e);
-  }
-}
-
-export function getWebhookHealthOrSessions() {
-  let sessions = globalThis.__wellsprep_sessions || [];
-  if (sessions.length === 0) {
-    const stored = loadWebhookEvents();
-    if (stored.length > 0) {
-      sessions = stored.map(s => ({
-        id: s.flightId || s.transactionId || s.id,
-        receivedAt: s.receivedAt,
-        payload: s.rawPayload || s
-      }));
-      globalThis.__wellsprep_sessions = sessions;
-    }
-  }
-  const analytics = loadGlobalAnalytics();
-  return {
-    ok: true,
-    status: 'ok',
-    service: 'wellsprep_aerofocus_webhook',
-    schemaSupported: '2.2.0',
-    sessionsCount: sessions.length,
-    hasGlobalAnalytics: Boolean(analytics),
-    latestSessions: sessions.slice(-15),
-    ready: true
-  };
-}
-
-export function isAuthorizedWebhookRequest(headers: Record<string, any>, payload?: any): boolean {
-  const authHeader = headers['authorization'] || headers['Authorization'];
-  const apiKey = headers['x-api-key'] || headers['X-API-Key'] || headers['x-token'] || headers['x-webhook-token'];
-  const bodyToken = payload?.apiKey || payload?.token;
-  const token = apiKey || bodyToken || (typeof authHeader === 'string' && authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : null);
-
-  // Si no se provee token o si es un token legítimo (EXPECTED_WEBHOOK_TOKEN o cualquier token con prefijo wp_ / live_)
-  if (!token) return true;
-  if (token === EXPECTED_WEBHOOK_TOKEN) return true;
-  if (token.startsWith('wp_') || token.startsWith('live_') || token.length >= 8) return true;
-  return true; // Máxima resiliencia para no bloquear transmisiones válidas
-}
-
+// Pure normalization only. Persistence and authentication are server-only and
+// partitioned by verified UID in server/aerofocusStore.ts. No file/global fallback.
 /**
  * Motor central de ingesta, idempotencia y reconciliación para AeroFocus Pro v2.2.0
  */
@@ -264,7 +75,10 @@ export function processIncomingAeroFocusPayload(
     payload.fecha ||
     (payload.timestamp ? new Date(payload.timestamp).toISOString().split('T')[0] : new Date().toISOString().split('T')[0]);
 
-  const flightId = String(payload.flightId || payload.transactionId || `af_${sessionDate}_${Date.now()}`);
+  const suppliedId = payload.transactionId || payload.flightId || headers['x-transaction-id'] || headers['x-flight-id'];
+  if (typeof suppliedId !== 'string' || !suppliedId.trim() || suppliedId.length > 400) return { statusCode: 400, responseData: { ok: false, error: 'Se requiere flightId o transactionId estable.' } };
+  if (typeof sessionDate !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(sessionDate) || !Number.isFinite(Date.parse(sessionDate))) return { statusCode: 400, responseData: { ok: false, error: 'Fecha no válida.' } };
+  const flightId = suppliedId.trim();
   const transactionId = String(payload.transactionId || flightId);
 
   // 4. Métricas de Tiempo de la transmisión
@@ -287,9 +101,7 @@ export function processIncomingAeroFocusPayload(
   // 5. Extraer y persistir snapshot global si viene en el payload
   const analyticsSnapshot: WellsprepAnalyticsV2 | undefined =
     payload.analytics || payload.estadisticasGlobales;
-  if (analyticsSnapshot) {
-    saveGlobalAnalytics(analyticsSnapshot);
-  }
+
 
   // 6. Normalizar y resolver temas de la transmisión
   let incomingRawTopics: any[] = [];
@@ -323,7 +135,7 @@ export function processIncomingAeroFocusPayload(
   });
 
   const topicsCount = filteredTopics.length || 1;
-  const fallbackMins = totalMins > 0 ? Math.max(15, Math.round(totalMins / topicsCount)) : 45;
+  const fallbackMins = Number.isFinite(totalMins) && totalMins > 0 && topicsCount === 1 ? totalMins : 0;
 
   const resolvedTopics: WebhookResolvedTopic[] = [];
   for (const t of filteredTopics) {
@@ -350,8 +162,8 @@ export function processIncomingAeroFocusPayload(
       const parsedNum = extractTopicNumber(t.temaNumero) || extractTopicNumber(t.topicNumber) || extractTopicNumber(rawTitle) || extractTopicNumber(t.id);
       
       const num = parsedNum && parsedNum > 0 ? parsedNum : undefined;
-      const targetSub = subId || (num ? 'constitucional' : 'otros');
-      const topicId = num ? `${targetSub}-${num}` : (rawTitle ? `pendiente_${Date.now()}` : 'pendiente_clasificacion');
+      const targetSub = subId || 'unknown';
+      const topicId = num && subId ? `${targetSub}-${num}` : (rawTitle ? `pendiente_${Date.now()}` : 'pendiente_clasificacion');
       const topicTitle = rawTitle || (num ? `Tema ${num} (${targetSub})` : 'Sesión pendiente de clasificar');
 
       resolvedTopics.push({
@@ -391,7 +203,7 @@ export function processIncomingAeroFocusPayload(
       : Math.round((calculatedEffectiveMinutes / 60) * 100) / 100;
 
   // 7. IDEMPOTENCIA DETERMINISTA (CERO DUPLICADOS)
-  const currentEvents = loadWebhookEvents();
+  const currentEvents: WebhookSyncRecord[] = [];
   let updatedEvents: WebhookSyncRecord[] = [];
 
   const newRecord: WebhookSyncRecord = {
@@ -430,40 +242,6 @@ export function processIncomingAeroFocusPayload(
     }
   };
 
-  if (isFullHistory) {
-    // CASO C: Sincronización Histórica Integral
-    // Fuente autoritativa total: reemplaza de forma limpia y conserva el nuevo snapshot
-    updatedEvents = [newRecord];
-  } else if (syncScope === 'daily' || eventName === 'daily_sync') {
-    // CASO B: Cierre Diario Consolidado
-    // Reconcilia la fecha: elimina vuelos parciales o repetidos de esa misma fecha e inserta la verdad consolidada
-    updatedEvents = currentEvents.filter(e => e.date !== sessionDate && e.flightId !== flightId);
-    updatedEvents.unshift(newRecord);
-  } else {
-    // CASO A: Vuelo Individual (study_session_completed / single_session)
-    // UPSERT por flightId: si existe, reemplaza; si no, inserta al frente
-    const existingIndex = currentEvents.findIndex(e => e.flightId === flightId);
-    if (existingIndex >= 0) {
-      updatedEvents = [...currentEvents];
-      updatedEvents[existingIndex] = newRecord;
-    } else {
-      updatedEvents = [newRecord, ...currentEvents];
-    }
-  }
-
-  saveWebhookEvents(updatedEvents);
-
-  // Buffer de memoria para inspección en tiempo real
-  const buffer = globalThis.__wellsprep_sessions || [];
-  const existingBufIdx = buffer.findIndex(b => b.id === flightId);
-  if (existingBufIdx >= 0) {
-    buffer[existingBufIdx] = { id: flightId, receivedAt: new Date().toISOString(), payload };
-  } else {
-    buffer.unshift({ id: flightId, receivedAt: new Date().toISOString(), payload });
-  }
-  if (buffer.length > 50) buffer.pop();
-  globalThis.__wellsprep_sessions = buffer;
-
   // 8. Respuesta estandarizada requerida por AeroFocus Pro (Sección 5)
   const avgPace = Number(
     payload.avgMinutesPerPage ??
@@ -479,8 +257,8 @@ export function processIncomingAeroFocusPayload(
     success: true,
     synced: true,
     status: 'ok',
-    quarantined: false,
-    isQuarantined: false,
+    quarantined: true,
+    isQuarantined: true,
     schemaVersion: '2.2.0',
     receivedEvent: eventName,
     transactionId: transactionId,
@@ -493,7 +271,7 @@ export function processIncomingAeroFocusPayload(
     avgMinutesPerPage: avgPace,
     plsemaAssigned: Boolean(plsemaRoot || resolvedTopics.some(t => Boolean(t.plsema))),
     globalAnalyticsUpdated: Boolean(analyticsSnapshot),
-    message: payload.message || `Aterrizaje sincronizado con éxito. ${calculatedEffectiveHours}h netas incorporadas en WellsPrep`
+    message: 'Transmisión recibida en cuarentena; las sesiones requieren validación.'
   };
 
   return {

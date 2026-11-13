@@ -1,4 +1,8 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { onAuthStateChanged } from 'firebase/auth';
+import { auth, isFirebaseEmulator } from '../lib/firebase';
+import { authenticatedFetch, subscribeAuthenticatedEvents } from '../lib/authenticatedApi';
+import { allowedAeroFocusNotice } from '../lib/aeroFocusMessagePolicy';
 
 export interface AeroFocusSyncState {
   isConnected: boolean;
@@ -7,249 +11,58 @@ export interface AeroFocusSyncState {
   lastFlightId: string | null;
 }
 
-/**
- * Hook de sincronización universal y reactivo en tiempo real entre AeroFocus Pro y WellsPrep:
- * 1. Conexión Server-Sent Events (SSE) a '/api/webhook/stream' con reconexión automática y latencia cero.
- * 2. Canal entre pestañas / ventanas en el mismo navegador (BroadcastChannel 'wellsprep_sync_bus').
- * 3. Polling adaptativo de respaldo a '/api/webhook/aerofocus' y '/api/webhook/events'.
- */
+/** Notifications can only cause an authenticated reload. Raw browser messages
+ * are never authorization to create records or confirmation of incorporation. */
 export function useAeroFocusSync(onNewSession?: (session: any) => void) {
-  const onNewSessionRef = useRef(onNewSession);
-  onNewSessionRef.current = onNewSession;
-
-  const [syncState, setSyncState] = useState<AeroFocusSyncState>({
-    isConnected: false,
-    connectionMode: 'connecting',
-    lastFlightTime: null,
-    lastFlightId: null,
-  });
-
-  // Registro de identificadores procesados para garantizar idempotencia
-  const processedIdsRef = useRef<Set<string>>(new Set());
-
-  const handleIncomingPayload = useCallback((payload: any) => {
-    if (!payload) return;
-    const raw = payload.payload || payload;
-    const flightId = String(raw.flightId || raw.transactionId || raw.id || '');
-
-    // Throttle duplicate payloads by flightId within a 15-second window only
-    if (flightId) {
+  const callback = useRef(onNewSession); callback.current = onNewSession;
+  const [uid, setUid] = useState<string | null>(auth.currentUser?.uid || null);
+  const [state,setState] = useState<AeroFocusSyncState>({isConnected:false,connectionMode:'connecting',lastFlightTime:null,lastFlightId:null});
+  useEffect(()=>onAuthStateChanged(auth,user=>setUid(user?.uid||null)),[]);
+  useEffect(()=>{
+    setState({isConnected:false,connectionMode:'connecting',lastFlightTime:null,lastFlightId:null});
+    if(!uid || isFirebaseEmulator)return;
+    let stopped=false, running=false;
+    const seen=new Set<string>();
+    const reload=async()=>{
+      if(stopped||running||auth.currentUser?.uid!==uid)return;
+      running=true;
       try {
-        const key = `wp_af_processed_${flightId}`;
-        const prev = sessionStorage.getItem(key);
-        if (prev && Date.now() - Number(prev) < 15000) {
-          return;
+        const response=await authenticatedFetch('/api/webhook/events?status=pending&limit=200');
+        if(!response.ok)throw new Error('Sync unavailable');
+        const data=await response.json();
+        if(stopped||auth.currentUser?.uid!==uid)return;
+        setState(previous=>({...previous,isConnected:true}));
+        for(const event of Array.isArray(data.events)?data.events:[]){
+          if(event.userId!==uid||typeof event.id!=='string'||seen.has(event.id))continue;
+          seen.add(event.id);setState(previous=>({...previous,lastFlightTime:new Date().toLocaleTimeString(),lastFlightId:event.flightId||event.id}));
+          callback.current?.(event);
         }
-        sessionStorage.setItem(key, String(Date.now()));
-      } catch {}
-    }
-
-    setSyncState(prev => ({
-      ...prev,
-      lastFlightTime: new Date().toLocaleTimeString(),
-      lastFlightId: flightId || 'Vuelo Recibido',
-    }));
-
-    onNewSessionRef.current?.(raw);
-  }, []);
-
-  useEffect(() => {
-    let sse: EventSource | null = null;
-    let channel: BroadcastChannel | null = null;
-    let aeroChannel: BroadcastChannel | null = null;
-    let pollInterval: any = null;
-    let reconnectTimeout: any = null;
-    let isMounted = true;
-
-    const emitAckToAeroFocus = (flightId?: string) => {
-      const ackPayload = {
-        type: 'AEROFOCUS_SYNC_CONFIRMED',
-        status: 'ok',
-        synced: true,
-        quarantined: false,
-        isQuarantined: false,
-        flightId: flightId || 'live',
-        timestamp: new Date().toISOString(),
-        message: 'Aterrizaje sincronizado e integrado con éxito en WellsPrep'
-      };
-      try {
-        channel?.postMessage(ackPayload);
-        channel?.postMessage({ ...ackPayload, type: 'WELLSPREP_SYNC_ACK' });
-        channel?.postMessage({ ...ackPayload, type: 'WELLSPREP_TOUCHDOWN_ACK' });
-        aeroChannel?.postMessage(ackPayload);
-        aeroChannel?.postMessage({ ...ackPayload, type: 'WELLSPREP_SYNC_ACK' });
-        if (typeof window !== 'undefined') {
-          window.postMessage(ackPayload, '*');
-          window.postMessage({ ...ackPayload, type: 'WELLSPREP_SYNC_ACK' }, '*');
-        }
-      } catch {}
+      }catch{if(!stopped)setState(previous=>({...previous,isConnected:false,connectionMode:'polling'}));}
+      finally{running=false;}
     };
-
-    // 1. Canales entre pestañas (BroadcastChannel) y window.postMessage
-    try {
-      if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
-        channel = new BroadcastChannel('wellsprep_sync_bus');
-        channel.onmessage = (event) => {
-          if (
-            event.data?.type === 'AEROFOCUS_TOUCHDOWN_SYNC' ||
-            event.data?.type === 'AEROFOCUS_WELLSPREP_SYNC'
-          ) {
-            const raw = event.data?.payload || event.data;
-            handleIncomingPayload(raw);
-            emitAckToAeroFocus(raw?.flightId || raw?.id);
-          }
-        };
-
-        aeroChannel = new BroadcastChannel('aerofocus_wellsprep_channel');
-        aeroChannel.onmessage = (event) => {
-          if (
-            event.data?.type === 'AEROFOCUS_WELLSPREP_SYNC' ||
-            event.data?.type === 'AEROFOCUS_WELLSPREP_DAILY_SYNC' ||
-            event.data?.type === 'AEROFOCUS_TOUCHDOWN_SYNC'
-          ) {
-            const raw = event.data.payload || event.data;
-            handleIncomingPayload(raw);
-            emitAckToAeroFocus(raw?.flightId || raw?.id);
-          }
-        };
-      }
-    } catch {}
-
-    const handleWindowMessage = (event: MessageEvent) => {
-      if (
-        event.data?.type === 'AEROFOCUS_WELLSPREP_SYNC' ||
-        event.data?.type === 'AEROFOCUS_WELLSPREP_DAILY_SYNC' ||
-        event.data?.type === 'AEROFOCUS_TOUCHDOWN_SYNC'
-      ) {
-        const raw = event.data.payload || event.data;
-        handleIncomingPayload(raw);
-        emitAckToAeroFocus(raw?.flightId || raw?.id);
-      }
-    };
-    if (typeof window !== 'undefined') {
-      window.addEventListener('message', handleWindowMessage);
-    }
-
-    // 2. Conexión reactiva por Server-Sent Events (SSE)
-    const connectSSE = () => {
-      if (!isMounted || typeof window === 'undefined' || typeof EventSource === 'undefined') return;
-
-      try {
-        sse = new EventSource('/api/webhook/stream');
-
-        sse.onopen = () => {
-          if (!isMounted) return;
-          setSyncState(prev => ({
-            ...prev,
-            isConnected: true,
-            connectionMode: 'sse',
-          }));
-        };
-
-        sse.onmessage = (event) => {
-          if (!isMounted) return;
-          try {
-            const data = JSON.parse(event.data);
-            if (data?.type === 'ping') return;
-            if (data?.type === 'connected') {
-              setSyncState(prev => ({ ...prev, isConnected: true, connectionMode: 'sse' }));
-              return;
-            }
-
-            // Transmisión de vuelo recibida por el webhook
-            if (data && (data.id || data.flightId || data.topics)) {
-              handleIncomingPayload(data);
-            }
-          } catch {}
-        };
-
-        sse.onerror = () => {
-          if (!isMounted) return;
-          if (sse) {
-            sse.close();
-            sse = null;
-          }
-          setSyncState(prev => ({
-            ...prev,
-            isConnected: false,
-            connectionMode: 'polling',
-          }));
-          // Reintento exponencial suave tras 5 segundos
-          reconnectTimeout = setTimeout(connectSSE, 5000);
-        };
-      } catch {
-        setSyncState(prev => ({ ...prev, isConnected: false, connectionMode: 'polling' }));
-      }
-    };
-
-    connectSSE();
-
-    // 3. Heartbeat de conectividad y sondeo adaptativo (latencia cero sin sobrecargar la red)
-    const checkServer = async () => {
-      if (!isMounted || (typeof document !== 'undefined' && document.visibilityState === 'hidden')) return;
-      try {
-        const res = await fetch('/api/webhook/events?status=pending&limit=10');
-        if (res.ok) {
-          const data = await res.json();
-          setSyncState(prev => ({ ...prev, isConnected: true }));
-          const pendingEvents = data.events || [];
-          if (Array.isArray(pendingEvents)) {
-            for (const ev of pendingEvents) {
-              const fId = String(ev.flightId || ev.transactionId || ev.id || '');
-              if (fId && !processedIdsRef.current.has(fId)) {
-                handleIncomingPayload(ev);
-              }
-            }
-          }
-        }
-      } catch {
-        // Red no disponible temporalmente
-      }
-    };
-
-    const initialTimer = setTimeout(checkServer, 1000);
-    // Polling adaptativo cada 8s como salvaguarda
-    pollInterval = setInterval(checkServer, 8000);
-
-    const handleVisibility = () => {
-      if (document.visibilityState === 'visible') {
-        checkServer();
-      }
-    };
-    if (typeof window !== 'undefined') {
-      document.addEventListener('visibilitychange', handleVisibility);
-      window.addEventListener('focus', checkServer);
-    }
-
-    return () => {
-      isMounted = false;
-      clearTimeout(initialTimer);
-      clearTimeout(reconnectTimeout);
-      clearInterval(pollInterval);
-      if (channel) channel.close();
-      if (aeroChannel) aeroChannel.close();
-      if (typeof window !== 'undefined') {
-        window.removeEventListener('message', handleWindowMessage);
-        document.removeEventListener('visibilitychange', handleVisibility);
-        window.removeEventListener('focus', checkServer);
-      }
-      if (sse) sse.close();
-    };
-  }, [handleIncomingPayload]);
-
-  return syncState;
+    const closeStream=subscribeAuthenticatedEvents(event=>{
+      if(event?.type==='connected')setState(previous=>({...previous,isConnected:true,connectionMode:'sse'}));
+      if(event?.type==='quarantine_updated')void reload();
+    },()=>{if(!stopped)setState(previous=>({...previous,isConnected:false,connectionMode:'polling'}));});
+    const origins=String((import.meta as ImportMeta & {env?:Record<string,string>}).env?.VITE_AEROFOCUS_ALLOWED_ORIGINS||'').split(',').map(x=>x.trim()).filter(Boolean);
+    const notice=(event:MessageEvent)=>{if(allowedAeroFocusNotice(event.origin,event.data,uid,window.location.origin,origins))void reload();};
+    window.addEventListener('message',notice);
+    const channel=typeof BroadcastChannel!=='undefined'?new BroadcastChannel(`wellsprep_sync_bus:${uid}`):undefined;
+    if(channel)channel.onmessage=event=>{if(event.data?.userId===uid&&event.data?.type==='AEROFOCUS_TOUCHDOWN_SYNC')void reload();};
+    const timer=setInterval(()=>{if(document.visibilityState!=='hidden')void reload();},8000);
+    void reload();
+    return()=>{stopped=true;closeStream();channel?.close();clearInterval(timer);window.removeEventListener('message',notice);};
+  },[uid]);
+  return state;
 }
 
-/**
- * Función auxiliar para simular un aterrizaje en tiempo real y probar la pasarela
- */
 export async function simulateAeroFocusFlight(customTopicNumber: number = 1): Promise<{ success: boolean; message: string }> {
+  if (!isFirebaseEmulator) return { success: false, message: 'Las simulaciones solo están disponibles en el entorno aislado.' };
   try {
-    const res = await fetch('/api/webhook/aerofocus', {
+    const res = await authenticatedFetch('/api/webhook/aerofocus', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': 'Bearer wp_qLXi6WFkFY_live',
       },
       body: JSON.stringify({
         source: 'AeroFocus Pro',

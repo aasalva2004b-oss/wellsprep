@@ -1,4 +1,5 @@
-import React, { useState, useMemo, useEffect } from "react";
+import { authenticatedFetch } from '../lib/authenticatedApi';
+import React, { useState, useMemo, useEffect, useId, useRef } from "react";
 import {
   X,
   RefreshCw,
@@ -47,14 +48,19 @@ import { toast } from "sonner";
 import { cn } from "../lib/utils";
 import { WebhookSyncRecord, WellsprepAnalyticsV2, WebhookResolvedTopic } from "../lib/webhookTypes";
 import { simulateAeroFocusFlight } from "../hooks/useAeroFocusSync";
+import { useDialogAccessibility } from "../hooks/useDialogAccessibility";
+import { parseQuarantineTopicObservation } from "../lib/quarantineTopicInput";
+import { sessionDurationMinutes } from "../lib/canonicalTopicService";
+import { reportedMetric, reportedNumber, reportedPhaseMinutes, reportedRecords, reportedText } from "../lib/importedAnalyticsPresentation";
 
 interface SyncControlCenterDialogProps {
   onClose: () => void;
+  returnFocusRef?: React.RefObject<HTMLElement | null>;
 }
 
 type ControlCenterTab = "quarantine" | "sessions" | "analytics" | "webhook" | "raw_logs";
 
-export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProps) {
+export function SyncControlCenterDialog({ onClose, returnFocusRef }: SyncControlCenterDialogProps) {
   const {
     user,
     recentSessions = [],
@@ -63,8 +69,6 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
     quickUpdateSessionDifficulty,
     reconcileAllTopicsAndSessions,
     webhookToken,
-    purgeAllAeroFocusData,
-    deduplicateUserSessions,
     quarantinedEvents = [],
     isLoadingQuarantine,
     fetchQuarantinedEvents,
@@ -78,7 +82,6 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
     deleteQuarantineTopic,
     addQuarantineTopic,
     mergeQuarantineTopics,
-    cleanTestArtifacts,
   } = useFirebase();
 
   const [activeTab, setActiveTab] = useState<ControlCenterTab>("quarantine");
@@ -122,15 +125,24 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
   // Raw logs state
   const [rawEvents, setRawEvents] = useState<WebhookSyncRecord[]>([]);
   const [isLoadingLogs, setIsLoadingLogs] = useState(false);
+  const titleId = useId();
+  const pasteTitleId = useId();
+  const reassignTitleId = useId();
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const pasteInputRef = useRef<HTMLTextAreaElement>(null);
+  const reassignInputRef = useRef<HTMLInputElement>(null);
+  const dialogRef = useDialogAccessibility<HTMLDivElement>({ onClose, returnFocusRef, initialFocusRef: closeButtonRef });
+  const pasteDialogRef = useDialogAccessibility<HTMLDivElement>({ isOpen: isPasteModalOpen, onClose: () => setIsPasteModalOpen(false), initialFocusRef: pasteInputRef, disabled: isImportingPaste });
+  const reassignDialogRef = useDialogAccessibility<HTMLDivElement>({ isOpen: !!reassigningItem, onClose: () => setReassigningItem(null), initialFocusRef: reassignInputRef });
 
   // Fetch raw webhook events
   const fetchLogs = async () => {
     try {
       setIsLoadingLogs(true);
-      const res = await fetch("/api/webhook/events?limit=30");
+      const res = await authenticatedFetch("/api/webhook/events?limit=30");
       if (res.ok) {
         const data = await res.json();
-        setRawEvents(data.events || []);
+        setRawEvents(reportedRecords(data.events) as unknown as WebhookSyncRecord[]);
       }
     } catch (e) {
       console.error("Error fetching logs:", e);
@@ -142,11 +154,13 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
   // Global Analytics v2.2.0 state
   const [globalAnalytics, setGlobalAnalytics] = useState<WellsprepAnalyticsV2 | null>(null);
   const [isLoadingAnalytics, setIsLoadingAnalytics] = useState(false);
+  const reportedPages = reportedRecords(globalAnalytics?.pagesPace?.pages);
+  const reportedReviews = reportedRecords(globalAnalytics?.memoryDecay?.topPriorityReviewList);
 
   const fetchAnalytics = async () => {
     try {
       setIsLoadingAnalytics(true);
-      const res = await fetch("/api/webhook/analytics");
+      const res = await authenticatedFetch("/api/webhook/analytics");
       if (res.ok) {
         const data = await res.json();
         if (data?.analytics) {
@@ -249,7 +263,7 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
     let pendingDiffCount = 0;
 
     recentSessions.forEach((s) => {
-      const mins = s.durationMinutes || s.durationReal || Math.round((s.effectiveHours || 0) * 60) || 0;
+      const mins = sessionDurationMinutes(s);
       totalMinutes += mins;
       const isAero = s.source === "aerofocus" || s.source === "aerofocus_pro";
       if (isAero) aeroCount++;
@@ -301,18 +315,10 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
 
   // Handle Master Reconciliation
   const handleReconcile = async () => {
-    if (
-      !confirm(
-        "¿Deseas ejecutar la Reconciliación Maestra? Esto auditará todas las sesiones registradas, eliminará sesiones duplicadas y recalculará las horas exactas de cada tema."
-      )
-    ) {
-      return;
-    }
     try {
       setIsReconciling(true);
-      await deduplicateUserSessions(false);
       await reconcileAllTopicsAndSessions();
-      toast.success("✅ Reconciliación completada con éxito.");
+      toast.success("Vista actualizada desde las sesiones guardadas.");
     } catch (e: any) {
       console.error(e);
       toast.error("Error al reconciliar: " + (e?.message || e));
@@ -359,11 +365,10 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
     try {
       setIsTestingWebhook(true);
       // Call lightweight ping first to guarantee zero Vercel serverless crashes
-      const res = await fetch("/api/webhook/ping", {
+      const res = await authenticatedFetch("/api/webhook/ping", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${webhookToken || "wp_qLXi6WFkFY_live"}`,
         },
         body: JSON.stringify({ isTest: true }),
       });
@@ -499,8 +504,8 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
       : "https://wellsprep-ltii.vercel.app/api/webhook/aerofocus";
 
   return (
-    <div className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-md flex items-center justify-center p-0 sm:p-4 md:p-6 overflow-hidden">
-      <div className="bg-white rounded-none sm:rounded-3xl shadow-2xl border-0 sm:border border-slate-200/80 w-full max-w-5xl h-full sm:h-[92vh] max-h-none sm:max-h-[850px] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+    <div className="fixed inset-0 z-50 bg-slate-950/50 backdrop-blur-sm flex items-center justify-center p-0 sm:p-4 md:p-6 overflow-hidden">
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1} className="bg-white rounded-none sm:rounded-3xl shadow-2xl border-0 sm:border border-slate-200/80 w-full max-w-5xl h-[100dvh] sm:h-[92dvh] max-h-[100dvh] sm:max-h-[850px] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-200">
         
         {/* TOP HEADER */}
         <div className="px-3.5 py-2.5 sm:px-6 sm:py-3.5 border-b border-slate-100 bg-white flex items-center justify-between gap-2 shrink-0">
@@ -510,16 +515,12 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
             </div>
             <div className="min-w-0">
               <div className="flex items-center gap-2">
-                <h1 className="text-sm sm:text-base font-bold text-slate-900 tracking-tight font-serif truncate">
+                <h2 id={titleId} className="text-base sm:text-lg font-bold text-slate-900 tracking-tight font-serif">
                   Centro de Control · AeroFocus
-                </h1>
-                <span className="hidden sm:inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-medium bg-emerald-50 text-emerald-700 border border-emerald-200/60 shrink-0">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                  Enlace Activo
-                </span>
+                </h2>
               </div>
               <p className="hidden sm:block text-xs text-slate-500 mt-0.5 truncate">
-                Conciliación y auditoría de sesiones para tu expediente oficial de Judicatura
+                Revisa importaciones y sesiones antes de incorporarlas al historial.
               </p>
             </div>
           </div>
@@ -530,16 +531,19 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
               onClick={handleReconcile}
               disabled={isReconciling}
               className="px-2.5 sm:px-3.5 py-1.5 rounded-xl text-xs font-semibold bg-slate-100 hover:bg-slate-200 text-slate-800 transition-colors flex items-center gap-1 disabled:opacity-50"
-              title="Audita todas las sesiones y recalcula determinísticamente horas, vueltas y temas"
+              title="Actualizar la vista desde las sesiones guardadas"
             >
               <RefreshCw size={12} className={cn(isReconciling && "animate-spin text-slate-600")} />
-              <span className="hidden sm:inline">{isReconciling ? "Reconciliando..." : "Reconciliar Expediente"}</span>
-              <span className="sm:hidden">{isReconciling ? "..." : "Reconciliar"}</span>
+              <span className="hidden sm:inline">{isReconciling ? "Actualizando..." : "Actualizar vista"}</span>
+              <span className="sm:hidden">{isReconciling ? "..." : "Actualizar"}</span>
             </button>
 
             <button
+              ref={closeButtonRef}
+              type="button"
+              aria-label="Cerrar centro de sincronización"
               onClick={onClose}
-              className="w-8 h-8 rounded-full flex items-center justify-center text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors"
+              className="w-11 h-11 rounded-full flex items-center justify-center text-slate-600 hover:text-slate-900 hover:bg-slate-100 transition-colors shrink-0"
               title="Cerrar panel"
             >
               <X size={18} />
@@ -557,7 +561,7 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
           </div>
 
           <div className="px-3.5 py-2 rounded-xl bg-white border border-slate-200/60 shadow-2xs">
-            <div className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider truncate">Horas Auditadas</div>
+            <div className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider truncate">Tiempo registrado</div>
             <div className="text-lg font-bold font-mono tabular-nums text-blue-600 mt-0.5">
               {metrics.totalHours} <span className="text-xs font-normal text-slate-400 font-sans">h netas</span>
             </div>
@@ -646,7 +650,7 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
               )}
             >
               <Brain size={14} className={activeTab === "analytics" ? "text-purple-600" : "text-slate-400"} />
-              <span>Analítica Pro v2.2</span>
+              <span>Analítica</span>
               {globalAnalytics && (
                 <span className="w-1.5 h-1.5 rounded-full bg-purple-500 animate-pulse" />
               )}
@@ -738,17 +742,9 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                 </button>
 
                 <button
-                  onClick={cleanTestArtifacts}
-                  className="px-2.5 sm:px-3 py-1 sm:py-1.5 rounded-xl text-xs font-semibold bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200/80 transition-colors flex items-center gap-1 whitespace-nowrap"
-                  title="Eliminar automáticamente cualquier vuelo de prueba o Tema 1 de test"
-                >
-                  <Sparkles size={11} className="text-amber-600" />
-                  <span>Limpiar Test</span>
-                </button>
-
-                <button
                   onClick={() => fetchQuarantinedEvents()}
                   disabled={isLoadingQuarantine}
+                  aria-label="Actualizar importaciones pendientes"
                   className="p-1 sm:p-1.5 rounded-xl text-slate-500 hover:text-slate-800 hover:bg-slate-100 border border-slate-200 transition-colors shrink-0"
                   title="Refrescar lista"
                 >
@@ -965,14 +961,12 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                         <div className="p-4 space-y-3">
                           {(evt.topics || []).map((t, idx) => {
                             const info = getTopicInfo(t.resolvedTopicId, t.resolvedTopicTitle);
-                            const durationMins =
-                              t.effectiveMinutes || Math.round((t.effectiveHours || 0) * 60) || 45;
+                            const durationMins = [t.effectiveMinutes, Number(t.effectiveHours) * 60]
+                              .find(value => typeof value === 'number' && Number.isFinite(value) && value > 0) ?? null;
                             const currentDiff =
                               t.dificultadReal !== undefined ? t.dificultadReal : t.difficulty;
-                            const completesVuelta =
-                              t.completesVuelta !== undefined
-                                ? t.completesVuelta
-                                : t.modality === "repaso" || t.modality === "canto";
+                            const canCompleteVuelta = ['repaso', 'canto', 'cante', 'simulacro'].includes(t.modality);
+                            const completesVuelta = canCompleteVuelta && t.completesVuelta === true;
 
                             return (
                               <div
@@ -1047,27 +1041,27 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                                       <span className="text-slate-400 font-medium text-[11px] uppercase tracking-wider">Tiempo:</span>
                                       <div className="flex items-center gap-1">
                                         <button
-                                          onClick={() =>
-                                            updateQuarantineTopic(evt.id, idx, {
-                                              effectiveMinutes: Math.max(5, durationMins - 5),
-                                              effectiveHours: Math.max(5, durationMins - 5) / 60,
-                                            })
-                                          }
-                                          className="w-6 h-6 rounded-md bg-white border border-slate-200 hover:bg-slate-100 active:scale-95 text-slate-700 flex items-center justify-center font-bold text-xs"
+                                          type="button"
+                                          aria-label={`Restar cinco minutos al tema ${info.number}`}
+                                          disabled={durationMins === null || durationMins <= 5}
+                                          onClick={() => {
+                                            if (durationMins !== null && durationMins > 5) updateQuarantineTopic(evt.id, idx, { effectiveMinutes: durationMins - 5, effectiveHours: (durationMins - 5) / 60 });
+                                          }}
+                                          className="w-11 h-11 rounded-lg bg-white border border-slate-200 hover:bg-slate-100 active:scale-95 text-slate-700 flex items-center justify-center font-bold text-sm disabled:opacity-40"
                                         >
                                           -
                                         </button>
                                         <span className="font-mono font-bold text-slate-900 px-1.5 tabular-nums text-xs">
-                                          {durationMins} min
+                                          {durationMins === null ? 'Sin tiempo' : `${durationMins} min`}
                                         </span>
                                         <button
-                                          onClick={() =>
-                                            updateQuarantineTopic(evt.id, idx, {
-                                              effectiveMinutes: durationMins + 5,
-                                              effectiveHours: (durationMins + 5) / 60,
-                                            })
-                                          }
-                                          className="w-6 h-6 rounded-md bg-white border border-slate-200 hover:bg-slate-100 active:scale-95 text-slate-700 flex items-center justify-center font-bold text-xs"
+                                          type="button"
+                                          aria-label={`Añadir cinco minutos al tema ${info.number}`}
+                                          disabled={durationMins === null || durationMins > 1435}
+                                          onClick={() => {
+                                            if (durationMins !== null && durationMins <= 1435) updateQuarantineTopic(evt.id, idx, { effectiveMinutes: durationMins + 5, effectiveHours: (durationMins + 5) / 60 });
+                                          }}
+                                          className="w-11 h-11 rounded-lg bg-white border border-slate-200 hover:bg-slate-100 active:scale-95 text-slate-700 flex items-center justify-center font-bold text-sm disabled:opacity-40"
                                         >
                                           +
                                         </button>
@@ -1078,6 +1072,7 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                                     <label className="flex items-center gap-1.5 cursor-pointer select-none">
                                       <input
                                         type="checkbox"
+                                        disabled={!canCompleteVuelta}
                                         checked={completesVuelta}
                                         onChange={(e) =>
                                           updateQuarantineTopic(evt.id, idx, {
@@ -1087,7 +1082,7 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                                         className="rounded text-emerald-600 focus:ring-emerald-500 w-3.5 h-3.5"
                                       />
                                       <span className={cn("text-[11px] font-semibold", completesVuelta ? "text-emerald-700" : "text-slate-500")}>
-                                        {completesVuelta ? "✓ Vuelta Oficial" : "Parcial"}
+                                        {completesVuelta ? "Vuelta completa" : canCompleteVuelta ? "Vuelta sin completar" : 'No suma vuelta'}
                                       </span>
                                     </label>
                                   </div>
@@ -1101,6 +1096,9 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                                         return (
                                           <button
                                             key={num}
+                                            type="button"
+                                            aria-label={`Dificultad ${num} de 10 para el tema ${info.number}`}
+                                            aria-pressed={isSelected}
                                             onClick={() =>
                                               updateQuarantineTopic(evt.id, idx, {
                                                 difficulty: num,
@@ -1108,7 +1106,7 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                                               })
                                             }
                                             className={cn(
-                                              "w-6 h-6 rounded-md text-[11px] font-bold font-mono transition-colors flex items-center justify-center shrink-0",
+                                              "w-11 h-11 rounded-lg text-sm font-bold font-mono transition-colors flex items-center justify-center shrink-0",
                                               isSelected
                                                 ? "bg-slate-900 text-white shadow-2xs"
                                                 : "bg-white text-slate-600 border border-slate-200 hover:bg-slate-100"
@@ -1140,12 +1138,12 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                                       {t.plsema && (
                                         <div className="flex items-center gap-1 text-[10px] font-mono">
                                           <span className="text-slate-400 font-bold uppercase text-[9px]">PLSEMA:</span>
-                                          <span className="px-1 py-0.2 rounded bg-slate-100 text-slate-600" title="Prelectura">P:{t.plsema.minutes?.prelectura || 0}m</span>
-                                          <span className="px-1 py-0.2 rounded bg-slate-100 text-slate-600" title="Lectura">L:{t.plsema.minutes?.lectura || 0}m</span>
-                                          <span className="px-1 py-0.2 rounded bg-slate-100 text-slate-600" title="Subrayado">S:{t.plsema.minutes?.subrayado || 0}m</span>
-                                          <span className="px-1 py-0.2 rounded bg-slate-100 text-slate-600" title="Esquema">E:{t.plsema.minutes?.esquema || 0}m</span>
-                                          <span className="px-1 py-0.2 rounded bg-emerald-50 text-emerald-700 font-bold" title="Memorizar">M:{t.plsema.minutes?.memorizar || 0}m</span>
-                                          <span className="px-1 py-0.2 rounded bg-purple-50 text-purple-700 font-bold" title="Cantar">A:{t.plsema.minutes?.cantar || 0}m</span>
+                                          <span className="px-1 py-0.2 rounded bg-slate-100 text-slate-600" title="Prelectura">P:{reportedMetric(reportedPhaseMinutes(t.plsema, 'prelectura'), ' min', 1)}</span>
+                                          <span className="px-1 py-0.2 rounded bg-slate-100 text-slate-600" title="Lectura">L:{reportedMetric(reportedPhaseMinutes(t.plsema, 'lectura'), ' min', 1)}</span>
+                                          <span className="px-1 py-0.2 rounded bg-slate-100 text-slate-600" title="Subrayado">S:{reportedMetric(reportedPhaseMinutes(t.plsema, 'subrayado'), ' min', 1)}</span>
+                                          <span className="px-1 py-0.2 rounded bg-slate-100 text-slate-600" title="Esquema">E:{reportedMetric(reportedPhaseMinutes(t.plsema, 'esquema'), ' min', 1)}</span>
+                                          <span className="px-1 py-0.2 rounded bg-emerald-50 text-emerald-700 font-bold" title="Memorizar">M:{reportedMetric(reportedPhaseMinutes(t.plsema, 'memorizar'), ' min', 1)}</span>
+                                          <span className="px-1 py-0.2 rounded bg-purple-50 text-purple-700 font-bold" title="Cantar">A:{reportedMetric(reportedPhaseMinutes(t.plsema, 'cantar'), ' min', 1)}</span>
                                         </div>
                                       )}
                                     </div>
@@ -1177,6 +1175,7 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
               <div className="relative flex-1 min-w-[200px] max-w-sm">
                 <Search size={14} className="absolute left-3 top-2.5 text-slate-400" />
                 <input
+                  aria-label="Buscar sesiones por tema, número o notas"
                   type="text"
                   placeholder="Buscar por tema, número o notas..."
                   value={searchQuery}
@@ -1185,6 +1184,8 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                 />
                 {searchQuery && (
                   <button
+                    type="button"
+                    aria-label="Borrar búsqueda de sesiones"
                     onClick={() => setSearchQuery("")}
                     className="absolute right-2.5 top-2 text-slate-400 hover:text-slate-600"
                   >
@@ -1195,6 +1196,7 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
 
               <div className="flex flex-wrap items-center gap-2">
                 <select
+                  aria-label="Filtrar sesiones por materia"
                   value={subjectFilter}
                   onChange={(e) => setSubjectFilter(e.target.value)}
                   className="px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-700 focus:outline-none"
@@ -1208,6 +1210,7 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                 </select>
 
                 <select
+                  aria-label="Filtrar sesiones por origen"
                   value={sourceFilter}
                   onChange={(e) => setSourceFilter(e.target.value as any)}
                   className="px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-700 focus:outline-none"
@@ -1218,6 +1221,7 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                 </select>
 
                 <select
+                  aria-label="Filtrar sesiones por dificultad"
                   value={difficultyFilter}
                   onChange={(e) => setDifficultyFilter(e.target.value as any)}
                   className="px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-700 focus:outline-none"
@@ -1276,7 +1280,7 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                             <div className="text-[11px] text-slate-500 mt-0.5 flex items-center gap-2">
                               <span>{info.subjectName}</span>
                               <span>·</span>
-                              <span className="font-mono">{session.durationMinutes || 0} min</span>
+                              <span className="font-mono">{reportedMetric(sessionDurationMinutes(session) > 0 ? sessionDurationMinutes(session) : null, ' min', 1)}</span>
                               {session.notes && (
                                 <>
                                   <span>·</span>
@@ -1397,20 +1401,21 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                 </div>
               ) : (
                 <div className="space-y-6">
+                  <p className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-600">Estadísticas enviadas por AeroFocus. Los guiones indican datos no recibidos; estos indicadores externos no sustituyen las estimaciones de estudio y recuerdo de WellsPrep.</p>
                   {/* Top Stats Overview */}
                   <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                     <div className="p-4 rounded-2xl bg-white border border-slate-200 shadow-2xs">
                       <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Pureza de Foco</span>
                       <div className="text-xl font-bold font-mono text-slate-900 mt-1">
-                        {globalAnalytics.overview?.focusScoreAverage || globalAnalytics.overview?.purezaFocoGlobal || 98}%
+                        {reportedMetric(globalAnalytics.overview?.focusScoreAverage ?? globalAnalytics.overview?.purezaFocoGlobal, '%', 0, 100)}
                       </div>
-                      <span className="text-[10px] text-emerald-600 font-semibold">Sin distracciones</span>
+                      <span className="text-xs text-slate-500">Valor recibido de AeroFocus</span>
                     </div>
 
                     <div className="p-4 rounded-2xl bg-white border border-slate-200 shadow-2xs">
                       <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Ritmo de Asimilación</span>
                       <div className="text-xl font-bold font-mono text-indigo-700 mt-1">
-                        {(globalAnalytics.pagesPace?.avgMinutesPerPage || 15).toFixed(1)} <span className="text-xs font-normal">min/pág</span>
+                        {reportedMetric(globalAnalytics.pagesPace?.avgMinutesPerPage, '', 1)} <span className="text-xs font-normal">min/pág</span>
                       </div>
                       <span className="text-[10px] text-slate-500">Páginas de 1ª vuelta</span>
                     </div>
@@ -1419,7 +1424,7 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                       <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Racha de Estudio</span>
                       <div className="text-xl font-bold font-mono text-amber-600 mt-1 flex items-center gap-1">
                         <Flame size={18} className="text-amber-500 fill-amber-500" />
-                        <span>{globalAnalytics.overview?.streakDays || 1} días</span>
+                        <span>{reportedMetric(globalAnalytics.overview?.streakDays, ' días')}</span>
                       </div>
                       <span className="text-[10px] text-slate-500">Constancia activa</span>
                     </div>
@@ -1427,7 +1432,7 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                     <div className="p-4 rounded-2xl bg-white border border-slate-200 shadow-2xs">
                       <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Recuerdo Activo</span>
                       <div className="text-xl font-bold font-mono text-purple-700 mt-1">
-                        {Math.round(globalAnalytics.plsemaGlobal?.activeRecallRatio || 35)}%
+                        {reportedMetric(globalAnalytics.plsemaGlobal?.activeRecallRatio, '%', 0, 100)}
                       </div>
                       <span className="text-[10px] text-purple-600 font-semibold">Memorizar + Cantar</span>
                     </div>
@@ -1442,15 +1447,15 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                           <span>Metodología Cognitiva PLSEMA (Fases de Estudio)</span>
                         </h4>
                         <p className="text-[11px] text-slate-500 mt-0.5">
-                          Desglose al segundo entre asimilación pasiva y recuerdo activo (Active Recall).
+                          Distribución de tiempos recibidos. Una fase sin medida se muestra con un guion.
                         </p>
                       </div>
                       <div className="flex items-center gap-2">
                         <span className="px-2.5 py-1 rounded-lg text-xs font-bold bg-purple-50 text-purple-800 border border-purple-200">
-                          Recuerdo Activo: {Math.round(globalAnalytics.plsemaGlobal?.activeRecallRatio || 35)}%
+                          Recuerdo Activo: {reportedMetric(globalAnalytics.plsemaGlobal?.activeRecallRatio, '%', 0, 100)}
                         </span>
                         <span className="px-2.5 py-1 rounded-lg text-xs font-medium bg-slate-100 text-slate-600">
-                          Pasivo: {Math.round(globalAnalytics.plsemaGlobal?.passiveRatio || 50)}%
+                          Pasivo: {reportedMetric(globalAnalytics.plsemaGlobal?.passiveRatio, '%', 0, 100)}
                         </span>
                       </div>
                     </div>
@@ -1465,11 +1470,11 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                         { key: "memorizar", label: "M · Memorizar", bg: "bg-purple-50 text-purple-900 border-purple-200 font-bold" },
                         { key: "cantar", label: "A · Cantar", bg: "bg-rose-50 text-rose-900 border-rose-200 font-bold" },
                       ].map((phase) => {
-                        const mins = globalAnalytics.plsemaGlobal?.phaseMinutes?.[phase.key as any] || 0;
+                        const mins = reportedPhaseMinutes(globalAnalytics.plsemaGlobal, phase.key);
                         return (
                           <div key={phase.key} className={cn("p-2.5 rounded-xl border text-center", phase.bg)}>
                             <div className="text-[10px] font-bold uppercase">{phase.label}</div>
-                            <div className="text-sm font-black font-mono mt-1">{mins}m</div>
+                            <div className="text-sm font-black font-mono mt-1">{reportedMetric(mins, ' min', 1)}</div>
                           </div>
                         );
                       })}
@@ -1482,10 +1487,10 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                       <div className="border-b border-slate-100 pb-3">
                         <h4 className="text-xs font-bold text-slate-900 uppercase tracking-wider flex items-center gap-1.5">
                           <Clock size={14} className="text-indigo-600" />
-                          <span>Cronobiología & Curva de Fatiga Cognitiva</span>
+                          <span>Horario y distracciones informados</span>
                         </h4>
                         <p className="text-[11px] text-slate-500 mt-0.5">
-                          Calibrado en base a tus horas de máxima retención y minutos de primera distracción.
+                          Datos enviados por AeroFocus. Los guiones indican medidas no recibidas.
                         </p>
                       </div>
 
@@ -1493,32 +1498,32 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                         <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200/80">
                           <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Hora Punta de Atención</span>
                           <div className="text-base font-bold font-mono text-slate-900 mt-1">
-                            {globalAnalytics.chronobiology.peakHour !== undefined ? `${globalAnalytics.chronobiology.peakHour}:00h` : "10:00h"}
+                            {reportedNumber(globalAnalytics.chronobiology.peakHour, 23) !== null ? `${globalAnalytics.chronobiology.peakHour}:00h` : '—'}
                           </div>
-                          <span className="text-[10px] text-indigo-600 font-medium">Bloque: {globalAnalytics.chronobiology.peakTimeBlock || "Mañana"}</span>
+                          <span className="text-[10px] text-indigo-600 font-medium">Bloque: {reportedText(globalAnalytics.chronobiology.peakTimeBlock)}</span>
                         </div>
 
                         <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200/80">
-                          <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Duración Óptima de Sesión</span>
+                          <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Duración sugerida por AeroFocus</span>
                           <div className="text-base font-bold font-mono text-slate-900 mt-1">
-                            {globalAnalytics.chronobiology.cognitiveFatigue?.recommendedSessionMinutes || 45} min
+                            {reportedMetric(globalAnalytics.chronobiology.cognitiveFatigue?.recommendedSessionMinutes, ' min')}
                           </div>
-                          <span className="text-[10px] text-slate-500">Antes de fatiga cognitiva</span>
+                          <span className="text-[10px] text-slate-500">Sugerencia recibida; no una medida de memoria</span>
                         </div>
 
                         <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200/80">
-                          <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Punto de Fuga de Foco</span>
+                          <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Primera distracción media</span>
                           <div className="text-base font-bold font-mono text-rose-700 mt-1">
-                            Minuto {globalAnalytics.chronobiology.cognitiveFatigue?.averageFirstDistractionMinute || 38}
+                            {reportedMetric(globalAnalytics.chronobiology.cognitiveFatigue?.averageFirstDistractionMinute, ' min')}
                           </div>
-                          <span className="text-[10px] text-slate-500">Caída inicial de concentración</span>
+                          <span className="text-[10px] text-slate-500">Promedio recibido de AeroFocus</span>
                         </div>
                       </div>
                     </div>
                   )}
 
                   {/* Section 3: Pages Pace Breakdown Table */}
-                  {globalAnalytics.pagesPace?.pages && globalAnalytics.pagesPace.pages.length > 0 && (
+                  {reportedPages.length > 0 && (
                     <div className="p-5 rounded-2xl bg-white border border-slate-200 shadow-2xs space-y-3">
                       <div className="flex items-center justify-between border-b border-slate-100 pb-2">
                         <div>
@@ -1527,11 +1532,11 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                             <span>Mapa de Densidad y Ritmo Página por Página</span>
                           </h4>
                           <p className="text-[11px] text-slate-500 mt-0.5">
-                            Tiempos netos auditados y clasificación de dificultad por página.
+                            Tiempos y clasificación de dificultad recibidos por página.
                           </p>
                         </div>
                         <span className="text-xs font-mono font-bold text-slate-600">
-                          {globalAnalytics.pagesPace.pages.length} páginas registradas
+                          {reportedPages.length} páginas registradas
                         </span>
                       </div>
 
@@ -1547,7 +1552,7 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                             </tr>
                           </thead>
                           <tbody className="divide-y divide-slate-100">
-                            {globalAnalytics.pagesPace.pages.slice(0, 20).map((pg, i) => (
+                            {reportedPages.slice(0, 20).map((pg, i) => (
                               <tr key={pg.pageKey || i} className="hover:bg-slate-50/80 transition-colors">
                                 <td className="py-2 px-3 font-mono font-bold text-slate-900">
                                   {pg.pageLabel || `Pág. ${pg.pageNumber}`}
@@ -1556,10 +1561,10 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                                   {pg.topicTitle || pg.tema || pg.subjectName}
                                 </td>
                                 <td className="py-2 px-3 font-mono text-slate-600">
-                                  {pg.effectiveMinutes} min ({pg.effectiveSeconds || pg.effectiveMinutes * 60}s)
+                                  {reportedMetric(pg.effectiveMinutes, ' min', 1)} ({reportedMetric(pg.effectiveSeconds ?? (reportedNumber(pg.effectiveMinutes) !== null ? pg.effectiveMinutes * 60 : null), ' s')})
                                 </td>
                                 <td className="py-2 px-3 font-mono font-bold text-indigo-700">
-                                  {(pg.minutesPerPage || pg.effectiveMinutes).toFixed(1)} min/pág
+                                  {reportedMetric(pg.minutesPerPage, ' min/pág', 1)}
                                 </td>
                                 <td className="py-2 px-3">
                                   <span className={cn(
@@ -1568,7 +1573,7 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                                     pg.densityTier === "densa" ? "bg-amber-50 text-amber-800 border border-amber-200" :
                                     "bg-blue-50 text-blue-700 border border-blue-200"
                                   )}>
-                                    {pg.densityTier || "media"}
+                                    {reportedText(pg.densityTier, 'Sin clasificar')}
                                   </span>
                                 </td>
                               </tr>
@@ -1586,21 +1591,21 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                         <div className="p-5 rounded-2xl bg-white border border-slate-200 shadow-2xs space-y-3">
                           <h4 className="text-xs font-bold text-slate-900 uppercase tracking-wider flex items-center gap-1.5">
                             <Brain size={14} className="text-indigo-600" />
-                            <span>Radar de Retención Ebbinghaus</span>
+                            <span>Señales de memoria recibidas</span>
                           </h4>
                           <div className="flex items-center justify-between p-3 rounded-xl bg-slate-50 border border-slate-200/80">
-                            <span className="text-xs font-medium text-slate-600">Salud General de Retención</span>
-                            <span className="text-lg font-bold font-mono text-emerald-600">
-                              {globalAnalytics.memoryDecay.overallRetentionHealthScore || 92}%
+                            <span className="text-xs font-medium text-slate-600">Índice informado por AeroFocus</span>
+                            <span className="text-lg font-bold font-mono text-slate-900">
+                              {reportedMetric(globalAnalytics.memoryDecay.overallRetentionHealthScore, '%', 0, 100)}
                             </span>
                           </div>
-                          {globalAnalytics.memoryDecay.topPriorityReviewList && globalAnalytics.memoryDecay.topPriorityReviewList.length > 0 && (
+                          {reportedReviews.length > 0 && (
                             <div className="space-y-1.5">
-                              <span className="text-[10px] font-bold uppercase text-slate-400">Repasos Prioritarios Recomendados</span>
-                              {globalAnalytics.memoryDecay.topPriorityReviewList.slice(0, 3).map((item, idx) => (
+                              <span className="text-[10px] font-bold uppercase text-slate-400">Sugerencias recibidas de AeroFocus</span>
+                              {reportedReviews.slice(0, 3).map((item, idx) => (
                                 <div key={idx} className="p-2 rounded-lg bg-rose-50/60 border border-rose-100 flex items-center justify-between text-xs">
-                                  <span className="font-medium text-rose-950 truncate max-w-[200px]">{item.topicTitle}</span>
-                                  <span className="text-[10px] font-bold text-rose-700">{item.daysSinceLastReview}d sin repaso</span>
+                                  <span className="font-medium text-rose-950 truncate max-w-[200px]">{reportedText(item.topicTitle, 'Tema sin identificar')}</span>
+                                  <span className="text-[10px] font-bold text-rose-700">{reportedMetric(item.daysSinceLastReview, ' días')} desde el repaso informado</span>
                                 </div>
                               ))}
                             </div>
@@ -1612,21 +1617,21 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                         <div className="p-5 rounded-2xl bg-white border border-slate-200 shadow-2xs space-y-3">
                           <h4 className="text-xs font-bold text-slate-900 uppercase tracking-wider flex items-center gap-1.5">
                             <Award size={14} className="text-purple-600" />
-                            <span>Proyección Oficial de Examen</span>
+                            <span>Proyección recibida de AeroFocus</span>
                           </h4>
                           <div className="space-y-2 text-xs">
                             <div className="flex justify-between p-2.5 rounded-xl bg-slate-50 border border-slate-200/80">
                               <span className="text-slate-600">Fecha Estimada 1ª Vuelta</span>
-                              <span className="font-bold font-mono text-slate-900">{globalAnalytics.examProjection.estimatedDateVuelta1 || "En cálculo"}</span>
+                              <span className="font-bold font-mono text-slate-900">{reportedText(globalAnalytics.examProjection.estimatedDateVuelta1)}</span>
                             </div>
                             <div className="flex justify-between p-2.5 rounded-xl bg-slate-50 border border-slate-200/80">
                               <span className="text-slate-600">Horas Diarias Requeridas</span>
-                              <span className="font-bold font-mono text-purple-700">{globalAnalytics.examProjection.dailyHoursRequired || 6} h/día</span>
+                              <span className="font-bold font-mono text-purple-700">{reportedMetric(globalAnalytics.examProjection.dailyHoursRequired, ' h/día', 1)}</span>
                             </div>
                             <div className="flex justify-between p-2.5 rounded-xl bg-slate-50 border border-slate-200/80">
-                              <span className="text-slate-600">Viabilidad</span>
-                              <span className="font-bold uppercase text-[10px] text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-md border border-emerald-200">
-                                {globalAnalytics.examProjection.feasibility || "Viable"}
+                              <span className="text-slate-600">Viabilidad informada</span>
+                              <span className="font-semibold text-xs text-slate-700 bg-slate-100 px-2 py-0.5 rounded-md border border-slate-200">
+                                {reportedText(globalAnalytics.examProjection.feasibility, 'Sin evaluación recibida')}
                               </span>
                             </div>
                           </div>
@@ -1649,7 +1654,7 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                   Ajustes de Sincronización Webhook · AeroFocus Pro
                 </h3>
                 <p className="text-xs text-slate-500 mt-1">
-                  Copia estas credenciales en AeroFocus Pro para que tus sesiones aterricen en tiempo real sin pasos intermedios.
+                  Consulta los datos de conexión. Las importaciones pendientes se revisan antes de incorporarlas al historial.
                 </p>
               </div>
 
@@ -1666,6 +1671,7 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                 <div className="flex items-center gap-2">
                   <input
                     type="text"
+                    aria-label="URL del webhook de AeroFocus"
                     readOnly
                     value={webhookUrl}
                     className="flex-1 px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-mono text-slate-800 select-all focus:outline-none"
@@ -1698,13 +1704,17 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                 <div className="flex items-center gap-2">
                   <input
                     type="text"
+                    aria-label="Token de autorización de AeroFocus"
                     readOnly
-                    value={webhookToken || "wp_qLXi6WFkFY_live"}
+                    value={webhookToken || ""}
+                    placeholder="Token no configurado"
                     className="flex-1 px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-mono text-emerald-700 font-bold select-all focus:outline-none"
                   />
                   <button
+                    disabled={!webhookToken}
                     onClick={() => {
-                      navigator.clipboard.writeText(webhookToken || "wp_qLXi6WFkFY_live");
+                      if (!webhookToken) return;
+                      navigator.clipboard.writeText(webhookToken);
                       setCopiedToken(true);
                       setTimeout(() => setCopiedToken(false), 2000);
                       toast.success("Token de autorización copiado");
@@ -1736,40 +1746,6 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                 </button>
               </div>
 
-              {/* Clean Maintenance Section */}
-              <div className="p-5 rounded-2xl bg-slate-100/60 border border-slate-200 space-y-3">
-                <div className="flex items-center gap-2 text-xs font-bold text-slate-700">
-                  <Wrench size={13} className="text-slate-500" />
-                  <span>Mantenimiento & Limpieza de Datos</span>
-                </div>
-                <p className="text-xs text-slate-500">
-                  Si deseas eliminar datos de prueba antiguos o reiniciar tu bandeja de sincronización:
-                </p>
-                <div className="flex flex-wrap gap-2 pt-1">
-                  <button
-                    onClick={() => {
-                      if (confirm("¿Deseas purgar todas las sesiones de prueba de AeroFocus?")) {
-                        setIsPurging(true);
-                        purgeAllAeroFocusData()
-                          .then(() => toast.success("Sesiones de AeroFocus purgadas."))
-                          .finally(() => setIsPurging(false));
-                      }
-                    }}
-                    disabled={isPurging}
-                    className="px-3 py-1.5 rounded-xl text-xs font-semibold bg-white hover:bg-rose-50 text-rose-700 border border-slate-200 hover:border-rose-200 transition-colors"
-                  >
-                    Purgar datos de prueba
-                  </button>
-
-                  <button
-                    onClick={handleReconcile}
-                    disabled={isReconciling}
-                    className="px-3 py-1.5 rounded-xl text-xs font-semibold bg-white hover:bg-slate-50 text-slate-700 border border-slate-200 transition-colors"
-                  >
-                    Reconciliación Maestra
-                  </button>
-                </div>
-              </div>
             </div>
           </div>
         )}
@@ -1817,34 +1793,43 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
 
       {/* Manual Paste Modal */}
       {isPasteModalOpen && (
-        <div className="fixed inset-0 z-60 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-white rounded-3xl shadow-2xl border border-slate-200 w-full max-w-lg p-6 space-y-4 animate-in fade-in zoom-in-95 duration-150">
-            <div className="flex items-center justify-between">
+        <div className="fixed inset-0 z-60 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4">
+          <div ref={pasteDialogRef} role="dialog" aria-modal="true" aria-labelledby={pasteTitleId} tabIndex={-1} className="bg-white rounded-3xl shadow-2xl border border-slate-200 w-full max-w-lg max-h-[92dvh] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-center justify-between gap-3 p-4 sm:p-5 border-b border-slate-200 shrink-0">
               <div>
-                <h3 className="text-sm font-bold text-slate-900 font-serif">Pegar Reporte o Cierre de AeroFocus</h3>
+                <h3 id={pasteTitleId} className="text-base font-bold text-slate-900 font-serif">Pegar reporte de AeroFocus</h3>
                 <p className="text-xs text-slate-500 mt-0.5">
                   Interpreta cualquier formato JSON, texto o tabla de temas y minutos
                 </p>
               </div>
               <button
+                type="button"
+                aria-label="Cerrar importación de reporte"
+                disabled={isImportingPaste}
                 onClick={() => setIsPasteModalOpen(false)}
-                className="text-slate-400 hover:text-slate-600 p-1 rounded-lg"
+                className="text-slate-600 hover:text-slate-900 w-11 h-11 flex items-center justify-center shrink-0 rounded-xl hover:bg-slate-100"
               >
                 <X size={16} />
               </button>
             </div>
 
+            <div className="min-h-0 overflow-y-auto p-4 sm:p-5">
+            <label htmlFor={`${pasteTitleId}-report`} className="mb-2 block text-sm font-semibold text-slate-700">Reporte para revisar</label>
             <textarea
+              ref={pasteInputRef}
+              id={`${pasteTitleId}-report`}
               rows={9}
               value={pasteJsonText}
               onChange={(e) => setPasteJsonText(e.target.value)}
               placeholder={'// Pega aquí el JSON o reporte copiado de AeroFocus:\n{\n  "date": "2026-10-28",\n  "topics": [\n    {\n      "materia": "Civil",\n      "tema": "Tema 14",\n      "effectiveMinutes": 90,\n      "modality": "repaso"\n    }\n  ]\n}\n\n// O también texto libre:\nCivil Tema 14 - 90 min - Repaso'}
-              className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs font-mono text-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-900/10 placeholder:text-slate-400"
+              className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl text-base sm:text-sm font-mono text-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-900/10 placeholder:text-slate-500"
             />
+            </div>
 
-            <div className="flex items-center justify-end gap-2 pt-1">
+            <div className="flex flex-wrap items-center justify-end gap-2 p-4 sm:p-5 border-t border-slate-200 shrink-0" style={{ paddingBottom: 'max(1rem, env(safe-area-inset-bottom))' }}>
               <button
                 type="button"
+                disabled={isImportingPaste}
                 onClick={() => setIsPasteModalOpen(false)}
                 className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-600 hover:bg-slate-100 transition-colors"
               >
@@ -1857,7 +1842,7 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
                 className="px-4 py-2 rounded-xl text-xs font-bold text-white bg-slate-900 hover:bg-slate-800 transition-colors flex items-center gap-1.5 disabled:opacity-50"
               >
                 {isImportingPaste ? <RefreshCw size={12} className="animate-spin" /> : <CheckCircle2 size={13} />}
-                <span>Interpretar y Cargar en Cuarentena</span>
+                <span>{isImportingPaste ? 'Interpretando…' : 'Revisar reporte'}</span>
               </button>
             </div>
           </div>
@@ -1867,15 +1852,17 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
       {/* Topic Reassignment Modal */}
       {reassigningItem && (
         <div className="fixed inset-0 z-60 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-white rounded-3xl shadow-2xl border border-slate-200 w-full max-w-lg h-[80vh] max-h-[600px] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+          <div ref={reassignDialogRef} role="dialog" aria-modal="true" aria-labelledby={reassignTitleId} tabIndex={-1} className="bg-white rounded-3xl shadow-2xl border border-slate-200 w-full max-w-lg h-[80dvh] max-h-[600px] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-150">
             <div className="p-5 border-b border-slate-100 flex items-center justify-between">
               <div>
-                <h3 className="text-sm font-bold text-slate-900 font-serif">Reasignar Tema Oficial</h3>
+                <h3 id={reassignTitleId} className="text-base font-bold text-slate-900 font-serif">Reasignar tema oficial</h3>
                 <p className="text-xs text-slate-500 mt-0.5">Selecciona el tema oficial correspondiente</p>
               </div>
               <button
+                type="button"
+                aria-label="Cerrar reasignación de tema"
                 onClick={() => setReassigningItem(null)}
-                className="text-slate-400 hover:text-slate-600 p-1.5 rounded-xl hover:bg-slate-100"
+                className="text-slate-600 hover:text-slate-900 w-11 h-11 flex items-center justify-center shrink-0 rounded-xl hover:bg-slate-100"
               >
                 <X size={16} />
               </button>
@@ -1885,12 +1872,13 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
               <div className="relative">
                 <Search size={14} className="absolute left-3 top-2.5 text-slate-400" />
                 <input
+                  ref={reassignInputRef}
+                  aria-label="Buscar tema oficial para reasignar"
                   type="text"
                   placeholder="Buscar por número o título..."
                   value={reassignSearch}
                   onChange={(e) => setReassignSearch(e.target.value)}
                   className="w-full pl-9 pr-3 py-1.5 bg-white border border-slate-200 rounded-xl text-xs font-medium text-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-900/10"
-                  autoFocus
                 />
               </div>
             </div>
@@ -1947,8 +1935,8 @@ export function SyncControlCenterDialog({ onClose }: SyncControlCenterDialogProp
         <EditQuarantineTopicModal
           item={editingTopicModal}
           onClose={() => setEditingTopicModal(null)}
-          onSave={(updated) => {
-            updateQuarantineTopic(editingTopicModal.eventId, editingTopicModal.topicIndex, updated);
+          onSave={async (updated) => {
+            await updateQuarantineTopic(editingTopicModal.eventId, editingTopicModal.topicIndex, updated);
             setEditingTopicModal(null);
             toast.success("Tema actualizado en cuarentena");
           }}
@@ -2001,16 +1989,43 @@ function EditQuarantineTopicModal({
 }: {
   item: { eventId: string; topicIndex: number; topic: WebhookResolvedTopic };
   onClose: () => void;
-  onSave: (updated: Partial<WebhookResolvedTopic>) => void;
+  onSave: (updated: Partial<WebhookResolvedTopic>) => Promise<void>;
   onDelete: () => void;
 }) {
   const [topic, setTopic] = useState<WebhookResolvedTopic>({ ...item.topic });
   const [isChangingTopic, setIsChangingTopic] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
-
-  const durationMins = topic.effectiveMinutes || Math.round((topic.effectiveHours || 0) * 60) || 45;
-  const currentDiff = topic.dificultadReal !== undefined ? topic.dificultadReal : (topic.difficulty ?? 5);
-  const completesVuelta = topic.completesVuelta !== undefined ? topic.completesVuelta : (topic.modality === "repaso" || topic.modality === "canto");
+  const titleId = useId();
+  const minutesInputRef = useRef<HTMLInputElement>(null);
+  const [saving, setSaving] = useState(false);
+  const dialogRef = useDialogAccessibility<HTMLDivElement>({ onClose, initialFocusRef: minutesInputRef, disabled: saving });
+  const [minutes, setMinutes] = useState(() => {
+    const actual = [item.topic.effectiveMinutes, Number(item.topic.effectiveHours) * 60].find(value => typeof value === 'number' && Number.isFinite(value) && value > 0);
+    return actual === undefined ? '' : String(actual);
+  });
+  const [difficulty, setDifficulty] = useState(() => {
+    const actual = item.topic.dificultadReal ?? item.topic.difficulty;
+    return typeof actual === 'number' && Number.isFinite(actual) && actual >= 1 && actual <= 10 ? String(actual) : '';
+  });
+  const [completesVuelta, setCompletesVuelta] = useState(item.topic.completesVuelta === true);
+  const [formError, setFormError] = useState('');
+  const durationMins = Number(minutes) || 0;
+  const currentDiff = difficulty ? Number(difficulty) : undefined;
+  const canCompleteVuelta = ['repaso', 'canto', 'cante', 'simulacro'].includes(topic.modality);
+  const save = async () => {
+    if (saving) return;
+    try {
+      const actual = parseQuarantineTopicObservation({ minutes, difficulty, completesVuelta, modality: topic.modality });
+      setFormError('');
+      setSaving(true);
+      await onSave({ ...topic, ...actual });
+    } catch (error) {
+      setFormError(error instanceof Error ? error.message : 'Revisa los datos reales del tema.');
+      minutesInputRef.current?.focus();
+    } finally {
+      setSaving(false);
+    }
+  };
 
   const subject = initialSubjects.find(s => s.id === topic.resolvedSubjectId) || {
     id: topic.resolvedSubjectId || "general",
@@ -2029,29 +2044,32 @@ function EditQuarantineTopicModal({
   }, [searchQuery]);
 
   return (
-    <div className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
-      <div className="bg-white rounded-3xl shadow-2xl border border-slate-200/80 w-full max-w-lg max-h-[92vh] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+    <div className="fixed inset-0 z-60 bg-slate-950/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 overflow-hidden">
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1} className="bg-white rounded-3xl shadow-2xl border border-slate-200/80 w-full max-w-lg max-h-[92dvh] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-150">
         
         {/* Header */}
         <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between gap-3 bg-slate-50/50 shrink-0">
           <div className="min-w-0">
             <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-              Edición Quirúrgica en Cuarentena
+              Revisar importación
             </span>
-            <h3 className="text-base font-bold text-slate-900 truncate">
+            <h3 id={titleId} className="text-base font-bold text-slate-900">
               Tema {topic.resolvedTopicNumber}: {topic.resolvedTopicTitle}
             </h3>
           </div>
           <button
+            type="button"
+            aria-label="Cerrar edición del tema importado"
+            disabled={saving}
             onClick={onClose}
-            className="w-8 h-8 rounded-full flex items-center justify-center text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors shrink-0"
+            className="w-11 h-11 rounded-full flex items-center justify-center text-slate-600 hover:text-slate-900 hover:bg-slate-100 transition-colors shrink-0"
           >
             <X size={18} />
           </button>
         </div>
 
         {/* Scrollable Body */}
-        <div className="p-5 space-y-4 overflow-y-auto flex-1">
+        <fieldset disabled={saving} className="p-4 sm:p-5 space-y-4 overflow-y-auto overscroll-contain min-h-0 flex-1">
           
           {/* Topic Assignment Box */}
           <div className="p-3.5 rounded-2xl bg-slate-50 border border-slate-200/80">
@@ -2090,6 +2108,7 @@ function EditQuarantineTopicModal({
                   <Search size={13} className="absolute left-2.5 top-2.5 text-slate-400" />
                   <input
                     type="text"
+                    aria-label="Buscar otro tema para la importación"
                     placeholder="Buscar por número o nombre de tema..."
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
@@ -2146,6 +2165,7 @@ function EditQuarantineTopicModal({
                   key={m.id}
                   type="button"
                   onClick={() => setTopic(prev => ({ ...prev, modality: m.id }))}
+                  aria-pressed={topic.modality === m.id}
                   className={cn(
                     "py-2 px-2.5 rounded-xl text-xs font-bold transition-all text-center border",
                     topic.modality === m.id
@@ -2161,61 +2181,48 @@ function EditQuarantineTopicModal({
 
           {/* Tiempo Efectivo */}
           <div>
-            <label className="block text-xs font-bold text-slate-700 mb-1.5">
-              Tiempo Efectivo Neto ({durationMins} minutos)
+            <label htmlFor={`${titleId}-minutes`} className="block text-sm font-semibold text-slate-700 mb-1.5">
+              Minutos reales {minutes ? `(${durationMins} min)` : '(obligatorio)'}
             </label>
-            <div className="flex items-center gap-2">
+            <div className="grid grid-cols-4 gap-2 sm:flex sm:items-center">
               <button
                 type="button"
-                onClick={() => setTopic(prev => {
-                  const m = Math.max(5, durationMins - 15);
-                  return { ...prev, effectiveMinutes: m, effectiveHours: m / 60 };
-                })}
+                onClick={() => setMinutes(String(Math.max(0, durationMins - 15)))}
                 className="px-2 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs"
               >
                 -15m
               </button>
               <button
                 type="button"
-                onClick={() => setTopic(prev => {
-                  const m = Math.max(5, durationMins - 5);
-                  return { ...prev, effectiveMinutes: m, effectiveHours: m / 60 };
-                })}
+                onClick={() => setMinutes(String(Math.max(0, durationMins - 5)))}
                 className="px-2 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs"
               >
                 -5m
               </button>
               <input
+                ref={minutesInputRef}
+                id={`${titleId}-minutes`}
                 type="number"
-                min={1}
-                max={600}
-                value={durationMins}
-                onChange={(e) => {
-                  const val = parseInt(e.target.value) || 0;
-                  setTopic(prev => ({
-                    ...prev,
-                    effectiveMinutes: val,
-                    effectiveHours: val / 60
-                  }));
-                }}
-                className="flex-1 py-1.5 px-3 bg-white border border-slate-200 rounded-xl text-center font-mono font-bold text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
+                min="0.01"
+                max="1440"
+                step="any"
+                required
+                value={minutes}
+                onChange={(e) => setMinutes(e.target.value)}
+                aria-invalid={formError ? true : undefined}
+                aria-describedby={formError ? `${titleId}-error` : undefined}
+                className="order-first col-span-4 min-w-0 w-full sm:order-none sm:w-0 sm:flex-1 py-1.5 px-3 bg-white border border-slate-200 rounded-xl text-center font-mono font-bold text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
               />
               <button
                 type="button"
-                onClick={() => setTopic(prev => {
-                  const m = durationMins + 5;
-                  return { ...prev, effectiveMinutes: m, effectiveHours: m / 60 };
-                })}
+                onClick={() => setMinutes(String(durationMins + 5))}
                 className="px-2 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs"
               >
                 +5m
               </button>
               <button
                 type="button"
-                onClick={() => setTopic(prev => {
-                  const m = durationMins + 15;
-                  return { ...prev, effectiveMinutes: m, effectiveHours: m / 60 };
-                })}
+                onClick={() => setMinutes(String(durationMins + 15))}
                 className="px-2 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs"
               >
                 +15m
@@ -2227,7 +2234,7 @@ function EditQuarantineTopicModal({
                 <button
                   key={preset}
                   type="button"
-                  onClick={() => setTopic(prev => ({ ...prev, effectiveMinutes: preset, effectiveHours: preset / 60 }))}
+                  onClick={() => setMinutes(String(preset))}
                   className={cn(
                     "px-2 py-0.5 rounded-lg text-[11px] font-bold shrink-0 transition-colors",
                     durationMins === preset
@@ -2245,20 +2252,22 @@ function EditQuarantineTopicModal({
           <div>
             <div className="flex items-center justify-between mb-1.5">
               <label className="text-xs font-bold text-slate-700">
-                Dificultad Percibida ({currentDiff} / 10)
+                Dificultad percibida {currentDiff === undefined ? '(sin calificar)' : `(${currentDiff} / 10)`}
               </label>
               <span className="text-[11px] font-bold text-slate-500">
-                {currentDiff <= 3 ? "Baja / Asimilado" : currentDiff <= 6 ? "Media" : currentDiff <= 8 ? "Alta" : "Extrema"}
+                {currentDiff === undefined ? 'Opcional' : currentDiff <= 3 ? "Baja / Asimilado" : currentDiff <= 6 ? "Media" : currentDiff <= 8 ? "Alta" : "Extrema"}
               </span>
             </div>
-            <div className="grid grid-cols-10 gap-1">
+            <div className="grid grid-cols-5 gap-1">
               {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((num) => {
                 const isSelected = currentDiff === num;
                 return (
                   <button
                     key={num}
                     type="button"
-                    onClick={() => setTopic(prev => ({ ...prev, difficulty: num, dificultadReal: num }))}
+                    onClick={() => setDifficulty(String(num))}
+                    aria-label={`Dificultad ${num} de 10`}
+                    aria-pressed={isSelected}
                     className={cn(
                       "py-2 rounded-lg text-xs font-black transition-all",
                       isSelected
@@ -2277,20 +2286,23 @@ function EditQuarantineTopicModal({
                 );
               })}
             </div>
+            {difficulty && <button type="button" onClick={() => setDifficulty('')} className="mt-1 text-xs text-slate-600 underline">Dejar sin calificar</button>}
           </div>
 
           {/* Vuelta Oficial */}
           <div className="p-3 rounded-2xl bg-slate-50 border border-slate-200/80 flex items-center justify-between gap-3">
             <div>
-              <div className="text-xs font-bold text-slate-900">Computar Vuelta Oficial</div>
+              <label htmlFor={`${titleId}-vuelta`} className="text-sm font-semibold text-slate-900">He completado una vuelta entera</label>
               <div className="text-[11px] text-slate-500">
-                Suma +1 al contador de vueltas completas de la oposición
+                {canCompleteVuelta ? 'Marca esta opción solo si has completado el repaso o cante.' : 'El estudio inicial y el refresco no completan una vuelta.'}
               </div>
             </div>
             <input
+              id={`${titleId}-vuelta`}
               type="checkbox"
-              checked={completesVuelta}
-              onChange={(e) => setTopic(prev => ({ ...prev, completesVuelta: e.target.checked }))}
+              disabled={!canCompleteVuelta}
+              checked={canCompleteVuelta && completesVuelta}
+              onChange={(e) => setCompletesVuelta(e.target.checked)}
               className="w-4 h-4 rounded text-indigo-600 focus:ring-indigo-500 cursor-pointer"
             />
           </div>
@@ -2300,6 +2312,7 @@ function EditQuarantineTopicModal({
             <div>
               <label className="block text-[11px] font-bold text-slate-600 mb-1">Pág. Inicio</label>
               <input
+                aria-label="Página inicial realmente trabajada"
                 type="number"
                 value={topic.startPage ?? ""}
                 onChange={(e) => setTopic(prev => ({ ...prev, startPage: e.target.value ? parseInt(e.target.value) : undefined }))}
@@ -2310,6 +2323,7 @@ function EditQuarantineTopicModal({
             <div>
               <label className="block text-[11px] font-bold text-slate-600 mb-1">Pág. Fin</label>
               <input
+                aria-label="Página final realmente trabajada"
                 type="number"
                 value={topic.endPage ?? ""}
                 onChange={(e) => setTopic(prev => ({ ...prev, endPage: e.target.value ? parseInt(e.target.value) : undefined }))}
@@ -2322,6 +2336,7 @@ function EditQuarantineTopicModal({
           <div>
             <label className="block text-[11px] font-bold text-slate-600 mb-1">Notas / Observaciones</label>
             <textarea
+              aria-label="Notas del tema importado"
               rows={2}
               value={topic.notes ?? ""}
               onChange={(e) => setTopic(prev => ({ ...prev, notes: e.target.value }))}
@@ -2329,13 +2344,15 @@ function EditQuarantineTopicModal({
               className="w-full px-3 py-2 text-xs bg-white border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 resize-none"
             />
           </div>
-        </div>
+        </fieldset>
 
         {/* Footer */}
-        <div className="px-5 py-3.5 border-t border-slate-100 bg-slate-50/70 flex items-center justify-between gap-3 shrink-0">
+        <div className="px-4 sm:px-5 py-3.5 border-t border-slate-100 bg-slate-50/70 flex flex-wrap items-center justify-between gap-3 shrink-0" style={{ paddingBottom: 'max(1rem, env(safe-area-inset-bottom))' }}>
+          {formError && <p id={`${titleId}-error`} role="alert" className="w-full text-sm text-rose-700">{formError}</p>}
           <button
             type="button"
             onClick={onDelete}
+            disabled={saving}
             className="px-3 py-2 rounded-xl text-xs font-bold text-rose-600 hover:bg-rose-50 border border-slate-200 hover:border-rose-200 transition-colors flex items-center gap-1.5"
           >
             <Trash2 size={13} />
@@ -2346,17 +2363,19 @@ function EditQuarantineTopicModal({
             <button
               type="button"
               onClick={onClose}
+              disabled={saving}
               className="px-3 py-2 rounded-xl text-xs font-semibold text-slate-600 hover:bg-slate-200 transition-colors"
             >
               Cancelar
             </button>
             <button
               type="button"
-              onClick={() => onSave(topic)}
+              onClick={save}
+              disabled={saving}
               className="px-4 py-2 rounded-xl text-xs font-bold text-white bg-slate-900 hover:bg-slate-800 shadow-xs transition-colors flex items-center gap-1.5"
             >
               <Save size={13} />
-              <span>Guardar Cambios</span>
+              <span>{saving ? 'Guardando…' : 'Guardar Cambios'}</span>
             </button>
           </div>
         </div>
@@ -2380,6 +2399,14 @@ function AddQuarantineTopicModal({
 }) {
   const [search, setSearch] = useState("");
   const [selectedSubject, setSelectedSubject] = useState<string>("all");
+  const [minutes, setMinutes] = useState('');
+  const [difficulty, setDifficulty] = useState('');
+  const [completesVuelta, setCompletesVuelta] = useState(false);
+  const [formError, setFormError] = useState('');
+  const [adding, setAdding] = useState(false);
+  const titleId = useId();
+  const minutesInputRef = useRef<HTMLInputElement>(null);
+  const dialogRef = useDialogAccessibility<HTMLDivElement>({ isOpen, onClose, initialFocusRef: minutesInputRef, disabled: adding });
 
   const filtered = useMemo(() => {
     let list = initialTopics;
@@ -2398,38 +2425,51 @@ function AddQuarantineTopicModal({
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
-      <div className="bg-white rounded-3xl shadow-2xl border border-slate-200/80 w-full max-w-lg max-h-[85vh] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+    <div className="fixed inset-0 z-60 bg-slate-950/60 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 overflow-hidden">
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1} className="bg-white rounded-3xl shadow-2xl border border-slate-200/80 w-full max-w-lg max-h-[92dvh] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-150">
         
         {/* Header */}
         <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between gap-3 bg-slate-50/50 shrink-0">
           <div>
-            <h3 className="text-base font-bold text-slate-900 font-serif">
-              Añadir Tema al Vuelo de AeroFocus
+            <h3 id={titleId} className="text-base font-bold text-slate-900 font-serif">
+              Añadir tema a la importación
             </h3>
             <p className="text-xs text-slate-500 mt-0.5">
-              Selecciona un tema oficial para incorporarlo a esta sesión en cuarentena.
+              Indica el tiempo real y selecciona el tema. Se conservará en cuarentena para su revisión.
             </p>
           </div>
           <button
+            type="button"
+            aria-label="Cerrar selección del tema importado"
+            disabled={adding}
             onClick={onClose}
-            className="w-8 h-8 rounded-full flex items-center justify-center text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition-colors shrink-0"
+            className="w-11 h-11 rounded-full flex items-center justify-center text-slate-600 hover:text-slate-900 hover:bg-slate-100 transition-colors shrink-0"
           >
             <X size={18} />
           </button>
         </div>
 
         {/* Filters & Search */}
-        <div className="p-4 border-b border-slate-100 space-y-2.5 bg-white shrink-0">
+        <div className="p-4 border-b border-slate-100 space-y-3 bg-white shrink-0">
+          <div className="grid grid-cols-2 gap-3">
+            <label className="text-sm font-semibold text-slate-700">Minutos reales
+              <input ref={minutesInputRef} type="number" required min="0.01" max="1440" step="any" value={minutes} onChange={event => setMinutes(event.target.value)} className="mt-1 w-full min-w-0 rounded-xl border border-slate-300 bg-white p-2.5 text-base" />
+            </label>
+            <label className="text-sm font-semibold text-slate-700">Dificultad (opcional)
+              <input type="number" min="1" max="10" step="0.1" value={difficulty} onChange={event => setDifficulty(event.target.value)} className="mt-1 w-full min-w-0 rounded-xl border border-slate-300 bg-white p-2.5 text-base" />
+            </label>
+          </div>
+          <label className="flex min-h-11 items-center gap-2 text-sm text-slate-700"><input type="checkbox" checked={completesVuelta} onChange={event => setCompletesVuelta(event.target.checked)} />He completado una vuelta entera de repaso</label>
+          {formError && <p role="alert" className="text-sm text-rose-700">{formError}</p>}
           <div className="relative">
             <Search size={14} className="absolute left-3 top-2.5 text-slate-400" />
             <input
+              aria-label="Buscar tema oficial para añadir a la importación"
               type="text"
               placeholder="Buscar por número o nombre (ej. 14, Obligaciones, Constitucional)..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               className="w-full pl-9 pr-3 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
-              autoFocus
             />
           </div>
 
@@ -2470,19 +2510,27 @@ function AddQuarantineTopicModal({
             return (
               <button
                 key={t.id}
-                onClick={() => {
-                  onAdd({
-                    resolvedTopicId: t.id,
-                    resolvedTopicTitle: t.title,
-                    resolvedTopicNumber: t.number,
-                    resolvedSubjectId: t.subjectId,
-                    modality: "repaso",
-                    effectiveMinutes: 45,
-                    effectiveHours: 0.75,
-                    difficulty: 5,
-                    dificultadReal: 5,
-                    completesVuelta: true,
-                  });
+                disabled={adding}
+                onClick={async () => {
+                  if (adding) return;
+                  try {
+                    const actual = parseQuarantineTopicObservation({ minutes, difficulty, completesVuelta, modality: 'repaso' });
+                    setFormError('');
+                    setAdding(true);
+                    await onAdd({
+                      resolvedTopicId: t.id,
+                      resolvedTopicTitle: t.title,
+                      resolvedTopicNumber: t.number,
+                      resolvedSubjectId: t.subjectId,
+                      modality: 'repaso',
+                      ...actual,
+                    });
+                  } catch (error) {
+                    setFormError(error instanceof Error ? error.message : 'Revisa los datos reales antes de añadir el tema.');
+                    minutesInputRef.current?.focus();
+                  } finally {
+                    setAdding(false);
+                  }
                 }}
                 className="w-full text-left p-2.5 rounded-xl hover:bg-indigo-50/60 border border-slate-100 hover:border-indigo-200 transition-colors flex items-center justify-between gap-3 group"
               >

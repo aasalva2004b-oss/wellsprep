@@ -1,9 +1,11 @@
+import { useDialogAccessibility } from '../../hooks/useDialogAccessibility';
 import React, { useState, useEffect } from "react";
 import { X, Star, Timer, Save, CheckCircle2, AlertTriangle, Sparkles } from "lucide-react";
 import { Topic } from "../../types";
 import { playSound } from "../../lib/sound";
 import { WINDOW_MIN_SECS, WINDOW_MAX_SECS } from "../../lib/preparationScore";
 import { cn } from "../../lib/utils";
+import { toast } from "sonner";
 
 interface PreparadorQuickFeedbackModalProps {
   topic: Topic | null;
@@ -13,7 +15,7 @@ interface PreparadorQuickFeedbackModalProps {
     topicId: string;
     durationMinutes: number;
     durationSeconds: number;
-    grade: number;
+    grade?: number;
     notes: string;
   }) => Promise<void>;
   initialGrade?: number | null;
@@ -27,28 +29,26 @@ export const PreparadorQuickFeedbackModal: React.FC<PreparadorQuickFeedbackModal
   isOpen,
   onClose,
   onSave,
-  initialGrade,
-  initialMinutes = 12,
-  initialSeconds = 30,
   isSaving = false,
 }) => {
-  const [grade, setGrade] = useState<number>(7.5);
-  const [minutes, setMinutes] = useState<number>(12);
-  const [seconds, setSeconds] = useState<number>(30);
+  const [grade, setGrade] = useState<number | "">("");
+  const [minutes, setMinutes] = useState<string>("");
+  const [seconds, setSeconds] = useState<string>("");
   const [notes, setNotes] = useState<string>("");
 
   useEffect(() => {
     if (topic) {
-      setGrade(initialGrade ?? 7.5);
-      setMinutes(initialMinutes > 0 ? initialMinutes : 12);
-      setSeconds(initialSeconds >= 0 ? initialSeconds : 30);
+      setGrade("");
+      setMinutes("");
+      setSeconds("");
       setNotes("");
     }
-  }, [topic, initialGrade, initialMinutes, initialSeconds]);
+  }, [topic?.id, isOpen]);
 
+  const dialogRef = useDialogAccessibility({ isOpen: isOpen && !!topic, onClose, disabled: isSaving });
   if (!isOpen || !topic) return null;
 
-  const totalSecs = minutes * 60 + seconds;
+  const totalSecs = Number(minutes || 0) * 60 + Number(seconds || 0);
   const isInWindow = totalSecs >= WINDOW_MIN_SECS && totalSecs <= WINDOW_MAX_SECS;
   const isTooShort = totalSecs > 0 && totalSecs < WINDOW_MIN_SECS;
   const isTooLong = totalSecs > WINDOW_MAX_SECS;
@@ -72,27 +72,27 @@ export const PreparadorQuickFeedbackModal: React.FC<PreparadorQuickFeedbackModal
     setGrade(val);
   };
 
-  const handleSetTime = (m: number, s: number) => {
-    playSound.toggle();
-    setMinutes(m);
-    setSeconds(s);
-  };
-
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isSaving) return;
+    const observedMinutes = minutes.trim() ? Number(minutes) : 0;
+    const observedSeconds = seconds.trim() ? Number(seconds) : 0;
+    if ((!minutes.trim() && !seconds.trim()) || !Number.isInteger(observedMinutes) || !Number.isInteger(observedSeconds) || observedMinutes < 0 || observedSeconds < 0 || observedSeconds > 59 || observedMinutes + observedSeconds === 0) {
+      toast.error("Introduce la duración real del cante en minutos y segundos.");
+      return;
+    }
     playSound.click();
     await onSave({
       topicId: topic.id,
-      durationMinutes: minutes,
-      durationSeconds: seconds,
-      grade,
+      durationMinutes: observedMinutes,
+      durationSeconds: observedSeconds,
+      grade: grade === "" ? undefined : grade,
       notes,
     });
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-900/60 backdrop-blur-md animate-in fade-in duration-200">
+    <div className="wp-modal-overlay fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-900/60 backdrop-blur-md animate-in fade-in duration-200">
       <div
         className="bg-white rounded-3xl max-w-lg w-full p-5 sm:p-7 flex flex-col shadow-2xl border border-slate-200/80 relative overflow-hidden"
         onClick={(e) => e.stopPropagation()}
@@ -110,7 +110,7 @@ export const PreparadorQuickFeedbackModal: React.FC<PreparadorQuickFeedbackModal
         </button>
 
         {/* Header */}
-        <div className="mb-4 pr-6">
+        <div ref={dialogRef} role="dialog" aria-modal="true" aria-label="Evaluación del cante" className="wp-modal-panel mb-4 pr-6">
           <div className="flex items-center gap-2 mb-1">
             <span className="text-[10px] font-black uppercase tracking-wider px-2.5 py-0.5 rounded-full bg-amber-50 text-amber-800 border border-amber-200">
               Evaluación Posterior del Preparador
@@ -133,7 +133,7 @@ export const PreparadorQuickFeedbackModal: React.FC<PreparadorQuickFeedbackModal
                 Nota Oficial (0 - 10):
               </span>
               <span className="text-xl font-black font-serif text-slate-900 tabular-nums">
-                {grade.toFixed(1)}
+                {grade === "" ? "Sin evaluar" : grade.toFixed(1)}
                 <span className="text-xs text-slate-400 font-sans ml-0.5">/ 10</span>
               </span>
             </div>
@@ -141,7 +141,7 @@ export const PreparadorQuickFeedbackModal: React.FC<PreparadorQuickFeedbackModal
             {/* Quick Presets */}
             <div className="grid grid-cols-5 gap-1.5 mb-3">
               {quickGradePresets.map((val) => {
-                const isSelected = Math.abs(grade - val) < 0.1;
+                const isSelected = grade !== "" && Math.abs(grade - val) < 0.1;
                 return (
                   <button
                     key={val}
@@ -162,12 +162,14 @@ export const PreparadorQuickFeedbackModal: React.FC<PreparadorQuickFeedbackModal
 
             {/* Range Slider */}
             <input
-              type="range"
-              min="1"
+              type="number"
+              aria-label="Nota real del preparador"
+              placeholder="Sin evaluar"
+              min="0"
               max="10"
               step="0.1"
               value={grade}
-              onChange={(e) => setGrade(parseFloat(e.target.value))}
+              onChange={(e) => setGrade(e.target.value === "" ? "" : Math.max(0, Math.min(10, Number(e.target.value))))}
               className="w-full accent-slate-900 cursor-pointer"
             />
           </div>
@@ -205,9 +207,10 @@ export const PreparadorQuickFeedbackModal: React.FC<PreparadorQuickFeedbackModal
                 <input
                   type="number"
                   min="0"
-                  max="30"
+                  step="1"
+                  aria-label="Minutos reales ante preparador"
                   value={minutes}
-                  onChange={(e) => setMinutes(Math.max(0, parseInt(e.target.value, 10) || 0))}
+                  onChange={(e) => setMinutes(e.target.value)}
                   className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl text-sm font-bold text-slate-800 text-center font-mono"
                 />
               </div>
@@ -217,22 +220,15 @@ export const PreparadorQuickFeedbackModal: React.FC<PreparadorQuickFeedbackModal
                   type="number"
                   min="0"
                   max="59"
+                  aria-label="Segundos reales ante preparador"
+                  step="1"
                   value={seconds}
-                  onChange={(e) => setSeconds(Math.min(59, Math.max(0, parseInt(e.target.value, 10) || 0)))}
+                  onChange={(e) => setSeconds(e.target.value)}
                   className="w-full px-3 py-2 bg-white border border-slate-200 rounded-xl text-sm font-bold text-slate-800 text-center font-mono"
                 />
               </div>
 
-              {/* Quick Preset Buttons for Target Time */}
-              <div className="flex flex-col gap-1 shrink-0 pt-3">
-                <button
-                  type="button"
-                  onClick={() => handleSetTime(12, 30)}
-                  className="px-2.5 py-1 text-[10px] font-black bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-lg border border-indigo-200/60 active:scale-95"
-                >
-                  Meta 12:30
-                </button>
-              </div>
+              <p className="text-[10px] text-slate-500">Referencia: 12:30. Registra el tiempo que has realizado.</p>
             </div>
           </div>
 

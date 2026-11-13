@@ -1,44 +1,34 @@
-/**
- * WellsPrep Apple Pro Editorial Design System Tokens
- * Standardized surfaces, typography, elevations, and transition easing.
- */
-
+/** Shared presentation tokens. Study and prediction models do not depend on them. */
 export const DS = {
-  // Surfaces & Containers (Single elevation, zero nested card disorder)
-  card: "bg-white/95 backdrop-blur-xl border border-slate-200/80 rounded-2xl shadow-[0_1px_3px_rgba(0,0,0,0.03),0_4px_12px_rgba(0,0,0,0.02)] transition-all",
-  cardInteractive: "bg-white/95 backdrop-blur-xl border border-slate-200/80 rounded-2xl shadow-[0_1px_3px_rgba(0,0,0,0.03),0_4px_12px_rgba(0,0,0,0.02)] hover:border-slate-300 hover:shadow-[0_2px_8px_rgba(0,0,0,0.05),0_8px_24px_rgba(0,0,0,0.03)] transition-all active:scale-[0.99]",
-  cardSubtle: "bg-slate-50/70 border border-slate-200/60 rounded-xl",
-  modalContainer: "bg-white/98 backdrop-blur-2xl border border-slate-200/90 rounded-3xl shadow-[0_8px_32px_rgba(0,0,0,0.12),0_1px_2px_rgba(0,0,0,0.04)]",
-  
-  // Headers & Titles
-  titlePage: "text-2xl sm:text-3xl font-black font-serif text-slate-900 tracking-tight",
-  titleSection: "text-base sm:text-lg font-black font-serif text-slate-900 tracking-tight",
-  titleCard: "text-xs font-black uppercase tracking-wider text-slate-700",
-  subtitle: "text-xs text-slate-500 font-medium leading-relaxed",
-  
-  // Tabular Numerals (Strict standard for zero-jitter metrics)
-  metricHero: "text-2xl sm:text-3xl font-black font-mono tabular-nums tracking-tight text-slate-900",
-  metricValue: "text-lg sm:text-xl font-black font-mono tabular-nums text-slate-900",
-  metricSmall: "text-xs sm:text-sm font-bold font-mono tabular-nums text-slate-700",
-  monoBadge: "font-mono tabular-nums text-[11px] font-semibold",
-  
-  // Badges & Pills (Crisp, clean semantic labeling)
-  badgeNeutral: "px-2.5 py-0.5 rounded-full text-[10px] font-bold border bg-slate-100/80 text-slate-700 border-slate-200/80",
-  badgeSuccess: "px-2.5 py-0.5 rounded-full text-[10px] font-bold border bg-emerald-50 text-emerald-800 border-emerald-200/80",
-  badgeWarning: "px-2.5 py-0.5 rounded-full text-[10px] font-bold border bg-amber-50 text-amber-800 border-amber-200/80",
-  badgeDanger: "px-2.5 py-0.5 rounded-full text-[10px] font-bold border bg-rose-50 text-rose-800 border-rose-200/80",
-  badgeBrand: "px-2.5 py-0.5 rounded-full text-[10px] font-bold border bg-blue-50 text-blue-800 border-blue-200/80",
-  badgeCanto: "px-2.5 py-0.5 rounded-full text-[10px] font-bold border bg-amber-50/90 text-amber-900 border-amber-300/80 font-mono tabular-nums",
-  
-  // Buttons
-  btnPrimary: "px-4 py-2 bg-slate-900 hover:bg-slate-800 active:scale-[0.98] text-white rounded-xl text-xs font-black shadow-sm transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:pointer-events-none",
-  btnSecondary: "px-4 py-2 bg-white hover:bg-slate-50 active:scale-[0.98] text-slate-700 border border-slate-200 rounded-xl text-xs font-bold shadow-xs transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:pointer-events-none",
-  btnGhost: "px-3 py-1.5 text-slate-500 hover:text-slate-900 hover:bg-slate-100/70 active:scale-[0.98] rounded-xl text-xs font-bold transition-all flex items-center gap-1.5",
-  btnDanger: "px-3.5 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-800 border border-rose-200 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 active:scale-[0.98]",
-  
-  // Motion curve
-  springTransition: {
-    duration: 0.18,
-    ease: [0.16, 1, 0.3, 1]
-  }
+  page: "min-w-0 w-full max-w-7xl mx-auto space-y-5",
+  sectionHeader: "flex flex-wrap items-center justify-between gap-3",
+  card: "bg-[var(--wp-surface)] border border-[var(--wp-border)] rounded-2xl shadow-[0_1px_3px_rgba(35,30,20,0.04)]",
+  cardInteractive: "bg-[var(--wp-surface)] border border-[var(--wp-border)] rounded-2xl shadow-[0_1px_3px_rgba(35,30,20,0.04)] hover:border-slate-400 transition-colors",
+  cardSubtle: "bg-[var(--wp-surface-muted)] border border-[var(--wp-border)] rounded-xl",
+  modalContainer: "bg-[var(--wp-surface)] border border-[var(--wp-border)] rounded-2xl sm:rounded-3xl shadow-xl",
+  titlePage: "text-xl sm:text-2xl font-semibold font-serif text-[var(--wp-text)] tracking-tight leading-tight",
+  titleSection: "text-base sm:text-lg font-semibold text-[var(--wp-text)] tracking-tight leading-snug",
+  titleCard: "text-sm font-semibold text-[var(--wp-text)]",
+  subtitle: "text-sm text-[var(--wp-muted)] leading-relaxed",
+  metricHero: "text-2xl sm:text-3xl font-semibold font-mono tabular-nums tracking-tight text-[var(--wp-text)]",
+  metricValue: "text-lg sm:text-xl font-semibold font-mono tabular-nums text-[var(--wp-text)]",
+  metricSmall: "text-sm font-medium font-mono tabular-nums text-[var(--wp-text)]",
+  monoBadge: "font-mono tabular-nums text-xs font-medium",
+  badgeNeutral: "inline-flex items-center min-h-6 px-2 py-0.5 rounded-full text-xs font-medium border bg-slate-50 text-slate-700 border-slate-200",
+  badgeSuccess: "inline-flex items-center min-h-6 px-2 py-0.5 rounded-full text-xs font-medium border bg-emerald-50 text-emerald-800 border-emerald-200",
+  badgeWarning: "inline-flex items-center min-h-6 px-2 py-0.5 rounded-full text-xs font-medium border bg-amber-50 text-amber-900 border-amber-200",
+  badgeDanger: "inline-flex items-center min-h-6 px-2 py-0.5 rounded-full text-xs font-medium border bg-rose-50 text-rose-800 border-rose-200",
+  badgeBrand: "inline-flex items-center min-h-6 px-2 py-0.5 rounded-full text-xs font-medium border bg-blue-50 text-blue-800 border-blue-200",
+  badgeCanto: "inline-flex items-center min-h-6 px-2 py-0.5 rounded-full text-xs font-medium border bg-purple-50 text-purple-800 border-purple-200",
+  btnPrimary: "min-h-11 px-4 py-2 bg-[var(--wp-action)] hover:opacity-90 text-[var(--wp-on-action)] rounded-xl text-sm font-semibold transition-colors inline-flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed",
+  btnSecondary: "min-h-11 px-4 py-2 bg-[var(--wp-surface)] hover:bg-[var(--wp-surface-muted)] text-[var(--wp-text)] border border-[var(--wp-border)] rounded-xl text-sm font-semibold transition-colors inline-flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed",
+  btnGhost: "min-h-11 px-3 py-2 text-[var(--wp-muted)] hover:text-[var(--wp-text)] hover:bg-[var(--wp-surface-muted)] rounded-xl text-sm font-medium transition-colors inline-flex items-center justify-center gap-2",
+  btnDanger: "min-h-11 px-3.5 py-2 bg-rose-50 hover:bg-rose-100 text-rose-800 border border-rose-200 rounded-xl text-sm font-semibold transition-colors inline-flex items-center justify-center gap-2",
+  iconButton: "min-h-11 min-w-11 p-2.5 inline-flex items-center justify-center rounded-xl text-[var(--wp-muted)] hover:text-[var(--wp-text)] hover:bg-[var(--wp-surface-muted)] disabled:opacity-50 disabled:cursor-not-allowed",
+  field: "min-h-11 w-full min-w-0 rounded-xl border border-[var(--wp-border)] bg-[var(--wp-surface)] px-3 py-2 text-base sm:text-sm text-[var(--wp-text)] placeholder:text-slate-500 disabled:bg-[var(--wp-surface-muted)] disabled:cursor-not-allowed",
+  fieldLabel: "block text-sm font-medium text-[var(--wp-text)]",
+  help: "text-xs leading-relaxed text-[var(--wp-muted)]",
+  empty: "rounded-2xl border border-dashed border-[var(--wp-border)] p-6 text-center text-sm text-[var(--wp-muted)]",
+  error: "rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm leading-relaxed text-rose-900",
+  springTransition: { duration: 0.18, ease: [0.16, 1, 0.3, 1] },
 };

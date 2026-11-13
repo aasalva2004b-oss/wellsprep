@@ -1,4 +1,5 @@
-import React, { useState } from "react";
+import { useDialogAccessibility } from '../../hooks/useDialogAccessibility';
+import React, { useEffect, useState } from "react";
 import { X, Sliders, Clock, Sparkles, Check, RotateCcw } from "lucide-react";
 import { PlannerSettings, DEFAULT_PLANNER_SETTINGS } from "../../lib/plannerEngine";
 import { playSound } from "../../lib/sound";
@@ -18,7 +19,9 @@ export const PlannerSettingsModal: React.FC<PlannerSettingsModalProps> = ({
   onSaveSettings
 }) => {
   const [form, setForm] = useState<PlannerSettings>({ ...settings });
+  useEffect(() => { if (isOpen) setForm({ ...settings }); }, [isOpen, settings]);
 
+  const dialogRef = useDialogAccessibility({ isOpen: isOpen, onClose });
   if (!isOpen) return null;
 
   const handleReset = () => {
@@ -33,12 +36,12 @@ export const PlannerSettingsModal: React.FC<PlannerSettingsModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-900/40 backdrop-blur-xs">
-      <motion.div
+    <div className="wp-modal-overlay fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-900/40 backdrop-blur-xs">
+      <motion.div ref={dialogRef} role="dialog" aria-modal="true" aria-label="Ajustes del planificador"
         initial={{ opacity: 0, scale: 0.95, y: 10 }}
         animate={{ opacity: 1, scale: 1, y: 0 }}
         exit={{ opacity: 0, scale: 0.95, y: 10 }}
-        className="bg-white rounded-3xl p-5 sm:p-6 border border-slate-200/90 shadow-2xl max-w-lg w-full max-h-[85vh] flex flex-col overflow-hidden"
+        className="wp-modal-panel bg-white rounded-3xl p-5 sm:p-6 border border-slate-200/90 shadow-2xl max-w-lg w-full max-h-[90dvh] flex flex-col overflow-hidden"
       >
         {/* Header */}
         <div className="flex items-center justify-between pb-3.5 border-b border-slate-100 shrink-0">
@@ -58,6 +61,7 @@ export const PlannerSettingsModal: React.FC<PlannerSettingsModalProps> = ({
           <button
             type="button"
             onClick={onClose}
+              aria-label="Cerrar diálogo"
             className="p-1.5 text-slate-400 hover:text-slate-600 rounded-xl hover:bg-slate-100"
           >
             <X size={18} />
@@ -66,6 +70,15 @@ export const PlannerSettingsModal: React.FC<PlannerSettingsModalProps> = ({
 
         {/* Form Body */}
         <div className="flex-1 overflow-y-auto py-4 space-y-4">
+          <label className="block text-xs font-bold text-slate-700">
+            Contactos después del estudio
+            <select aria-label="Protocolo de refrescos" value={form.autoRefreshProtocol || 'adaptive'} onChange={event => setForm({ ...form, autoRefreshProtocol: event.target.value as PlannerSettings['autoRefreshProtocol'] })} className="block w-full mt-2 rounded-xl border p-2">
+              <option value="adaptive">Una recomendación flexible según el modelo</option>
+              <option value="three_days">Protocolo elegido: tres días consecutivos</option>
+              <option value="off">Sin propuestas automáticas</option>
+            </select>
+            <span className="block mt-1 font-normal">Son propuestas de trabajo. Las fechas de cante se conservan como compromisos independientes.</span>
+          </label>
           {/* 1. Meta Diaria de Horas */}
           <div className="p-3.5 bg-slate-50 rounded-2xl border border-slate-200/80 space-y-2">
             <div className="flex items-center justify-between">

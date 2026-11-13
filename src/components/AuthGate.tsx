@@ -1,11 +1,21 @@
 import { useFirebase } from '../lib/FirebaseProvider';
-import { signIn } from '../lib/firebase';
+import { signIn, isFirebaseEmulator } from '../lib/firebase';
 import { ShieldCheck, ArrowRight } from 'lucide-react';
-import { ReactNode } from 'react';
+import { ReactNode, useState } from 'react';
 import { motion } from 'motion/react';
 
 export function AuthGate({ children }: { children: ReactNode }) {
   const { user, loading } = useFirebase();
+  const [signInError, setSignInError] = useState('');
+  const handleSignIn = async () => {
+    setSignInError('');
+    try { await signIn(); }
+    catch {
+      setSignInError(isFirebaseEmulator
+        ? 'No se pudo acceder al emulador local. Arranca el entorno con npm run dev; no se conectará a producción.'
+        : 'No se pudo iniciar sesión. Inténtalo de nuevo.');
+    }
+  };
 
   if (loading) {
     return (
@@ -50,20 +60,24 @@ export function AuthGate({ children }: { children: ReactNode }) {
           
           <button 
             type="button"
-            onClick={signIn}
+            onClick={handleSignIn}
             className="w-full bg-slate-900 hover:bg-black text-white font-black text-xs uppercase tracking-wider py-4 px-6 rounded-2xl shadow-lg shadow-slate-900/15 transition-all active:scale-[0.98] flex items-center justify-center gap-2 group"
           >
-            <span>Continuar con Google</span>
+            <span>{isFirebaseEmulator ? 'Entrar con datos sintéticos' : 'Continuar con Google'}</span>
             <ArrowRight size={15} className="group-hover:translate-x-0.5 transition-transform" />
           </button>
+          {signInError && <p role="alert" className="mt-3 text-sm text-rose-700">{signInError}</p>}
 
           <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider mt-6">
-            Datos protegidos con cifrado y sincronización en la nube
+            {isFirebaseEmulator ? 'Entorno local de pruebas · Firebase Emulator · Sin datos reales' : 'Datos protegidos con cifrado y sincronización en la nube'}
           </p>
         </motion.div>
       </div>
     );
   }
 
-  return <>{children}</>;
+  return <div className="flex h-[100dvh] min-h-0 flex-col">
+    {isFirebaseEmulator && <div role="status" className="shrink-0 bg-amber-100 px-3 py-0.5 text-center text-[11px] font-medium leading-4 text-amber-950">PRUEBAS · Datos sintéticos · Firebase local</div>}
+    <div className="min-h-0 flex-1">{children}</div>
+  </div>;
 }

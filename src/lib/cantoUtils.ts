@@ -160,139 +160,41 @@ export function compareSessionsAsc(a: any, b: any): number {
   return compareSessionsDesc(b, a);
 }
 
-/**
- * Universal topic session matcher.
- * Matches whether a session `s` corresponds to the given `topic` (e.g. Tema 17 Constitucional),
- * handling variations such as:
- * - "constitucional-17"
- * - "17" or 17
- * - "tema-17" or "Tema 17"
- * - legacy "mercantil-17" if it was a mismapped Constitucional topic
- * - topicNumber: 17
- */
 import { normalizeCategoryToSubjectId, parseAeroFocusTopicIdPrefix } from "./topicResolver";
 
 /**
- * Universal topic session matcher.
- * Matches whether a session `s` corresponds to the given `topic` (e.g. Tema 5 Constitucional),
- * handling variations such as:
- * - "constitucional-5", "constitucional_5", "const-5", "const_5"
- * - "5" or 5
- * - "tema-5" or "Tema 5" or "t5" or "t-5"
- * - legacy "mercantil-5" if it was a mismapped Constitucional topic
- * - topicNumber: 5
- * - subject name variations ("CONST", "Constitución", "Derecho Constitucional")
+ * Resolve session identity before using it in analytics. A complete topic ID is
+ * authoritative; never remap another subject's topic through notes or numbers.
+ * Legacy numeric IDs need an explicit matching subject. Ambiguous records must
+ * be resolved separately rather than being counted in several subjects.
  */
 export function sessionMatchesTopic(
   s: any,
   topic: { id: string; number: number; subjectId?: string; title?: string }
 ): boolean {
   if (!s || !topic) return false;
+  const sessionId = String(s.topicId ?? "").trim().toLowerCase();
+  const targetId = String(topic.id ?? "").trim().toLowerCase();
+  if (sessionId && sessionId === targetId) return true;
 
-  const sTopicId = String(s.topicId || "").trim().toLowerCase();
-  const targetId = String(topic.id || "").trim().toLowerCase();
-  const topicNum = Number(topic.number);
-  const topicNumStr = String(topicNum);
-
-  // 1. Exact topic ID match
-  if (sTopicId === targetId) return true;
-
-  // Normalized subjects
-  const targetSubj = normalizeCategoryToSubjectId(topic.subjectId) || String(topic.subjectId || "").toLowerCase();
-  const sessionSubj = s.subjectId ? (normalizeCategoryToSubjectId(s.subjectId) || String(s.subjectId).toLowerCase()) : null;
-
-  // Subject compatibility helper
-  const subjectCompatible = !sessionSubj || sessionSubj === targetSubj || 
-    (targetSubj === 'constitucional' && (sessionSubj === 'general' || sessionSubj === 'const'));
-
-  // 2. Direct numeric ID (e.g. s.topicId === "5" or 5)
-  if (sTopicId === topicNumStr) {
-    if (subjectCompatible) return true;
+  const targetIdentity = parseAeroFocusTopicIdPrefix(targetId);
+  const targetSubject = normalizeCategoryToSubjectId(topic.subjectId) || targetIdentity?.subjectId;
+  const targetNumber = Number(topic.number) || targetIdentity?.number;
+  const sessionIdentity = parseAeroFocusTopicIdPrefix(sessionId);
+  if (sessionIdentity) {
+    return sessionIdentity.subjectId === targetSubject && sessionIdentity.number === targetNumber;
   }
 
-  // 3. Match by topicNumber property
-  if (s.topicNumber !== undefined && Number(s.topicNumber) === topicNum) {
-    if (subjectCompatible) return true;
-  }
+  const sessionSubject = normalizeCategoryToSubjectId(s.subjectId);
+  if (!targetSubject || !sessionSubject || sessionSubject !== targetSubject) return false;
+  const numericId = sessionId.match(/^(?:(?:tema|t)[-_ ]*)?(\d+)$/);
+  if (numericId) return Number(numericId[1]) === targetNumber;
+  if (s.topicNumber !== undefined) return Number(s.topicNumber) === targetNumber;
 
-  // 4. Try parsing prefixes like "CONST_T5", "CONST-5", "CIV_T12"
-  const parsedPrefix = parseAeroFocusTopicIdPrefix(sTopicId);
-  if (parsedPrefix && parsedPrefix.number === topicNum) {
-    if (parsedPrefix.subjectId === targetSubj || (!parsedPrefix.subjectId && subjectCompatible)) {
-      return true;
-    }
-  }
-
-  // 5. Match prefix and variations (e.g. "tema-5", "tema 5", "t5", "tema_5", "const-5", "const_5")
-  if (
-    sTopicId === `tema-${topicNumStr}` ||
-    sTopicId === `tema ${topicNumStr}` ||
-    sTopicId === `tema_${topicNumStr}` ||
-    sTopicId === `t-${topicNumStr}` ||
-    sTopicId === `t${topicNumStr}` ||
-    sTopicId === `const-${topicNumStr}` ||
-    sTopicId === `const_${topicNumStr}` ||
-    sTopicId === `constitucional-${topicNumStr}` ||
-    sTopicId === `constitucional_${topicNumStr}`
-  ) {
-    if (subjectCompatible) return true;
-  }
-
-  // 6. Match ending with "-5" or "_5"
-  if (sTopicId.endsWith(`-${topicNumStr}`) || sTopicId.endsWith(`_${topicNumStr}`)) {
-    const prefix = sTopicId.slice(0, -(topicNumStr.length + 1));
-    const prefixSubj = normalizeCategoryToSubjectId(prefix);
-    if (!prefixSubj || prefixSubj === targetSubj) {
-      if (subjectCompatible) return true;
-    }
-    // If it was stored under mercantil-5 or penal (5 or 12) but active subject is constitucional
-    if (targetSubj === "constitucional" && (sTopicId.startsWith("mercantil") || sTopicId.startsWith("constitucional") || (topicNum === 5 && (sTopicId.startsWith("penal") || sTopicId.startsWith("jud-pen"))))) {
-      return true;
-    }
-  }
-
-  // Special match: Penal 5 & Penal 12 belong to Constitucional 5
-  if (targetSubj === "constitucional" && topicNum === 5) {
-    const tCorpus = `${s.topicTitle || ""} ${s.notes || ""} ${s.category || ""}`.toLowerCase();
-    if (
-      sTopicId === "penal-5" ||
-      sTopicId === "penal-12" ||
-      sTopicId === "penal_5" ||
-      sTopicId === "penal_12" ||
-      sTopicId === "jud-pen-05" ||
-      sTopicId === "jud-pen-12" ||
-      tCorpus.includes("penal 5") ||
-      tCorpus.includes("penal 12") ||
-      tCorpus.includes("delito imprudente") ||
-      tCorpus.includes("circunstancias agravantes")
-    ) {
-      return true;
-    }
-  }
-
-  // 7. Check notes or title if they explicitly mention "Tema 5"
-  const textCorpus = `${s.topicTitle || ""} ${s.notes || ""} ${s.mistakes || ""}`.toLowerCase();
-  if (
-    textCorpus.includes(`tema ${topicNumStr}`) ||
-    textCorpus.includes(`tema: ${topicNumStr}`) ||
-    textCorpus.includes(`tema ${topicNumStr}:`) ||
-    textCorpus.includes(`tema ${topicNumStr} `)
-  ) {
-    if (subjectCompatible) return true;
-  }
-
-  // 8. Match by topic title key phrase
-  if (topic.title && s.topicTitle) {
-    const sTitle = String(s.topicTitle).toLowerCase();
-    const tTitle = String(topic.title).toLowerCase();
-    if (sTitle.length > 8 && tTitle.includes(sTitle.slice(0, 20))) {
-      if (subjectCompatible) return true;
-    }
-  }
-
-  return false;
+  // An exact title plus an explicit subject can identify a legacy record. Free
+  // text notes and partial title/number matches cannot establish topic identity.
+  return !!topic.title && !!s.topicTitle && String(s.topicTitle).trim().toLowerCase() === topic.title.trim().toLowerCase();
 }
-
 
 
 /**
