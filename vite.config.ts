@@ -16,7 +16,21 @@ export default defineConfig(({mode, command}) => {
     'Content-Security-Policy': "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; worker-src 'self' blob:; connect-src 'self' http://127.0.0.1:8080 http://127.0.0.1:9099 ws://127.0.0.1:5173",
   } : {};
   return {
-    plugins: [react(), tailwindcss(), ...(backupPath ? [{
+    plugins: [react(), tailwindcss(), {
+      name: 'private-development-files',
+      configureServer(server: any) {
+        server.middlewares.use((req: any, res: any, next: any) => {
+          let pathname: string;
+          try { pathname = decodeURIComponent((req.url || '').split('?')[0]).replace(/\\/g, '/'); }
+          catch { res.statusCode = 400; return res.end(); }
+          if (/(?:^|\/)(?:server(?:\.[cm]?[jt]s)?|build|uploads|\.git)(?:\/|$)/i.test(pathname)
+            || /(?:^|\/)(?:\.env(?:\.[^/]*)?|\.npmrc|[^/]*(?:service-account|firebase-adminsdk|credentials)[^/]*\.json|[^/]+\.(?:pem|key|p12|pfx))$/i.test(pathname)) {
+            res.statusCode = 404; return res.end();
+          }
+          next();
+        });
+      },
+    }, ...(backupPath ? [{
       name: 'private-backup-replay',
       configureServer(server: any) {
         server.middlewares.use('/__test__/backup.json', (_req: any, res: any) => {

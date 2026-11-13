@@ -77,7 +77,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
   }
 
   return <div className="flex h-[100dvh] min-h-0 flex-col">
-    {isFirebaseEmulator && <div role="status" className="shrink-0 bg-amber-100 px-3 py-0.5 text-center text-[11px] font-medium leading-4 text-amber-950">PRUEBAS · Datos sintéticos · Firebase local</div>}
+    {isFirebaseEmulator && <div role="status" className="shrink-0 bg-amber-100 px-3 py-0.5 text-center text-[11px] font-medium leading-4 text-amber-950">{(import.meta as ImportMeta & { env?: Record<string, string> }).env?.VITE_DEMO_PREVIEW === 'true' ? 'DEMOSTRACIÓN · Datos ficticios · Cambios solo en memoria: se pierden al recargar · Sin Firebase real' : 'PRUEBAS · Datos sintéticos · Firebase local'}</div>}
     <div className="min-h-0 flex-1">{children}</div>
   </div>;
 }

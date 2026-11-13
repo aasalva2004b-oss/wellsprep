@@ -1,5 +1,7 @@
 # Wells Prep: resultado de las correcciones finales
 
+**Actualización del 14 de noviembre:** se corrigió la dependencia de Java del arranque de vista previa. `npm run dev` abre una demostración sintética en memoria; `npm run dev:local` conserva Express + emuladores. No confundir la demostración con producción. Véase [AI_STUDIO_STARTUP_FIX.md](AI_STUDIO_STARTUP_FIX.md).
+
 Revisión del 13 de noviembre de 2026. **Código preparado para revisión e integración; publicación real condicionada a la configuración y al ensayo remoto indicados abajo.** No se ha desplegado, migrado ni accedido a Firebase de producción.
 
 Este documento sustituye el diagnóstico anterior de cinco regresiones y API pública sin protección. Los resultados reproducibles están en `RELEASE_VERIFICATION.json`; el inventario de archivos, en `RELEASE_CHANGE_INVENTORY.md`. Los informes de fases anteriores describen su momento de ejecución y no sustituyen esta verificación final.

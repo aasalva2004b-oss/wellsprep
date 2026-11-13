@@ -31,7 +31,7 @@ npm run build
 npm audit --omit=dev
 ```
 
-Java 21 es necesario para los emuladores; Chromium o el navegador de Playwright para las pruebas visuales. Ejecuta estos comandos uno detrás de otro, dejando libres los puertos locales. `npm run dev` arranca el desarrollo con emuladores y semilla sintética; no se usa para publicar. No hacen falta credenciales de producción.
+Java 21 es necesario para los emuladores; Chromium o el navegador de Playwright para las pruebas visuales. Ejecuta estos comandos uno detrás de otro, dejando libres los puertos locales. `npm run dev:local` arranca el desarrollo con emuladores y semilla sintética; no se usa para publicar. No hacen falta credenciales de producción.
 
 Si la rama no pudo subirse desde este entorno, el informe final indicará el motivo y los commits locales. Desde una sesión GitHub autorizada en este mismo checkout:
 
@@ -88,7 +88,7 @@ El ID y la base deben coincidir con el JSON utilizado al compilar. No definir `F
 npm start
 ```
 
-No usar `npm run dev` ni `vite preview` como servidor publicado: las rutas API se sirven mediante Express. Si la plataforma solo sirve archivos estáticos, no soporta este backend; hay que utilizar un runtime Node/Cloud Run.
+No usar `npm run dev:local` ni `vite preview` como servidor publicado: las rutas API se sirven mediante Express. Si la plataforma solo sirve archivos estáticos, no soporta este backend; hay que utilizar un runtime Node/Cloud Run.
 
 Alternativa reproducible con Docker, después de comprobar el JSON del proyecto de pruebas:
 

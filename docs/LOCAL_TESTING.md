@@ -27,7 +27,7 @@ npm test                 # pruebas puras, configuración y bloqueo de red
 npm run test:browser     # interfaz + fallo seguro con Auth Emulator inaccesible
 npm run test:auth        # integración con Auth Emulator, sin descarga del JAR Firestore
 npm run test:firebase    # arranca Auth/Firestore, prueba SDK/reglas, semilla y navegador
-npm run dev              # arranca emuladores, carga datos sintéticos y abre Express con Vite integrado
+npm run dev:local        # arranca emuladores, carga datos sintéticos y abre Express con Vite integrado
 npm run test:backup -- /ruta/privada/backup.json # motores e interfaz con copia privada en memoria
 ```
 
@@ -89,7 +89,7 @@ no sustituye las pruebas de integración con el emulador.
 5. Las pruebas de navegador usan un perfil nuevo y bloquean solicitudes fuera
    de los tres destinos locales. También comprueban la política CSP del servidor
    y fuerzan un fallo de Auth para verificar que no hay conexión a producción.
-6. `npm run dev` arranca Express con Vite integrado y el backend conectado exclusivamente a los emuladores. No lee `uploads` ni recibe una clave Gemini. Los canales automáticos externos permanecen desactivados; la API local permite probar credenciales personales e ingreso de eventos sintéticos. Las fuentes privadas del servidor y claves están bloqueadas también en desarrollo. Los recorridos visuales de replay usan Vite solo y rechazan `/api`; no son pruebas de persistencia.
+6. `npm run dev:local` arranca Express con Vite integrado y el backend conectado exclusivamente a los emuladores. No lee `uploads` ni recibe una clave Gemini. Los canales automáticos externos permanecen desactivados; la API local permite probar credenciales personales e ingreso de eventos sintéticos. Las fuentes privadas del servidor y claves están bloqueadas también en desarrollo. Los recorridos visuales de replay usan Vite solo y rechazan `/api`; no son pruebas de persistencia.
 7. `test:firebase` incluye el recorrido navegador → Express → Auth/Firestore emulados: login, credencial personal, ingreso autenticado, lectura y denegación de fuentes privadas. Los procesos se cierran al terminar.
 
 El modo local no necesita `.env`. Los valores `VITE_FIREBASE_PROJECT_ID`,

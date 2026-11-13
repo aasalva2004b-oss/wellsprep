@@ -4,7 +4,7 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "node scripts/local-environment.mjs dev",
+    "dev": "node scripts/dev-preview.mjs",
     "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=build/server.cjs",
     "preview": "vite preview",
     "clean": "rm -rf dist build",
@@ -21,7 +21,9 @@
     "test:provider": "node scripts/provider-synthetic-browser.mjs",
     "evaluate:duration": "node --require ./scripts/local-only-network.cjs --import tsx scripts/evaluate-estimator.ts",
     "evaluate:retention": "node --require ./scripts/local-only-network.cjs --import tsx scripts/evaluate-retention.ts",
-    "test:release": "node --require ./scripts/local-only-network.cjs --import tsx --test scripts/release-regression-probes.ts"
+    "test:release": "node --require ./scripts/local-only-network.cjs --import tsx --test scripts/release-regression-probes.ts",
+    "dev:local": "node scripts/local-environment.mjs dev",
+    "test:hosted-preview": "node scripts/test-hosted-preview.mjs"
   },
   "dependencies": {
     "@google/genai": "^1.29.0",
