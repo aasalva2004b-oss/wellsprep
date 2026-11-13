@@ -1,0 +1,267 @@
+{
+  "date": "2026-11-13",
+  "decision": "READY_FOR_REVIEW_REMOTE_STAGING_REQUIRED",
+  "branch": "release/wells-prep-production-fixes",
+  "productionFirebaseAccess": false,
+  "productionWrites": false,
+  "deployments": false,
+  "migrations": false,
+  "firebaseProjectUsedForTests": "demo-wellsprep",
+  "adminProductionCredentialsUsed": false,
+  "passed": {
+    "unitTests": 321,
+    "releaseRegressionsIncludedInUnitTests": 5,
+    "authFirestoreBackendEmulatorTests": 15,
+    "localHistoricalCompatibilityTests": 5,
+    "typecheck": true,
+    "localModeBuild": true,
+    "remoteModeBuildWithoutRemoteConnection": true,
+    "phaseABrowserChecks": 6,
+    "providerBrowserChecks": 14,
+    "additionalCanonicalAliasAssertion": true,
+    "phaseDBrowserChecks": 6,
+    "uiScreens": 40,
+    "uiChecks": 29,
+    "uiWidths": [
+      320,
+      390,
+      768,
+      1440
+    ],
+    "uiJavaScriptErrors": [],
+    "uiExternalRequests": 0,
+    "realLocalSdkBrowser": true,
+    "browserExpressFirebaseEmulatorRoundTrip": true,
+    "developmentPrivateSourcesDenied": true,
+    "dockerBuild": true,
+    "isolatedCompiledContainer": {
+      "uid": 1000,
+      "checks": [
+        {
+          "path": "/",
+          "status": 200
+        },
+        {
+          "path": "/healthz",
+          "status": 200
+        },
+        {
+          "path": "/api/webhook/events",
+          "status": 401
+        },
+        {
+          "path": "/api/webhook/health",
+          "status": 401
+        },
+        {
+          "path": "/server.cjs",
+          "status": 404
+        },
+        {
+          "path": "/server.cjs.map",
+          "status": 404
+        },
+        {
+          "path": "/build/server.cjs",
+          "status": 404
+        },
+        {
+          "path": "/.env",
+          "status": 404
+        },
+        {
+          "path": "/package.json",
+          "status": 404
+        },
+        {
+          "path": "/firebase-applet-config.json",
+          "status": 404
+        },
+        {
+          "path": "/uploads/private.pdf",
+          "status": 404
+        }
+      ],
+      "network": "none",
+      "remoteAccess": false,
+      "developmentDependenciesAbsent": true,
+      "image": "sha256:20215aca185c138ef53e3b9df4ce4948499f483e2a36bc018864bfa3bb2f946d"
+    },
+    "privateKeyScan": {
+      "privateKeyOrServiceAccountFiles": [],
+      "privateBackupTracked": false,
+      "ignoredRuntimeData": true
+    }
+  },
+  "failed": [],
+  "dependencyAudit": {
+    "production": {
+      "info": 0,
+      "low": 0,
+      "moderate": 0,
+      "high": 0,
+      "critical": 0,
+      "total": 0
+    },
+    "fullDevelopmentTree": {
+      "info": 0,
+      "low": 0,
+      "moderate": 19,
+      "high": 0,
+      "critical": 0,
+      "total": 19
+    },
+    "remainingPackages": [
+      "@eslint/config-array",
+      "@google-cloud/pubsub",
+      "@opentelemetry/core",
+      "@typescript-eslint/parser",
+      "@typescript-eslint/rule-tester",
+      "@typescript-eslint/typescript-estree",
+      "@typescript-eslint/utils",
+      "archiver",
+      "archiver-utils",
+      "eslint",
+      "exegesis",
+      "firebase-tools",
+      "gaxios",
+      "glob",
+      "google-gax",
+      "minimatch",
+      "rimraf",
+      "uuid",
+      "zip-stream"
+    ],
+    "productionAuditExitCode": 0,
+    "fullDevelopmentAuditExitCode": 1
+  },
+  "historicalData": {
+    "scope": "Private downloaded 2026-11-07 snapshot only; local read-only tests; not a complete production inventory",
+    "sessions": 302,
+    "progressDocuments": 29,
+    "sha256": "c524c4f186be79872f08d741b375393ee13605ea83991a6de8e51e42825ecb67",
+    "unchanged": true,
+    "importedToFirebase": false
+  },
+  "aiStudio": {
+    "existingAppConfirmedByUser": true,
+    "liveInterfaceVerified": false,
+    "directGitHubImportVerified": false
+  },
+  "requiredExternalChecks": [
+    "Review and test new rules against real document locations and UID ownership before approving their deployment",
+    "Remote staging: managed server identity, Auth domains, project/database match, external AeroFocus credential rotation and restart",
+    "Optional live PDF/Gemini compatibility",
+    "Owner approval for deployment; complete database export before production change"
+  ],
+  "limitations": [
+    "No production access or deployed-rules certification",
+    "Historical missing page ranges are not reconstructed from percentages",
+    "No demonstrated predictive accuracy gain without temporally comparable prediction/outcome records",
+    "19 moderate advisories in development tooling; none in runtime audit",
+    "Large initial frontend bundle remains a performance optimization"
+  ],
+  "artifacts": {
+    "localLogs": ".cache/final-fix/",
+    "screenshots": ".cache/phase-e/after-*.png",
+    "committedLogsContainPrivateData": false,
+    "evidenceSha256": {
+      "unit.log": "77c7849d7c9ec29b767fcc84c0d2551cba1e6571997632fc7b3708c1ecef9ee9",
+      "firebase.log": "14ec527d645b3aaab4b21a14e41d93a7c3a78273e591404d366594fdb872066d",
+      "typecheck.log": "ca4a767b3807d1bd9163e522827ca89f6b64081136e0b5e2b05f7ff724220e8b",
+      "build.log": "d4915bfe3ccb4dccfb188359bc617fc6cbb1e0da867197282e10d03284f47307",
+      "remote-build.log": "d1b9f3d2a4e47c24d322d802cbb7377b6672176fceb1925f3032d0e42b7d7607",
+      "historical.log": "5d4f50ec70da6a1ac51585561f406d91ebc50e38a9b85da8c3686b738fd01026",
+      "release.log": "c1e83f5dcb2cb0f8fb1bc1256a5dfe72e76090ab9c31c1286dce053c21fa353a",
+      "container-smoke.json": "064fbbb77ef9a8bddde6e15dabe29d74cb507f37bd0b87d25bf0cef8e4db964a",
+      "deps-final.production.json": "ce76ae07f0dece38cb635bbfcdec4d7163b0190250f804fa1b5a253a9a242cd5",
+      "deps-final.all.json": "d10b607f5861072082aaf009a68518a6f8bc5c05ac1324ca8e1f286409e4db2a"
+    }
+  },
+  "github": {
+    "status": "review_branch_pushed_pr_creation_blocked",
+    "branch": "release/wells-prep-production-fixes",
+    "pushedCommitBeforeThisMetadataUpdate": "d9094f3c17ce8cd132fc9b2fd86600e706c045e0",
+    "branchUrl": "https://github.com/aasalva2004b-oss/wellsprep/tree/release/wells-prep-production-fixes",
+    "pullRequestCreated": false,
+    "apiError": "Forbidden: both GraphQL PR creation and REST pull request creation failed with exit 1",
+    "manualPullRequestUrl": "https://github.com/aasalva2004b-oss/wellsprep/compare/main...release/wells-prep-production-fixes?expand=1",
+    "preparedBody": "docs/PULL_REQUEST_BODY.md",
+    "mainMerged": false,
+    "deployed": false
+  },
+  "verifiedCodeCommit": "5e5f78a267ae009f3e92c8603c939b19614e4a1d",
+  "commands": [
+    {
+      "command": "npm run lint",
+      "exitCode": 0,
+      "log": ".cache/final-fix/typecheck.log"
+    },
+    {
+      "command": "npm test",
+      "exitCode": 0,
+      "log": ".cache/final-fix/unit.log"
+    },
+    {
+      "command": "npm run test:firebase",
+      "exitCode": 0,
+      "log": ".cache/final-fix/firebase.log"
+    },
+    {
+      "command": "npm run test:release",
+      "exitCode": 0,
+      "log": ".cache/final-fix/release.log"
+    },
+    {
+      "command": "npm run test:phase-a",
+      "exitCode": 0,
+      "log": ".cache/final-fix/phase-a.log"
+    },
+    {
+      "command": "npm run test:provider",
+      "exitCode": 0,
+      "log": ".cache/final-fix/provider.log"
+    },
+    {
+      "command": "node scripts/phase-d-browser.mjs",
+      "exitCode": 0,
+      "log": ".cache/final-fix/phase-d.log"
+    },
+    {
+      "command": "node scripts/phase-e-ui.mjs",
+      "exitCode": 0,
+      "log": ".cache/final-fix/phase-e.log"
+    },
+    {
+      "command": "npm run build",
+      "exitCode": 0,
+      "log": ".cache/final-fix/build.log"
+    },
+    {
+      "command": "VITE_FIREBASE_MODE=production NODE_OPTIONS=--require=./scripts/local-only-network.cjs npm run build",
+      "exitCode": 0,
+      "log": ".cache/final-fix/remote-build.log"
+    },
+    {
+      "command": "node --require ./scripts/local-only-network.cjs --import tsx --test tests/privateBackup.test.ts (WELLSPREP_LOCAL_BACKUP supplied privately)",
+      "exitCode": 0,
+      "log": ".cache/final-fix/historical.log"
+    },
+    {
+      "command": "python3 .cache/final-fix/verify-docker.py (local daemon; isolated container)",
+      "exitCode": 0,
+      "log": ".cache/final-fix/container-smoke.log"
+    },
+    {
+      "command": "npm audit --omit=dev --json",
+      "exitCode": 0,
+      "log": ".cache/final-fix/deps-final.production.json"
+    },
+    {
+      "command": "npm audit --json",
+      "exitCode": 1,
+      "log": ".cache/final-fix/deps-final.all.json",
+      "explanation": "19 moderate development advisories; runtime tree has zero known advisories"
+    }
+  ]
+}

@@ -19,6 +19,7 @@ import { cn, formatMinutesToHours } from "../../lib/utils";
 import { playSound } from "../../lib/sound";
 import { toast } from "sonner";
 import { motion } from "motion/react";
+import { sessionDurationMinutes } from "../../lib/canonicalTopicService";
 
 interface DailyActionPlanViewProps {
   quota: DayStudyQuota | undefined;
@@ -26,8 +27,7 @@ interface DailyActionPlanViewProps {
   plan: WeeklyCantePlan;
   daySessions: any[];
   topicMap: Map<string, any>;
-  onToggleTaskComplete: (dateStr: string, topicId: string, isCompleted: boolean, pagesCount: number) => void;
-  onRecordStudySession?: (topicId: string, durationMinutes: number) => void;
+  onRecordStudySession?: (task: DayTopicTask) => void;
   onSwitchToCanteView?: (day: "lunes" | "jueves") => void;
 }
 
@@ -37,7 +37,6 @@ export const DailyActionPlanView: React.FC<DailyActionPlanViewProps> = ({
   plan,
   daySessions,
   topicMap,
-  onToggleTaskComplete,
   onRecordStudySession,
   onSwitchToCanteView
 }) => {
@@ -48,6 +47,7 @@ export const DailyActionPlanView: React.FC<DailyActionPlanViewProps> = ({
   const tasks = quota?.tasks || [];
   const plannedPages = quota?.totalPlannedPages || 0;
   const plannedMinutes = quota?.totalPlannedMinutes || 0;
+  const unknownDurationTaskCount = quota?.unknownDurationTaskCount || 0;
   const actualMinutes = quota?.totalActualMinutesStudied || 0;
 
   const totalPagesDone = tasks.filter((t) => t.isCompleted).reduce((acc, t) => acc + t.pagesCount, 0);
@@ -87,7 +87,7 @@ export const DailyActionPlanView: React.FC<DailyActionPlanViewProps> = ({
               <p className="text-xs text-slate-500 mt-1 font-medium flex items-center gap-2 flex-wrap">
                 <span>Meta del día: <strong className="font-mono text-slate-800">{plannedPages} páginas</strong></span>
                 <span className="text-slate-300">·</span>
-                <span>Tiempo previsto: <strong className="font-mono text-slate-800">{formatMinutesToHours(plannedMinutes)}</strong></span>
+                <span>Tiempo previsto: <strong className="font-mono text-slate-800">{unknownDurationTaskCount ? `${plannedMinutes > 0 ? `${formatMinutesToHours(plannedMinutes)} + ` : ""}${unknownDurationTaskCount} ${unknownDurationTaskCount === 1 ? "tarea sin estimación" : "tareas sin estimación"}` : formatMinutesToHours(plannedMinutes)}</strong></span>
                 <span className="text-slate-300">·</span>
                 <span>Estudiado hoy: <strong className="font-mono text-emerald-700">{formatMinutesToHours(actualMinutes)}</strong></span>
               </p>
@@ -159,16 +159,16 @@ export const DailyActionPlanView: React.FC<DailyActionPlanViewProps> = ({
           <div className="space-y-2 mt-3 text-xs text-amber-950/90 font-medium">
             <div className="p-3 bg-white/80 rounded-xl border border-amber-200/50 flex items-center justify-between">
               <span>1. Repaso mental de índices y estructura de epígrafes</span>
-              <span className="font-mono font-bold text-amber-800">~45 min</span>
+              <span className="font-mono font-bold text-amber-800">Según tu sesión</span>
             </div>
             <div className="p-3 bg-white/80 rounded-xl border border-amber-200/50 flex items-center justify-between">
-              <span>2. Simulacro oral con cronómetro (12m 30s por tema)</span>
+              <span>2. Simulacro oral con cronómetro</span>
               <span className="font-mono font-bold text-amber-800">Cante</span>
             </div>
             {tasks.some((t) => t.isCanteMorningBuffer) && (
               <div className="p-3 bg-amber-100/60 rounded-xl border border-amber-300/80 flex items-center justify-between font-bold text-amber-950">
                 <span>⚡ Buffer activo: Terminar páginas pendientes antes del repaso</span>
-                <span className="font-mono">1-2 horas max</span>
+                <span className="font-mono">Carga del plan</span>
               </div>
             )}
           </div>
@@ -192,9 +192,9 @@ export const DailyActionPlanView: React.FC<DailyActionPlanViewProps> = ({
         {tasks.length === 0 ? (
           <div className="bg-white rounded-3xl p-10 text-center border border-slate-200/70 shadow-2xs">
             <CheckCircle2 size={36} className="text-emerald-500 mx-auto mb-2" />
-            <h4 className="text-sm font-bold text-slate-800">Sin tareas pesadas asignadas</h4>
+            <h4 className="text-sm font-bold text-slate-800">{plan.hasUnknownProgress ? "Cobertura pendiente de medir" : "Sin bloques pendientes asignados"}</h4>
             <p className="text-xs text-slate-500 max-w-sm mx-auto mt-1">
-              Todos los temas para este cante ya están al día o cubiertos. Puedes hacer repasos de refuerzo o descansar.
+              {plan.hasUnknownProgress ? "Faltan páginas identificadas o extensión de algunos temas. Registra sus sesiones reales para conocer el trabajo pendiente." : "No hay bloques de estudio inicial pendientes en esta jornada. Los repasos y cantes conservan su propio historial."}
             </p>
           </div>
         ) : (
@@ -219,16 +219,7 @@ export const DailyActionPlanView: React.FC<DailyActionPlanViewProps> = ({
                       <button
                         type="button"
                         onClick={() => {
-                          const nextState = !isDone;
-                          if (nextState) playSound.success();
-                          else playSound.click();
-                          onToggleTaskComplete(dateStr, task.topicId, nextState, task.pagesCount);
-                          toast.success(
-                            nextState 
-                              ? `Tema ${task.topicNumber}: ${task.pagesCount} páginas completadas` 
-                              : `Tema ${task.topicNumber}: marcado como pendiente`,
-                            { description: "El plan semanal se ha recalculado automáticamente." }
-                          );
+                          if (!isDone) onRecordStudySession?.(task);
                         }}
                         className={cn(
                           "w-7 h-7 rounded-xl flex items-center justify-center transition-all shrink-0 mt-0.5",
@@ -236,7 +227,8 @@ export const DailyActionPlanView: React.FC<DailyActionPlanViewProps> = ({
                             ? "bg-emerald-600 text-white shadow-xs" 
                             : "border-2 border-slate-300 hover:border-indigo-600 bg-white"
                         )}
-                        title={isDone ? "Desmarcar páginas" : "Marcar páginas como leídas"}
+                        disabled={isDone}
+                        title={isDone ? "Cobertura registrada en sesiones reales" : "Registrar una sesión real de este bloque"}
                       >
                         {isDone && <CheckCircle2 size={16} strokeWidth={2.5} />}
                       </button>
@@ -270,7 +262,9 @@ export const DailyActionPlanView: React.FC<DailyActionPlanViewProps> = ({
                           <span className="text-slate-300">·</span>
                           <span className="flex items-center gap-1 font-mono text-slate-500">
                             <Clock size={12} />
-                            ~{task.estimatedMinutes} min a {task.minutesPerPage} min/pág
+                            {task.estimatedMinutes === null
+                              ? "Sin evidencia suficiente para estimar"
+                              : `~${task.estimatedMinutes} min${task.estimateInterval ? ` (${task.estimateInterval.low}–${task.estimateInterval.high} min)` : ""}`}
                           </span>
                         </div>
                       </div>
@@ -283,7 +277,7 @@ export const DailyActionPlanView: React.FC<DailyActionPlanViewProps> = ({
                           type="button"
                           onClick={() => {
                             playSound.click();
-                            onRecordStudySession(task.topicId, task.estimatedMinutes);
+                            onRecordStudySession(task);
                           }}
                           className="px-3.5 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-bold rounded-xl transition-all flex items-center gap-1.5 shadow-2xs"
                           title="Registrar sesión de estudio de este bloque"
@@ -312,7 +306,7 @@ export const DailyActionPlanView: React.FC<DailyActionPlanViewProps> = ({
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             {daySessions.map((session, sIdx) => {
               const topic = topicMap.get(session.topicId);
-              const durMins = session.durationMinutes || session.duration || 0;
+              const durMins = sessionDurationMinutes(session);
               return (
                 <div
                   key={session.id || sIdx}

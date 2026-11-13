@@ -15,6 +15,7 @@ interface TopicEditorHeaderProps {
   daysUntilReview: number;
   nextReviewDate: string | null;
   onClose: () => void;
+  disabled?: boolean;
 }
 
 export const TopicEditorHeader: React.FC<TopicEditorHeaderProps> = ({
@@ -25,6 +26,7 @@ export const TopicEditorHeader: React.FC<TopicEditorHeaderProps> = ({
   daysUntilReview,
   nextReviewDate,
   onClose,
+  disabled = false,
 }) => {
   return (
     <header className="flex-shrink-0 px-4 py-3 sm:px-6 sm:py-4 md:px-8 md:py-5 bg-white/90 backdrop-blur-2xl border-b border-slate-200/80 flex items-center justify-between z-50">
@@ -73,7 +75,9 @@ export const TopicEditorHeader: React.FC<TopicEditorHeaderProps> = ({
       <button
         type="button"
         onClick={onClose}
-        className="w-9 h-9 sm:w-10 sm:h-10 bg-slate-100/90 hover:bg-slate-200 text-slate-500 hover:text-slate-800 rounded-full transition-all flex items-center justify-center flex-shrink-0 active:scale-95 shadow-xs"
+        disabled={disabled}
+        aria-label="Cerrar ficha"
+        className="h-11 w-11 bg-slate-100/90 hover:bg-slate-200 text-slate-500 hover:text-slate-800 rounded-full transition-all flex items-center justify-center flex-shrink-0 disabled:opacity-50"
         title="Cerrar ficha"
       >
         <X size={18} strokeWidth={2.5} />

@@ -9,10 +9,15 @@
  */
 
 import { Topic, Session } from "../types";
+import { initialTopics } from "../data/initialData";
+import { isCantoSession, getCantoDuration, sessionMatchesTopic } from "./cantoUtils";
 import { TopicProgressData } from "./prediction";
 import { getLocalDateString, safeParseDate } from "./utils";
 import { evaluateTopicPreparation } from "./preparationScore";
-import { CanonicalTopic, getCanonicalTopic, buildCanonicalTopicMap } from "./canonicalTopicService";
+import { CanonicalTopic, getCanonicalTopic, buildCanonicalTopicMap, getSessionCategory, sessionDurationMinutes } from "./canonicalTopicService";
+import { estimateRetention, captureRetentionPrediction, isSessionAvailableAt } from './retentionModel';
+import { selectSessionVersions } from './sessionVersions';
+import { getInitialStudyCompletionDate } from './topicCoverage';
 import { 
   buildLearnerProfile, 
   estimateAdaptiveDuration, 
@@ -35,11 +40,19 @@ export interface PlannerTask {
   status: PlannerTaskStatus;
   
   // Metadatos de la tarea
-  estimatedMinutes: number;
+  estimatedMinutes: number | null;
+  prediction?: AdaptiveDurationEstimate;
   actualMinutes?: number;
-  pagesCount: number;
+  pagesCount?: number;
+  estimateSource?: "automatic" | "manual";
+  manualEstimatedMinutes?: number;
+  volumeSource?: "whole_topic" | "explicit_range" | "explicit_count" | "remaining_initial";
+  sessionId?: string;
+  sessionLinkStatus?: "linked" | "unlinked" | "missing" | "ambiguous" | "mismatch";
+  recordedDate?: string;
   fromPage?: number;
   toPage?: number;
+  pagesNumbers?: number[];
   notes?: string;
   
   // Metadatos para refrescos automáticos
@@ -49,6 +62,16 @@ export interface PlannerTask {
   // Marcas temporales
   createdAt: string;
   completedAt?: string;
+  isMemoryRecommendation?: boolean;
+  retentionPrediction?: Record<string, any>;
+  pinned?: boolean;
+  planningOrigin?: 'manual' | 'cante_proposal' | 'automatic';
+  confirmed?: boolean;
+  commitmentId?: string;
+  dependencyTaskIds?: string[];
+  requirement?: 'mandatory' | 'recommendation';
+  proposalBasis?: 'actual_completion' | 'proposed_completion' | 'cante_goal' | 'retention' | 'overdue';
+  proposedOriginalDate?: string;
 }
 
 export interface DayPlan {
@@ -74,6 +97,7 @@ export interface DayPlan {
   hasRefresco: boolean;
   hasRepaso: boolean;
   realSessionsCount: number;
+  unknownDurationTaskCount: number;
 }
 
 export interface WeekPlan {
@@ -82,6 +106,7 @@ export interface WeekPlan {
   endDate: string; // Domingo "YYYY-MM-DD"
   days: DayPlan[];
   totalEstimatedHours: number;
+  unknownDurationTaskCount: number;
   totalActualHours: number;
   totalTargetHours: number;
   totalCompletedTasks: number;
@@ -95,6 +120,7 @@ export interface WeekPlan {
 }
 
 export interface PlannerSettings {
+  autoRefreshProtocol?: 'adaptive' | 'three_days' | 'off';
   targetDailyHours: number; // Por defecto: 7.5h
   velocidadEstudioNuevoMinPorPagina: number; // Por defecto: 5.5 min/pág
   velocidadRefrescoMinPorPagina: number; // Por defecto: 2.0 min/pág
@@ -108,6 +134,7 @@ export interface PlannerSettings {
 }
 
 export const DEFAULT_PLANNER_SETTINGS: PlannerSettings = {
+  autoRefreshProtocol: 'three_days',
   targetDailyHours: 7.5,
   velocidadEstudioNuevoMinPorPagina: 5.5,
   velocidadRefrescoMinPorPagina: 2.0,
@@ -144,7 +171,7 @@ export const ACTIVITY_CONFIG: Record<
   },
   refresco: {
     label: "Refresco",
-    description: "Ciclo de 3 días para asentar la memoria a corto plazo",
+    description: "Contacto de consolidación, con fecha orientativa",
     colorHex: "#ea580c",
     bgClass: "bg-orange-50/80",
     borderClass: "border-orange-200 hover:border-orange-300",
@@ -154,7 +181,7 @@ export const ACTIVITY_CONFIG: Record<
   },
   repaso: {
     label: "Repaso",
-    description: "Renovación de la curva del olvido y temas mensuales",
+    description: "Revisión y comprobación del recuerdo",
     colorHex: "#16a34a",
     bgClass: "bg-emerald-50/80",
     borderClass: "border-emerald-200 hover:border-emerald-300",
@@ -179,6 +206,38 @@ export const ACTIVITY_CONFIG: Record<
  * integrando la Fuente Única de Verdad (páginas y palabras reales del tema),
  * el soporte para estudio de páginas parciales y el perfil de aprendizaje empírico.
  */
+export interface PlannerEstimateContext {
+  allTopics?: Topic[];
+  canonicalMap?: Map<string, CanonicalTopic>;
+}
+
+function plannerEstimateInputs(
+  topic: Topic | CanonicalTopic | undefined,
+  sessions: Session[],
+  userProgress: Record<string, TopicProgressData>,
+  settings: PlannerSettings,
+  context: PlannerEstimateContext,
+) {
+  const catalogue = context.allTopics || initialTopics;
+  const topics = topic ? [...catalogue.filter(item => item.id !== topic.id), topic as Topic] : catalogue;
+  const canonicalMap = context.canonicalMap || buildCanonicalTopicMap(topics, userProgress, sessions);
+  const canonical = topic ? canonicalMap.get(topic.id) || getCanonicalTopic(topic.id, topics, userProgress, sessions) : undefined;
+  const profile = buildLearnerProfile(sessions, canonicalMap);
+  // Explicit settings take precedence over empirical subject/global rates in both APIs.
+  profile.manualPaces = {
+    ...(settings.velocidadEstudioNuevoMinPorPagina !== DEFAULT_PLANNER_SETTINGS.velocidadEstudioNuevoMinPorPagina ? { study: settings.velocidadEstudioNuevoMinPorPagina } : {}),
+    ...(settings.velocidadRepasoMinPorPagina !== DEFAULT_PLANNER_SETTINGS.velocidadRepasoMinPorPagina ? { review: settings.velocidadRepasoMinPorPagina } : {}),
+    ...(settings.velocidadRefrescoMinPorPagina !== DEFAULT_PLANNER_SETTINGS.velocidadRefrescoMinPorPagina ? { refresh: settings.velocidadRefrescoMinPorPagina } : {}),
+  };
+  profile.manualDurations = {
+    ...(settings.duracionEstimadaCantePorTemaMinutos !== DEFAULT_PLANNER_SETTINGS.duracionEstimadaCantePorTemaMinutos ? { cante: settings.duracionEstimadaCantePorTemaMinutos } : {}),
+    ...(settings.refresco1DuracionMinutos !== DEFAULT_PLANNER_SETTINGS.refresco1DuracionMinutos ? { refresh1: settings.refresco1DuracionMinutos } : {}),
+    ...(settings.refresco2DuracionMinutos !== DEFAULT_PLANNER_SETTINGS.refresco2DuracionMinutos ? { refresh2: settings.refresco2DuracionMinutos } : {}),
+    ...(settings.refresco3DuracionMinutos !== DEFAULT_PLANNER_SETTINGS.refresco3DuracionMinutos ? { refresh3: settings.refresco3DuracionMinutos } : {}),
+  };
+  return { canonical, profile };
+}
+
 export function estimateTaskDurationMinutes(
   topic: Topic | CanonicalTopic | undefined,
   activityType: PlannerActivityType,
@@ -186,42 +245,13 @@ export function estimateTaskDurationMinutes(
   settings: PlannerSettings = DEFAULT_PLANNER_SETTINGS,
   refrescoIndex?: 1 | 2 | 3,
   userProgress: Record<string, TopicProgressData> = {},
-  partialWork?: { fromPage?: number; toPage?: number; targetPages?: number }
-): number {
-  if (!topic) {
-    if (activityType === "cante") return settings.duracionEstimadaCantePorTemaMinutos;
-    if (activityType === "refresco") return settings.refresco1DuracionMinutos;
-    return 45;
-  }
-
-  // Convertir a CanonicalTopic si no lo es ya
-  const canonical: CanonicalTopic = (topic as any).hasExplicitPages !== undefined
-    ? (topic as CanonicalTopic)
-    : getCanonicalTopic((topic as any).id, [topic as any], userProgress, sessions);
-
-  // Perfil del opositor
-  const canonicalMap = new Map<string, CanonicalTopic>();
-  canonicalMap.set(canonical.id, canonical);
-  const profile = buildLearnerProfile(sessions, canonicalMap);
-
-  // Aplicar ajustes manuales del usuario si difieren del DEFAULT
-  if (settings.velocidadEstudioNuevoMinPorPagina !== DEFAULT_PLANNER_SETTINGS.velocidadEstudioNuevoMinPorPagina) {
-    profile.studyPaceMinPerPage = settings.velocidadEstudioNuevoMinPorPagina;
-  }
-  if (settings.velocidadRepasoMinPorPagina !== DEFAULT_PLANNER_SETTINGS.velocidadRepasoMinPorPagina) {
-    profile.reviewPaceMinPerPage = settings.velocidadRepasoMinPorPagina;
-  }
-  if (settings.velocidadRefrescoMinPorPagina !== DEFAULT_PLANNER_SETTINGS.velocidadRefrescoMinPorPagina) {
-    profile.refreshPaceMinPerPage = settings.velocidadRefrescoMinPorPagina;
-  }
-
-  const estimate = estimateAdaptiveDuration(canonical, activityType, profile, refrescoIndex, partialWork);
-  return estimate.estimatedMinutes;
+  partialWork?: { fromPage?: number; toPage?: number; targetPages?: number },
+  context: PlannerEstimateContext = {},
+): number | null {
+  return estimateTaskAdaptiveDetails(topic, activityType, sessions, settings, refrescoIndex, userProgress, partialWork, context).estimatedMinutes;
 }
 
-/**
- * Devuelve el desglose detallado y justificado de la estimación adaptativa.
- */
+/** One calculation supplies both the numeric estimate and its explanation. */
 export function estimateTaskAdaptiveDetails(
   topic: Topic | CanonicalTopic | undefined,
   activityType: PlannerActivityType,
@@ -229,32 +259,64 @@ export function estimateTaskAdaptiveDetails(
   settings: PlannerSettings = DEFAULT_PLANNER_SETTINGS,
   refrescoIndex?: 1 | 2 | 3,
   userProgress: Record<string, TopicProgressData> = {},
-  partialWork?: { fromPage?: number; toPage?: number; targetPages?: number }
+  partialWork?: { fromPage?: number; toPage?: number; targetPages?: number },
+  context: PlannerEstimateContext = {},
 ): AdaptiveDurationEstimate {
-  if (!topic) {
+  const { canonical, profile } = plannerEstimateInputs(topic, sessions, userProgress, settings, context);
+  const estimate = estimateAdaptiveDuration(canonical, activityType, profile, refrescoIndex, partialWork);
+  return estimate;
+}
+
+function uniquePlannerSessions(sessions: Session[]): Session[] {
+  const now = new Date();
+  return selectSessionVersions(sessions, now).filter(session => isSessionAvailableAt(session, now));
+}
+
+/** Rebuild projections only; this never writes cached estimates or creates sessions. */
+export function reconcilePlannerTasks(
+  tasks: PlannerTask[], sessions: Session[], settings: PlannerSettings,
+  userProgress: Record<string, TopicProgressData> = {}, allTopics: Topic[] = [],
+  canonicalMap = buildCanonicalTopicMap(allTopics, userProgress, sessions),
+): PlannerTask[] {
+  const unique = uniquePlannerSessions(sessions);
+  return tasks.map(task => {
+    const canonical = canonicalMap.get(task.topicId);
+    const exactId = task.sessionId || `planner-${encodeURIComponent(task.id)}`;
+    const candidates = unique.filter(session => session.id === exactId || (session as any).plannerTaskId === task.id);
+    // Identity establishes the candidate, not its meaning. Editing the observed
+    // topic/activity must not credit its minutes to a different planned task.
+    const compatible = candidates.filter(session => {
+      const category = getSessionCategory(session);
+      const activity = category === 'initial_study' ? 'estudio_nuevo' : category === 'review' ? 'repaso'
+        : category === 'refresh' ? 'refresco' : category;
+      return activity === task.activityType && sessionMatchesTopic(session, canonical || {
+        id: task.topicId, subjectId: task.subjectId, number: task.topicNumber, title: task.topicTitle,
+      });
+    });
+    const linked = compatible.find(session => session.id === exactId) || (compatible.length === 1 ? compatible[0] : undefined);
+    const hadObservedLink = !!task.sessionId || task.sessionLinkStatus === 'linked' || candidates.length > 0;
+    const automatic = task.estimateSource !== 'manual' && task.manualEstimatedMinutes === undefined;
+    const explicitRange = task.fromPage !== undefined && task.toPage !== undefined;
+    const volumeSource = task.volumeSource || (explicitRange ? 'explicit_range' : 'whole_topic');
+    const partial = explicitRange ? { fromPage: task.fromPage, toPage: task.toPage }
+      : volumeSource === 'explicit_count' && task.pagesCount ? { targetPages: task.pagesCount } : undefined;
+    const estimate = canonical && automatic && !linked ? estimateTaskAdaptiveDetails(canonical, task.activityType, unique, settings, task.refrescoIndex, userProgress, partial, { allTopics, canonicalMap }) : undefined;
+    const actualMinutes = linked ? sessionDurationMinutes(linked) : undefined;
     return {
-      estimatedMinutes: 45,
-      confidence: "provisional",
-      explanation: "Sin tema seleccionado",
-      paceMinPerPage: 3.5,
-      pagesUsed: 0,
-      totalPages: 0,
-      isPartialStudy: false,
-      hasExplicitPages: false,
-      isCustomSpeed: false,
-      details: { baseVolumeMinutes: 45, difficultyAdjustmentMinutes: 0, vueltaAdjustmentMinutes: 0, decayAdjustmentMinutes: 0 }
+      ...task,
+      topicTitle: canonical?.title || task.topicTitle,
+      subjectId: canonical?.subjectId || task.subjectId,
+      topicNumber: canonical?.number || task.topicNumber,
+      estimateSource: automatic ? 'automatic' : 'manual', volumeSource,
+      estimatedMinutes: automatic ? (estimate ? estimate.estimatedMinutes : linked ? task.estimatedMinutes : null) : task.manualEstimatedMinutes ?? task.estimatedMinutes,
+      prediction: estimate || task.prediction,
+      pagesCount: estimate ? (estimate.pagesUsed > 0 ? estimate.pagesUsed : undefined) : task.pagesCount,
+      ...(linked ? { sessionId: linked.id, sessionLinkStatus: 'linked' as const, actualMinutes, recordedDate: linked.date, status: 'completed' as const }
+        : { sessionLinkStatus: candidates.length && !compatible.length ? 'mismatch' as const : compatible.length > 1 ? 'ambiguous' as const : task.sessionId ? 'missing' as const : 'unlinked' as const,
+            actualMinutes: undefined, recordedDate: undefined,
+            ...(hadObservedLink ? { status: 'pending' as const, completedAt: undefined } : {}) }),
     };
-  }
-
-  const canonical: CanonicalTopic = (topic as any).hasExplicitPages !== undefined
-    ? (topic as CanonicalTopic)
-    : getCanonicalTopic((topic as any).id, [topic as any], userProgress, sessions);
-
-  const canonicalMap = new Map<string, CanonicalTopic>();
-  canonicalMap.set(canonical.id, canonical);
-  const profile = buildLearnerProfile(sessions, canonicalMap);
-
-  return estimateAdaptiveDuration(canonical, activityType, profile, refrescoIndex, partialWork);
+  });
 }
 
 /**
@@ -284,44 +346,64 @@ export function generateAutoRefrescos(
   existingTasks: PlannerTask[],
   settings: PlannerSettings = DEFAULT_PLANNER_SETTINGS,
   userProgress: Record<string, TopicProgressData> = {},
-  sessions: Session[] = []
+  sessions: Session[] = [],
+  context: PlannerEstimateContext = {},
 ): PlannerTask[] {
   if (completedStudyTask.activityType !== "estudio_nuevo") {
     return [];
   }
-
-  const topicId = completedStudyTask.topicId;
-  const finishDate = completedStudyTask.date;
-  const refreshDates = calculateNextStudyDays(finishDate, 3);
-
-  // Evitar duplicados si ya existen refrescos originados por esta tarea
-  const alreadyGenerated = existingTasks.some(
-    (t) => t.sourceStudyTaskId === completedStudyTask.id || (t.topicId === topicId && t.activityType === "refresco" && t.date >= finishDate)
-  );
-
-  if (alreadyGenerated) {
-    return [];
+  if (settings.autoRefreshProtocol === 'off') return [];
+  if (!topic || topic.id !== completedStudyTask.topicId) return [];
+  // Both protocols start from the same observed, whole-topic completion.
+  // A completed block/task alone never completes its parent topic.
+  const catalogue = [...(context.allTopics || []).filter(item => item.id !== topic.id), topic as Topic];
+  const canonicalMap = buildCanonicalTopicMap(catalogue, userProgress, sessions);
+  const canonical = canonicalMap.get(topic.id);
+  const finishDate = canonical ? getInitialStudyCompletionDate(canonical.pages, canonical.sessions) : null;
+  if (!canonical || !finishDate) return [];
+  const realPages = canonical.pages;
+  const wholeTopicWork = { targetPages: realPages };
+  if (settings.autoRefreshProtocol !== 'three_days') {
+    const id = `refresco-${encodeURIComponent(canonical.id)}-${finishDate}-adaptive`;
+    if (existingTasks.some(task => task.id === id || task.sourceStudyTaskId === completedStudyTask.id)) return [];
+    const canteDate = existingTasks.filter(task => task.topicId === topic.id && task.activityType === 'cante' && task.status !== 'completed' && task.date >= finishDate)
+      .map(task => task.date).sort()[0];
+    const recommendation = estimateRetention({ topic: canonical, history: sessions, topics: canonicalMap,
+      asOf: new Date(), canteDate,
+      config: context.canonicalMap?.get(topic.id)?.retentionEstimate?.policy });
+    if (!recommendation.recommendedDate) return [];
+    if (existingTasks.some(task => task.topicId === canonical.id && task.activityType === 'refresco' && task.date === recommendation.recommendedDate)) return [];
+    return [{ id, topicId: canonical.id, topicNumber: canonical.number, topicTitle: canonical.title,
+      subjectId: canonical.subjectId, activityType: 'refresco', date: recommendation.recommendedDate,
+      status: 'pending', estimatedMinutes: estimateTaskDurationMinutes(canonical, 'refresco', sessions, settings, 1, userProgress, wholeTopicWork, { ...context, canonicalMap }),
+      pagesCount: realPages, volumeSource: 'whole_topic', requirement: 'recommendation', proposalBasis: 'actual_completion', planningOrigin: 'automatic',
+      sourceStudyTaskId: completedStudyTask.id, estimateSource: 'automatic', isMemoryRecommendation: true,
+      retentionPrediction: captureRetentionPrediction(recommendation),
+      notes: `Sugerencia flexible, no cita de cante. ${recommendation.reasons.join(' ')}`,
+      createdAt: new Date().toISOString() }];
   }
 
-  const canonical: CanonicalTopic | undefined = topic
-    ? ((topic as any).hasExplicitPages !== undefined ? (topic as CanonicalTopic) : getCanonicalTopic((topic as any).id, [topic as any], userProgress, sessions))
-    : undefined;
+  const topicId = completedStudyTask.topicId;
 
-  const realPages = canonical?.pages && canonical.pages > 0
-    ? canonical.pages
-    : completedStudyTask.pagesCount && completedStudyTask.pagesCount > 0
-    ? completedStudyTask.pagesCount
-    : 0;
+  // Each origin task/index is stable; missing refreshes can be regenerated individually.
+  const refreshDates = calculateNextStudyDays(finishDate, 3);
+
+  // The protocol starts after the topic is complete and refreshes that topic,
+  // not merely the final initial-study block that happened to finish it.
+  const partialWork = wholeTopicWork;
 
   const newRefrescos: PlannerTask[] = [];
   const refrescoIndices: Array<1 | 2 | 3> = [1, 2, 3];
 
   refrescoIndices.forEach((idx, i) => {
+    const stableId = `refresco-${encodeURIComponent(topicId)}-${finishDate}-${idx}`;
+    if (existingTasks.some(task => task.id === stableId || (task.topicId === topicId && task.date === refreshDates[i] && task.activityType === 'refresco')
+      || (task.sourceStudyTaskId === completedStudyTask.id && task.refrescoIndex === idx))) return;
     const taskDate = refreshDates[i];
-    const estimatedMins = estimateTaskDurationMinutes(canonical, "refresco", sessions, settings, idx, userProgress);
+    const estimatedMins = estimateTaskDurationMinutes(canonical, "refresco", sessions, settings, idx, userProgress, partialWork, context);
 
     newRefrescos.push({
-      id: `refresco-${topicId}-${idx}-${Date.now()}-${i}`,
+      id: stableId,
       topicId,
       topicNumber: completedStudyTask.topicNumber,
       topicTitle: completedStudyTask.topicTitle,
@@ -330,10 +412,13 @@ export function generateAutoRefrescos(
       date: taskDate,
       status: "pending",
       estimatedMinutes: estimatedMins,
-      pagesCount: realPages,
+      pagesCount: realPages || undefined,
+      volumeSource: 'whole_topic',
+      estimateSource: 'automatic',
       refrescoIndex: idx,
       sourceStudyTaskId: completedStudyTask.id,
-      notes: `Refresco ${idx}/3 automático tras completar estudio nuevo el ${finishDate}.`,
+      requirement: 'mandatory', proposalBasis: 'actual_completion', planningOrigin: 'automatic',
+      notes: `Protocolo: refresco ${idx}/3 tras completar el estudio inicial el ${finishDate}. No demuestra retención.`,
       createdAt: new Date().toISOString()
     });
   });
@@ -353,6 +438,8 @@ export function buildWeekPlan(
   userProgress: Record<string, TopicProgressData> = {},
   allTopics: Topic[] = []
 ): WeekPlan {
+  const uniqueSessions = uniquePlannerSessions(sessions);
+  const projectedTasks = reconcilePlannerTasks(tasks, uniqueSessions, settings, userProgress, allTopics);
   const today = new Date(referenceDate);
   const todayStr = getLocalDateString(today);
   const currentDayOfWeek = today.getDay(); // 0 Dom, 1 Lun, ...
@@ -386,7 +473,7 @@ export function buildWeekPlan(
     const isCanteOfficialDay = i === 0 || i === 3; // Lunes o Jueves
 
     // Filtrar tareas correspondientes a este día
-    const dayTasks = tasks.filter((t) => t.date === dateStr);
+    const dayTasks = projectedTasks.filter((t) => t.date === dateStr);
 
     // Actualizar estado 'delayed' si está en el pasado y sigue pendiente
     const processedTasks = dayTasks.map((t) => {
@@ -400,10 +487,9 @@ export function buildWeekPlan(
     const dayEstMins = processedTasks.reduce((acc, t) => acc + (t.estimatedMinutes || 0), 0);
     
     // Telemetría real de sesiones registradas en WellsPrep/AeroFocus
-    const realDaySessions = (sessions || []).filter((s) => (s.date || "").startsWith(dateStr));
-    const sessionMins = realDaySessions.reduce((acc, s) => acc + (s.durationMinutes || (s as any).duration || 0), 0);
-    const recordedTaskMins = processedTasks.reduce((acc, t) => acc + (t.actualMinutes || 0), 0);
-    const dayActMins = Math.max(recordedTaskMins, sessionMins);
+    const realDaySessions = uniqueSessions.filter((session) => (session.date || "").startsWith(dateStr));
+    const dayActMins = realDaySessions.reduce((sum, session) => sum + (isCantoSession(session)
+      ? getCantoDuration(session).totalSecs / 60 : Number(session.durationMinutes || (session as any).duration || 0)), 0);
 
     const completedCount = processedTasks.filter((t) => t.status === "completed").length;
     const completionRatePct = processedTasks.length > 0 
@@ -458,13 +544,14 @@ export function buildWeekPlan(
       hasEstudioNuevo,
       hasRefresco,
       hasRepaso,
-      realSessionsCount: realDaySessions.length
+      realSessionsCount: realDaySessions.length,
+      unknownDurationTaskCount: processedTasks.filter(task => task.estimatedMinutes === null || task.estimatedMinutes === undefined).length
     });
   }
 
   const totalEstimatedHours = Math.round((totalWeekEstMins / 60) * 10) / 10;
   const totalActualHours = Math.round((totalWeekActMins / 60) * 10) / 10;
-  const totalTargetHours = Math.round(settings.targetDailyHours * 6 * 10) / 10;
+  const totalTargetHours = Math.round(days.reduce((sum, day) => sum + day.targetDailyMinutes, 0) / 60 * 10) / 10;
   const completionRatePct = totalWeekTasks > 0 ? Math.round((totalWeekCompleted / totalWeekTasks) * 100) : 0;
   const hoursVariance = Math.round((totalActualHours - totalEstimatedHours) * 10) / 10;
 
@@ -477,6 +564,8 @@ export function buildWeekPlan(
 
   // Generar advertencias y diagnósticos preventivos
   const proactiveWarnings: string[] = [];
+  const unknownDurationTaskCount = days.reduce((sum, day) => sum + day.unknownDurationTaskCount, 0);
+  if (unknownDurationTaskCount) proactiveWarnings.push(`${unknownDurationTaskCount} tareas sin duración estimable: la suma de tiempo incluye sólo las estimaciones disponibles.`);
   
   // Miércoles víspera de Cante con estudio nuevo
   const miercoles = days[2];
@@ -504,6 +593,7 @@ export function buildWeekPlan(
     endDate: days[6].date,
     days,
     totalEstimatedHours,
+    unknownDurationTaskCount,
     totalActualHours,
     totalTargetHours,
     totalCompletedTasks: totalWeekCompleted,
@@ -557,15 +647,16 @@ export function proposeSmartRebalance(
   });
 
   // 1. Identificar días sobrecargados
-  const overloadedDays = weekPlan.days.filter((d) => d.totalEstimatedMinutes > targetDailyMins);
+  const overloadedDays = weekPlan.days.filter((d) => d.totalEstimatedMinutes > d.targetDailyMinutes);
 
   for (const overloadedDay of overloadedDays) {
-    let excessMinutes = dayMinutesMap[overloadedDay.date] - targetDailyMins;
+    let excessMinutes = dayMinutesMap[overloadedDay.date] - overloadedDay.targetDailyMinutes;
     if (excessMinutes <= 15) continue;
 
     // Candidatos a mover: repasos libres o estudios nuevos (NUNCA mover cantes oficiales)
     const movableTasks = overloadedDay.tasks.filter(
-      (t) => t.status !== "completed" && t.activityType !== "cante"
+      (t) => t.status !== "completed" && t.activityType !== "cante" && t.estimatedMinutes !== null && t.estimatedMinutes !== undefined && t.activityType !== "refresco"
+        && !allTasks.some(dependent => dependent.sourceStudyTaskId === t.id)
     ).sort((a, b) => {
       // Priorizar mover repasos antes que estudio nuevo
       if (a.activityType === "repaso" && b.activityType !== "repaso") return -1;
@@ -580,7 +671,7 @@ export function proposeSmartRebalance(
       const targetDay = weekPlan.days.find((candidate) => {
         if (candidate.date <= overloadedDay.date) return false; // Hacia adelante
         const currentMins = dayMinutesMap[candidate.date] || 0;
-        return currentMins + task.estimatedMinutes <= targetDailyMins + 15;
+        return candidate.targetDailyMinutes > 0 && currentMins + task.estimatedMinutes <= candidate.targetDailyMinutes;
       });
 
       if (targetDay) {
@@ -607,8 +698,8 @@ export function proposeSmartRebalance(
 
   // Contar días sobrecargados resultantes
   let projectedOverloaded = 0;
-  Object.values(dayMinutesMap).forEach((mins) => {
-    if (mins > targetDailyMins) projectedOverloaded++;
+  weekPlan.days.forEach(day => {
+    if (dayMinutesMap[day.date] > day.targetDailyMinutes) projectedOverloaded++;
   });
 
   return {

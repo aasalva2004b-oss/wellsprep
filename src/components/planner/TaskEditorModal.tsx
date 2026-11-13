@@ -1,4 +1,5 @@
-import React, { useState, useMemo } from "react";
+import { useDialogAccessibility } from '../../hooks/useDialogAccessibility';
+import React, { useState, useMemo, useEffect } from "react";
 import { X, Search, Clock, BookOpen, Sparkles, Check, Calendar, Info, Edit3 } from "lucide-react";
 import { Topic } from "../../types";
 import { 
@@ -53,7 +54,7 @@ export const TaskEditorModal: React.FC<TaskEditorModalProps> = ({
   const [search, setSearch] = useState("");
   const [notes, setNotes] = useState(initialTask?.notes || "");
   const [customMinutes, setCustomMinutes] = useState<number | null>(
-    initialTask?.estimatedMinutes || null
+    initialTask?.estimateSource === "manual" ? initialTask.manualEstimatedMinutes ?? initialTask.estimatedMinutes : null
   );
 
   const [selectedSubjectFilter, setSelectedSubjectFilter] = useState<string>("todos");
@@ -70,14 +71,27 @@ export const TaskEditorModal: React.FC<TaskEditorModalProps> = ({
     initialTask?.toPage !== undefined ? String(initialTask.toPage) : ""
   );
 
+  useEffect(() => {
+    if (!isOpen) return;
+    setSelectedTopicId(initialTask?.topicId || allTopics[0]?.id || '');
+    setActivityType(initialTask?.activityType || 'repaso');
+    setDate(initialTask?.date || initialDate);
+    setNotes(initialTask?.notes || '');
+    setCustomMinutes(initialTask?.estimateSource === 'manual' ? initialTask.manualEstimatedMinutes ?? initialTask.estimatedMinutes : null);
+    setIsPartialMode(initialTask?.fromPage !== undefined && initialTask?.toPage !== undefined);
+    setFromPageInput(initialTask?.fromPage !== undefined ? String(initialTask.fromPage) : '1');
+    setToPageInput(initialTask?.toPage !== undefined ? String(initialTask.toPage) : '');
+    setSearch('');
+  }, [isOpen, initialTask?.id, initialDate]);
+
   // Map canónico de todos los temas con fuente de verdad única
   const canonicalMap = useMemo(() => {
     return buildCanonicalTopicMap(allTopics, userProgress, sessions);
   }, [allTopics, userProgress, sessions]);
 
   const selectedCanonicalTopic = useMemo<CanonicalTopic>(() => {
-    return getCanonicalTopic(selectedTopicId, allTopics, userProgress, sessions);
-  }, [selectedTopicId, allTopics, userProgress, sessions]);
+    return canonicalMap.get(selectedTopicId) || getCanonicalTopic(selectedTopicId, allTopics, userProgress, sessions);
+  }, [selectedTopicId, allTopics, userProgress, sessions, canonicalMap]);
 
   // Rango parcial activo
   const partialWork = useMemo(() => {
@@ -92,8 +106,8 @@ export const TaskEditorModal: React.FC<TaskEditorModalProps> = ({
 
   // Cálculo adaptativo con explicación transparente
   const adaptiveDetails = useMemo(() => {
-    return estimateTaskAdaptiveDetails(selectedCanonicalTopic, activityType, sessions, settings, undefined, userProgress, partialWork);
-  }, [selectedCanonicalTopic, activityType, sessions, settings, userProgress, partialWork]);
+    return estimateTaskAdaptiveDetails(selectedCanonicalTopic, activityType, sessions, settings, undefined, userProgress, partialWork, { allTopics, canonicalMap });
+  }, [selectedCanonicalTopic, activityType, sessions, settings, userProgress, partialWork, allTopics, canonicalMap]);
 
   const autoEstimatedMinutes = adaptiveDetails.estimatedMinutes;
   const finalEstimatedMinutes = customMinutes !== null ? customMinutes : autoEstimatedMinutes;
@@ -125,6 +139,7 @@ export const TaskEditorModal: React.FC<TaskEditorModalProps> = ({
     }).slice(0, 50);
   }, [allTopics, search, selectedSubjectFilter, canonicalMap]);
 
+  const dialogRef = useDialogAccessibility({ isOpen: isOpen, onClose });
   if (!isOpen) return null;
 
   const handleSaveInlinePages = async () => {
@@ -138,11 +153,13 @@ export const TaskEditorModal: React.FC<TaskEditorModalProps> = ({
   };
 
   const handleSave = () => {
-    if (!selectedCanonicalTopic) return;
+    if (!selectedTopicId || !selectedCanonicalTopic) return;
+    if (isPartialMode && (!partialWork || partialWork.toPage > selectedCanonicalTopic.pages)) return;
+    if (finalEstimatedMinutes !== null && (!Number.isFinite(finalEstimatedMinutes) || finalEstimatedMinutes < 0)) return;
     playSound.success();
     const effectivePages = partialWork
       ? (partialWork.toPage - partialWork.fromPage + 1)
-      : (selectedCanonicalTopic.pages > 0 ? selectedCanonicalTopic.pages : undefined);
+      : (adaptiveDetails.pagesUsed > 0 ? adaptiveDetails.pagesUsed : undefined);
 
     onSaveTask({
       id: initialTask?.id,
@@ -154,6 +171,12 @@ export const TaskEditorModal: React.FC<TaskEditorModalProps> = ({
       date,
       status: initialTask?.status || "pending",
       estimatedMinutes: finalEstimatedMinutes,
+      prediction: customMinutes === null ? adaptiveDetails : undefined,
+      estimateSource: customMinutes !== null ? 'manual' : 'automatic',
+      manualEstimatedMinutes: customMinutes !== null ? customMinutes : undefined,
+      volumeSource: partialWork ? 'explicit_range' : activityType === 'estudio_nuevo' ? 'remaining_initial' : 'whole_topic',
+      pagesNumbers: !partialWork && activityType === 'estudio_nuevo' && selectedCanonicalTopic.initialStudyCoverage.remainingPages !== null && Number.isInteger(selectedCanonicalTopic.pages)
+        ? Array.from({ length: selectedCanonicalTopic.pages }, (_, index) => index + 1).filter(page => !selectedCanonicalTopic.initialStudyCoverage.pageNumbers.includes(page)) : undefined,
       pagesCount: effectivePages,
       fromPage: partialWork?.fromPage,
       toPage: partialWork?.toPage,
@@ -163,12 +186,12 @@ export const TaskEditorModal: React.FC<TaskEditorModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-900/40 backdrop-blur-xs">
-      <motion.div
+    <div className="wp-modal-overlay fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-900/40 backdrop-blur-xs">
+      <motion.div ref={dialogRef} role="dialog" aria-modal="true" aria-label={initialTask ? "Editar tarea del plan" : "Añadir tarea al plan"}
         initial={{ opacity: 0, scale: 0.95, y: 8 }}
         animate={{ opacity: 1, scale: 1, y: 0 }}
         exit={{ opacity: 0, scale: 0.95, y: 8 }}
-        className="bg-white rounded-3xl p-5 sm:p-6 border border-slate-200/90 shadow-2xl max-w-lg w-full max-h-[90vh] flex flex-col overflow-hidden"
+        className="wp-modal-panel bg-white rounded-3xl p-5 sm:p-6 border border-slate-200/90 shadow-2xl max-w-lg w-full max-h-[90dvh] flex flex-col overflow-hidden"
       >
         {/* Header */}
         <div className="flex items-center justify-between pb-3 border-b border-slate-100 shrink-0">
@@ -183,6 +206,7 @@ export const TaskEditorModal: React.FC<TaskEditorModalProps> = ({
           <button
             type="button"
             onClick={onClose}
+              aria-label="Cerrar diálogo"
             className="p-1.5 text-slate-400 hover:text-slate-600 rounded-xl hover:bg-slate-100"
           >
             <X size={18} />
@@ -475,10 +499,11 @@ export const TaskEditorModal: React.FC<TaskEditorModalProps> = ({
                   adaptiveDetails.confidence === "media" && "bg-indigo-100 text-indigo-800 border border-indigo-200",
                   adaptiveDetails.confidence === "baja" && "bg-slate-200 text-slate-700 border border-slate-300"
                 )}>
-                  {adaptiveDetails.confidence === "alta" ? "Calibración Empírica" : adaptiveDetails.confidence === "media" ? "Estimación Materia" : "Base Estándar"}
+                  {customMinutes !== null || adaptiveDetails.method === 'manual_rate' ? "Duración manual" : !adaptiveDetails.available ? "Falta evidencia" : `Evidencia ${adaptiveDetails.confidence} · n=${adaptiveDetails.evidenceCount}`}
                 </span>
                 <span className="text-xs font-mono font-black text-slate-900">
-                  {formatMinutesToHours(finalEstimatedMinutes)} ({finalEstimatedMinutes}m)
+                  {finalEstimatedMinutes === null ? 'Sin estimación' : `${formatMinutesToHours(finalEstimatedMinutes)} (${finalEstimatedMinutes}m)`}
+                  {customMinutes === null && adaptiveDetails.interval && <span className="block text-[10px] text-slate-500">Intervalo orientativo: {Math.round(adaptiveDetails.interval.low)}–{Math.round(adaptiveDetails.interval.high)} min</span>}
                 </span>
               </div>
             </div>
@@ -486,22 +511,25 @@ export const TaskEditorModal: React.FC<TaskEditorModalProps> = ({
             <div className="flex items-center gap-2 pt-0.5">
               <button
                 type="button"
-                onClick={() => setCustomMinutes(Math.max(10, finalEstimatedMinutes - 15))}
+                disabled={finalEstimatedMinutes === null}
+                onClick={() => setCustomMinutes(Math.max(0, finalEstimatedMinutes! - 15))}
                 className="px-2.5 py-1 bg-white border border-slate-200 rounded-lg text-xs font-bold text-slate-700 hover:bg-slate-100"
               >
                 -15m
               </button>
               <input
                 type="number"
-                min={5}
-                max={480}
-                value={finalEstimatedMinutes}
-                onChange={(e) => setCustomMinutes(parseInt(e.target.value) || 30)}
+                min={0}
+                aria-label="Duración manual de la tarea"
+                placeholder="Sin estimación"
+                value={finalEstimatedMinutes ?? ''}
+                onChange={(e) => setCustomMinutes(e.target.value.trim() ? Number(e.target.value) : null)}
                 className="w-20 text-center py-1 bg-white border border-slate-300 rounded-lg text-xs font-mono font-black text-slate-900"
               />
               <button
                 type="button"
-                onClick={() => setCustomMinutes(finalEstimatedMinutes + 15)}
+                disabled={finalEstimatedMinutes === null}
+                onClick={() => setCustomMinutes(finalEstimatedMinutes! + 15)}
                 className="px-2.5 py-1 bg-white border border-slate-200 rounded-lg text-xs font-bold text-slate-700 hover:bg-slate-100"
               >
                 +15m
@@ -522,6 +550,9 @@ export const TaskEditorModal: React.FC<TaskEditorModalProps> = ({
               <p className="text-[11px] text-slate-700 font-medium leading-relaxed">
                 {adaptiveDetails.explanation}
               </p>
+              {customMinutes === null && adaptiveDetails.phaseEstimates && <div className="text-[10px] text-slate-600">
+                PLSEMA medido: {(Object.entries(adaptiveDetails.phaseEstimates) as Array<[string, { estimatedMinutes: number; evidenceCount: number }]>).map(([phase, estimate]) => `${phase}: ${estimate.estimatedMinutes} min (n=${estimate.evidenceCount})`).join(' · ')}
+              </div>}
               <div className="flex items-center gap-2 text-[10px] font-mono text-slate-500 pt-0.5 flex-wrap">
                 <span className="px-1.5 py-0.5 rounded-md bg-white border border-slate-200">
                   Volumen: {selectedCanonicalTopic.pages > 0 ? `${selectedCanonicalTopic.pages} págs` : "Sin registrar"}

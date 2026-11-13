@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useEffect, memo } from "react";
 import { motion, AnimatePresence } from "motion/react";
-import { initialSubjects, initialTopics } from "../data/initialData";
+import { initialSubjects } from "../data/initialData";
 import { Topic } from "../types";
 import {
   ChevronRight,
@@ -34,6 +34,7 @@ import { toast } from "sonner";
 import { cn, formatDecimalHours, formatCleanStudyHours, safeParseDate, getLocalDateString } from "../lib/utils";
 import { calculateEstimatedReviewTime } from "../lib/repasoPredictor";
 import { TopicEditorDialog } from "./TopicEditorDialog";
+import { StudySessionDialog, StudySessionTarget } from "./StudySessionDialog";
 import { useFirebase } from "../lib/FirebaseProvider";
 import { db, handleFirestoreError, OperationType } from "../lib/firebase";
 import { serverTimestamp, doc, setDoc } from "firebase/firestore";
@@ -41,13 +42,20 @@ import {
   TopicProgressData,
   PredictionResult,
   predictTopic,
-  calculateNextReviewDate,
 } from "../lib/prediction";
 import { useWellsProgressFactor } from "../hooks/useWellsProgressFactor";
-import { calculateNextSRSState } from "../lib/srs";
 import { calculateTopicCycle } from "../lib/oposicionCycle";
 import { buildSubjectTelemetryIndex, FastTopicTelemetry } from "../lib/performanceCache";
 import { playSound } from "../lib/sound";
+import { DS } from "../lib/designSystem";
+
+function retentionDescription(memory: FastTopicTelemetry["memory"] | undefined): string {
+  if (!memory?.hasData || !memory.adaptive) return "Sin estimación de recuerdo disponible. Registra un intento de recuerdo sin apuntes.";
+  const model = memory.adaptive;
+  const target = model.target === "grade_proxy" ? "señal indirecta de notas orales" : model.target === "prior" ? "supuesto inicial del modelo" : "resultados de recuerdo sin apuntes";
+  const interval = model.interval ? `Intervalo orientativo: ${Math.round(model.interval.low * 100)}–${Math.round(model.interval.high * 100)}%.` : "";
+  return `Estimación aproximada basada en ${target}. ${interval} Confianza ${model.confidence}. ${model.coverageScope === "whole_topic" ? "Alcance: tema completo." : "Alcance parcial o sin confirmar."} ${model.recommendedDate ? `Contacto flexible sugerido: ${model.recommendedDate}.` : "Sin fecha sugerida."}`;
+}
 
 interface TemarioViewProps {
   initialSelectedTopicId?: string | null;
@@ -60,7 +68,7 @@ export function TemarioView({
   initialSubjectId,
   onTopicModalClose,
 }: TemarioViewProps = {}) {
-  const { userProgress, user, userSettings, recentSessions = [], addStudySession } = useFirebase();
+  const { topics: allAvailableTopics, topicState, userProgress, user, userSettings, recentSessions = [], loading, addStudySession, estimateDuration, estimateRetentionForTopic } = useFirebase();
   const activeSubjectsIds = userSettings?.activeSubjects || initialSubjects.map(s => s.id);
   const activeSubjects = initialSubjects.filter(s => activeSubjectsIds.includes(s.id));
   const [selectedSubjectId, setSelectedSubjectId] = useState<string>(
@@ -85,34 +93,15 @@ export function TemarioView({
   >("all");
   const [selectedTopicId, setSelectedTopicId] = useState<string | null>(initialSelectedTopicId || null);
   const [viewMode, setViewMode] = useState<"grid" | "table">("grid");
+  const [observedSessionTarget, setObservedSessionTarget] = useState<StudySessionTarget | null>(null);
 
+  const initialSelectedSubjectId = allAvailableTopics.find(t => t.id === initialSelectedTopicId)?.subjectId;
   useEffect(() => {
     if (initialSelectedTopicId) {
       setSelectedTopicId(initialSelectedTopicId);
-      const found = initialTopics.find(t => t.id === initialSelectedTopicId);
-      if (found?.subjectId && found.subjectId !== selectedSubjectId) {
-        setSelectedSubjectId(found.subjectId);
-      }
+      if (initialSelectedSubjectId) setSelectedSubjectId(initialSelectedSubjectId);
     }
-  }, [initialSelectedTopicId]);
-
-  // Unified list of all topics (static + custom)
-  const allAvailableTopics = useMemo(() => {
-    const customList = Object.entries(userProgress || {})
-      .filter(([id, data]: [string, any]) => data.isCustom && !data.isDeleted)
-      .map(([id, data]: [string, any], index: number) => ({
-        id,
-        subjectId: data.subjectId || "custom",
-        number: data.number || 999,
-        title: data.customTitle || "Tema Personalizado",
-        pages: data.pages || 0,
-        difficulty: data.difficulty || 5,
-        tiempoEstudioHoras: data.studyTimeHours || 0,
-        fechasRepasos: [],
-        notas: data.notas || "",
-      } as unknown as Topic));
-    return [...initialTopics, ...customList];
-  }, [userProgress]);
+  }, [initialSelectedTopicId, initialSelectedSubjectId]);
 
   const handleAddCustomTopic = async () => {
     if (!user) return;
@@ -153,12 +142,7 @@ export function TemarioView({
   // Helper to test if a topic is due today or overdue
   const isTopicDueToday = (topicId: string, prog?: TopicProgressData) => {
     if (!prog?.firstStudyDate) return false;
-    const srsState = {
-      easinessFactor: prog?.srsEasinessFactor || 2.5,
-      interval: prog?.srsInterval || 0,
-      repetitions: prog?.srsRepetitions || 0
-    };
-    const nextDate = prog?.nextReviewDate || calculateNextSRSState(prog?.difficulty || 5, srsState, prog?.lastReviewDate || prog?.firstStudyDate).nextReviewDate;
+    const nextDate = prog?.nextReviewDate;
     if (!nextDate) return false;
     const targetDate = safeParseDate(nextDate);
     const today = new Date(getLocalDateString());
@@ -166,57 +150,7 @@ export function TemarioView({
   };
 
   const subjectTopics = useMemo(() => {
-    // 1. Base static topics for the selected subject
-    const baseTopics = initialTopics.filter(
-      (t) => t.subjectId === selectedSubjectId,
-    );
-
-    // 2. Add custom topics for the subject (from userProgress where isCustom is true)
-    const customTopics = Object.entries(userProgress)
-      .filter(
-        ([id, data]: [string, any]) =>
-          data.isCustom &&
-          data.subjectId === selectedSubjectId &&
-          !data.isDeleted,
-      )
-      .map(
-        ([id, data]: [string, any], index: number) =>
-          ({
-            id: id || data.topicId || `custom_${selectedSubjectId}_${data.number ?? index}`,
-            subjectId: selectedSubjectId,
-            number: data.number || 999,
-            title: data.customTitle || "Tema Personalizado",
-            pages: data.pages || 0,
-            difficulty: (data.difficulty || 0) as any,
-            tiempoEstudioHoras: data.studyTimeHours || 0,
-            fechaPrimerEstudio: data.firstStudyDate || "",
-            fechasRepasos: [],
-            mejorTiempoCantoMinutos: data.mejorTiempoCantoMinutos || 0,
-            mejorTiempoCantoSegundos: data.mejorTiempoCantoSegundos || 0,
-            notas: data.notas || "",
-          }) as Topic,
-      );
-
-    // 3. Deduplicate by unique key, filter out deleted, and apply custom titles
-    const seenKeys = new Set<string>();
-    const deduplicatedTopics: Topic[] = [];
-
-    for (const t of [...baseTopics, ...customTopics]) {
-      const topicKey = t.id || `${t.subjectId || selectedSubjectId}-tema-${t.number}`;
-      if (!seenKeys.has(topicKey)) {
-        seenKeys.add(topicKey);
-        const prog = userProgress[topicKey] || userProgress[t.id];
-        if (!prog?.isDeleted) {
-          deduplicatedTopics.push({
-            ...t,
-            id: topicKey,
-            title: prog?.customTitle || t.title,
-          });
-        }
-      }
-    }
-
-    let combined = deduplicatedTopics;
+    let combined = allAvailableTopics.filter(t => t.subjectId === selectedSubjectId);
 
     // 4. Filter by search query (including full official syllabus text)
     if (searchQuery) {
@@ -234,15 +168,9 @@ export function TemarioView({
     if (statusFilter !== "all") {
       combined = combined.filter((t) => {
         const prog = userProgress[t.id];
-        const hasStarted = !!(
-          prog &&
-          (prog.firstStudyDate ||
-            prog.studyTimeHours > 0 ||
-            prog.vueltas > 0 ||
-            prog.lastReviewDate)
-        );
+        const hasStarted = topicState.get(t.id)?.hasStarted || false;
 
-        const cycle = calculateTopicCycle(t.id, prog, recentSessions);
+        const cycle = calculateTopicCycle(t.id, prog, recentSessions, topicState.get(t.id));
         if (statusFilter === "due_today") return isTopicDueToday(t.id, prog);
         if (statusFilter === "en_refrescos") return cycle.phase === "en_refrescos";
         if (statusFilter === "studied") return hasStarted;
@@ -256,7 +184,7 @@ export function TemarioView({
       if (a.number !== b.number) return a.number - b.number;
       return a.id.localeCompare(b.id);
     });
-  }, [selectedSubjectId, searchQuery, statusFilter, userProgress, recentSessions]);
+  }, [selectedSubjectId, searchQuery, statusFilter, userProgress, recentSessions, allAvailableTopics, topicState]);
 
   // Command Center Stats for the selected subject
   const subjectStats = useMemo(() => {
@@ -270,39 +198,15 @@ export function TemarioView({
     let enRefrescos = 0;
     let listosCanto = 0;
     
-    const baseTopics = initialTopics.filter((t) => t.subjectId === selectedSubjectId);
-    const customTopics = Object.entries(userProgress)
-      .filter(([id, data]: [string, any]) => data.isCustom && data.subjectId === selectedSubjectId && !data.isDeleted)
-      .map(([id, data]: [string, any], index: number) => ({ id: id || data.topicId || `custom_${selectedSubjectId}_${data.number ?? index}` } as Topic));
-      
-    const seenKeys = new Set<string>();
-    const allSubjectTopics: Topic[] = [];
+    const allSubjectTopics = allAvailableTopics.filter(t => t.subjectId === selectedSubjectId);
 
-    for (const t of [...baseTopics, ...customTopics]) {
-      const topicKey = t.id || `${selectedSubjectId}-tema-${(t as any).number ?? 'custom'}`;
-      if (!seenKeys.has(topicKey)) {
-        seenKeys.add(topicKey);
-        const prog = userProgress[topicKey] || userProgress[t.id];
-        if (!prog?.isDeleted) {
-          allSubjectTopics.push({ ...t, id: topicKey });
-        }
-      }
-    }
-    
     allSubjectTopics.forEach(t => {
       const prog = userProgress[t.id];
-      const hasStarted = !!(
-        prog &&
-        (prog.firstStudyDate ||
-          prog.studyTimeHours > 0 ||
-          prog.vueltas > 0 ||
-          prog.lastReviewDate)
-      );
-      const vueltas = prog?.vueltas || 0;
+      const canonical = topicState.get(t.id);
+      const hasStarted = canonical?.hasStarted || false;
+      const vueltas = canonical?.vueltas || 0;
       
-      if (prog?.studyTimeHours) {
-        totalHours += prog.studyTimeHours;
-      }
+      totalHours += (canonical?.totalRecordedMinutes || 0) / 60;
 
       if (vueltas >= 2) {
         vueltas2Plus++;
@@ -316,7 +220,7 @@ export function TemarioView({
         pending++;
       }
 
-      const cycle = calculateTopicCycle(t.id, prog, recentSessions);
+      const cycle = calculateTopicCycle(t.id, prog, recentSessions, topicState.get(t.id));
       if (cycle.phase === "en_refrescos") enRefrescos++;
       if (cycle.phase === "listo_para_cantar") listosCanto++;
 
@@ -351,42 +255,25 @@ export function TemarioView({
       vuelta1Percentage,
       studyingPercentage
     };
-  }, [selectedSubjectId, userProgress, recentSessions]);
+  }, [selectedSubjectId, userProgress, recentSessions, allAvailableTopics, topicState]);
 
   // High-performance O(1) telemetry index for all visible topics in this subject
   const telemetryIndex = useMemo(() => {
-    return buildSubjectTelemetryIndex(subjectTopics, userProgress, recentSessions);
-  }, [subjectTopics, userProgress, recentSessions]);
+    return buildSubjectTelemetryIndex(subjectTopics, userProgress, recentSessions, topicState);
+  }, [subjectTopics, userProgress, recentSessions, topicState]);
 
-  // Quick 1-click review action (+1 Vuelta) directly from Card or Row
-  const handleQuickReview = async (topic: Topic, e: React.MouseEvent) => {
+  // Ask for an observed duration before recording the review.
+  const handleQuickReview = (topic: Topic, e: React.MouseEvent) => {
     e.stopPropagation();
     if (!user) return;
     const topicId = topic.id;
-    const prog = userProgress[topicId];
-    const telemetry = telemetryIndex.get(topicId);
-    const estimatedMins = telemetry?.reviewEstimate?.predictedMinutes || 45;
-
-    try {
-      playSound.click();
-      const currentVueltas = prog?.vueltas || 0;
-      const newVueltas = currentVueltas + 1;
-      await addStudySession({
-        topicId,
-        date: getLocalDateString(),
-        type: "repaso",
-        durationMinutes: estimatedMins,
-        difficulty: prog?.difficulty || topic.difficulty || 4,
-        completesVuelta: true,
-        notes: `Repaso rápido oficial (+1 Vuelta). Estimado: ${estimatedMins} min.`,
-      });
-      playSound.success();
-      toast.success(`🎉 ¡Vuelta ${newVueltas} consolidada!`, {
-        description: `${topic.title} · Próximo repaso programado en 30 días.`,
-      });
-    } catch (err: any) {
-      toast.error("Error al registrar vuelta: " + (err?.message || err));
-    }
+    const canonical = topicState.get(topicId);
+    const predictionSnapshot = estimateDuration(topicId, 'repaso');
+    playSound.click();
+    setObservedSessionTarget({ topicId, title: topic.title, type: 'repaso', difficulty: canonical?.difficulty,
+      predictionSnapshot, retentionPrediction: estimateRetentionForTopic(topicId), estimatedMinutes: predictionSnapshot.estimatedMinutes,
+      metadata: { totalPages: canonical?.hasExplicitPages ? canonical.pages : undefined, totalWords: canonical?.numeroPalabras },
+    });
   };
 
   // Apple-grade keyboard navigation in Temario (ArrowLeft/ArrowRight to switch blocks, / to search)
@@ -433,26 +320,26 @@ export function TemarioView({
   }, [activeSubjects, selectedSubjectId]);
 
   return (
-    <div className="flex flex-col h-full bg-[#F5F5F7] relative pb-20 md:pb-0 overflow-hidden">
+    <div className="flex min-w-0 flex-col h-full bg-[var(--wp-canvas)] relative pb-20 md:pb-0 overflow-hidden">
       {/* APPLE GLASS HEADER */}
-      <div className="bg-white/80 backdrop-blur-2xl border-b border-slate-200/60 px-4 py-4 md:px-8 md:py-6 sticky top-0 z-20 shrink-0 shadow-[0_4px_24px_rgba(0,0,0,0.02)]">
+      <div className="bg-[var(--wp-surface)] border-b border-slate-200/70 px-4 py-4 md:px-8 md:py-5 sticky top-0 z-20 shrink-0">
         
         {/* Top title & View switch */}
         <div className="flex justify-between items-start md:items-center gap-3 mb-4">
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2.5">
-              <div className="w-8 h-8 md:w-9 md:h-9 rounded-xl bg-slate-900 text-white flex items-center justify-center shadow-md shadow-slate-900/10">
+              <div className="hidden sm:flex w-8 h-8 md:w-9 md:h-9 rounded-xl bg-slate-900 text-white flex items-center justify-center shadow-md shadow-slate-900/10">
                 <BookOpen size={18} strokeWidth={2.2} />
               </div>
-              <h1 className="text-xl md:text-2xl font-black text-slate-900 tracking-tight font-serif truncate">
+              <h1 className="text-xl md:text-2xl font-black text-slate-900 tracking-tight font-serif">
                 Temario Oficial
               </h1>
-              <span className="hidden sm:inline-flex items-center px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-slate-100 text-slate-600 border border-slate-200/60">
+              <span className="hidden sm:inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-black uppercase tracking-wider bg-slate-100 text-slate-600 border border-slate-200/60">
                 {selectedSubject?.name || "Bloque"}
               </span>
             </div>
             <p className="text-slate-500 text-xs md:text-sm font-medium mt-1 ml-0.5 hidden sm:block">
-              Control de vueltas, ritmo de estudio y algoritmo de repetición espaciada (SRS)
+              Encuentra un tema, consulta su progreso y registra tu estudio.
             </p>
           </div>
 
@@ -462,12 +349,14 @@ export function TemarioView({
               <button
                 onClick={() => setViewMode("table")}
                 className={cn(
-                  "px-3 py-1.5 rounded-lg transition-all duration-200 flex items-center gap-1.5 font-bold text-xs",
+                  "min-h-11 min-w-11 px-3 py-2 rounded-lg transition-all duration-200 flex items-center justify-center gap-1.5 font-semibold text-xs",
                   viewMode === "table"
                     ? "bg-white text-slate-900 shadow-sm"
                     : "text-slate-500 hover:text-slate-800"
                 )}
                 title="Vista Lista"
+                aria-label="Vista Lista"
+                aria-pressed={viewMode === "table"}
               >
                 <List size={14} strokeWidth={2.5} />
                 <span className="hidden sm:inline">Lista</span>
@@ -475,12 +364,14 @@ export function TemarioView({
               <button
                 onClick={() => setViewMode("grid")}
                 className={cn(
-                  "px-3 py-1.5 rounded-lg transition-all duration-200 flex items-center gap-1.5 font-bold text-xs",
+                  "min-h-11 min-w-11 px-3 py-2 rounded-lg transition-all duration-200 flex items-center justify-center gap-1.5 font-semibold text-xs",
                   viewMode === "grid"
                     ? "bg-white text-slate-900 shadow-sm"
                     : "text-slate-500 hover:text-slate-800"
                 )}
                 title="Vista Cuadrícula"
+                aria-label="Vista Cuadrícula"
+                aria-pressed={viewMode === "grid"}
               >
                 <LayoutGrid size={14} strokeWidth={2.5} />
                 <span className="hidden sm:inline">Tarjetas</span>
@@ -490,7 +381,9 @@ export function TemarioView({
         </div>
 
         {/* APPLE COMMAND CENTER: BLOCK METRICS & HEALTH STRIP */}
-        <div className="bg-slate-50/70 rounded-2xl p-3 md:p-4 border border-slate-200/60 mb-4">
+        <details className="rounded-xl border border-slate-200/70 bg-slate-50/60 px-3 mb-3">
+          <summary className="min-h-11 cursor-pointer py-3 text-xs font-semibold text-slate-700">Progreso del bloque · {subjectStats.studiedCount} de {subjectStats.total} temas iniciados · {subjectStats.percentage}%</summary>
+          <div className="pb-3 pt-1">
           <div className="flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-3 md:gap-4">
             
             {/* Progress Gauge */}
@@ -501,7 +394,7 @@ export function TemarioView({
                   Progreso del Bloque
                 </span>
                 <div className="flex items-center gap-2">
-                  <span className="text-[11px] text-slate-400 font-medium">
+                  <span className="text-xs text-slate-400 font-medium">
                     {subjectStats.studiedCount} de {subjectStats.total} temas iniciados
                   </span>
                   <span className="text-sm font-black text-indigo-600 tracking-tight">
@@ -533,7 +426,7 @@ export function TemarioView({
               </div>
 
               {/* Progress Bar Micro-Legend */}
-              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-slate-500 font-medium mt-1.5">
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500 font-medium mt-1.5">
                 <span className="flex items-center gap-1">
                   <span className="w-1.5 h-1.5 rounded-full bg-indigo-700"></span>
                   <span className="font-bold text-slate-700">2ª+ V</span>: {subjectStats.vueltas2Plus}
@@ -554,23 +447,23 @@ export function TemarioView({
             </div>
 
             {/* Micro-capsules */}
-            <div className="flex items-center gap-1.5 sm:gap-2 overflow-x-auto no-scrollbar py-0.5">
+            <div className="flex flex-wrap items-center gap-2 py-0.5">
               <div className="flex items-center gap-1.5 bg-white px-2.5 py-1.5 rounded-xl border border-slate-200/70 shadow-sm shrink-0">
                 <BookOpen size={13} className="text-slate-400" />
                 <span className="text-xs font-black text-slate-800">{subjectStats.total}</span>
-                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Totales</span>
+                <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Totales</span>
               </div>
 
               <div className="flex items-center gap-1.5 bg-white px-2.5 py-1.5 rounded-xl border border-slate-200/70 shadow-sm shrink-0">
                 <BookmarkCheck size={13} className="text-emerald-500" />
                 <span className="text-xs font-black text-emerald-600">{subjectStats.withVueltas}</span>
-                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Vueltas</span>
+                <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Vueltas</span>
               </div>
 
               <div className="flex items-center gap-1.5 bg-white px-2.5 py-1.5 rounded-xl border border-slate-200/70 shadow-sm shrink-0">
                 <Clock size={13} className="text-blue-500" />
                 <span className="text-xs font-black text-blue-600">{subjectStats.totalHours}h</span>
-                <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Inversión</span>
+                <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Inversión</span>
               </div>
 
               {/* SRS Repasos Hoy Interactive Alert */}
@@ -587,17 +480,18 @@ export function TemarioView({
                 >
                   <Flame size={14} className={statusFilter === "due_today" ? "text-white" : "text-rose-600 animate-pulse"} />
                   <span className="font-black">{subjectStats.dueToday}</span>
-                  <span className="text-[10px] uppercase tracking-wider">Repasos hoy</span>
+                  <span className="text-xs uppercase tracking-wider">Repasos hoy</span>
                 </button>
               ) : (
                 <div className="flex items-center gap-1.5 bg-emerald-50 text-emerald-700 border border-emerald-200/60 px-2.5 py-1.5 rounded-xl text-xs font-bold shrink-0">
                   <CheckCircle2 size={13} className="text-emerald-500" />
-                  <span className="text-[11px]">Repasos al día</span>
+                  <span className="text-xs">Repasos al día</span>
                 </div>
               )}
             </div>
           </div>
-        </div>
+          </div>
+        </details>
 
         {/* APPLE SEGMENTED SUBJECT TABS WITH SPRING SLIDER */}
         <div className="relative -mx-4 px-4 md:-mx-8 md:px-8 mb-3">
@@ -605,17 +499,18 @@ export function TemarioView({
             {activeSubjects.map((subject, sIdx) => {
               const subjectKey = subject.id || `subject-${sIdx}`;
               const isSelected = selectedSubjectId === subject.id;
-              const count = initialTopics.filter((t) => t.subjectId === subject.id).length;
+              const count = allAvailableTopics.filter((t) => t.subjectId === subject.id).length;
 
               return (
                 <button
                   key={subjectKey}
+                  aria-pressed={isSelected}
                   onClick={() => {
                     playSound.click();
                     setSelectedSubjectId(subject.id);
                   }}
                   className={cn(
-                    "whitespace-nowrap px-4 py-2 rounded-xl text-xs font-bold transition-all snap-start flex items-center gap-2 active:scale-95 shrink-0 border relative",
+                    "min-h-11 whitespace-nowrap px-4 py-2 rounded-xl text-xs font-bold transition-all snap-start flex items-center gap-2 active:scale-95 shrink-0 border relative",
                     isSelected
                       ? "text-white shadow-sm border-slate-900"
                       : "bg-white/90 text-slate-600 border-slate-200/80 hover:bg-white hover:text-slate-900 hover:border-slate-300"
@@ -631,7 +526,7 @@ export function TemarioView({
                   <span className="relative z-10">{subject.name}</span>
                   <span
                     className={cn(
-                      "relative z-10 text-[10px] px-1.5 py-0.5 rounded-md font-black leading-none",
+                      "relative z-10 text-xs px-1.5 py-0.5 rounded-md font-black leading-none",
                       isSelected
                         ? "bg-white/20 text-white"
                         : "bg-slate-100 text-slate-500"
@@ -646,7 +541,7 @@ export function TemarioView({
         </div>
 
         {/* SEARCH & FILTERS BAR */}
-        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 md:gap-3">
+        <div className="flex flex-col items-stretch gap-2 md:gap-3 xl:flex-row xl:items-center">
           {/* Apple Spotlight Search */}
           <div className="relative flex-1">
             <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none">
@@ -655,20 +550,22 @@ export function TemarioView({
             <input
               id="temario-search-input"
               type="text"
-              className="block w-full pl-9 pr-12 py-2 rounded-xl border border-slate-200/80 bg-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-900/10 focus:border-slate-400 text-xs md:text-sm font-medium text-slate-800 transition-all shadow-sm"
-              placeholder="Buscar por título, número o palabras clave (pulsa /)..."
+              aria-label="Buscar temas por título, número o palabras clave"
+              className="block min-h-11 w-full pl-9 pr-12 py-2 rounded-xl border border-slate-200/80 bg-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-900/10 focus:border-slate-400 text-xs md:text-sm font-medium text-slate-800 transition-all shadow-sm"
+              placeholder="Buscar por título o número…"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
             />
             {!searchQuery && (
-              <span className="absolute inset-y-0 right-0 pr-3 flex items-center pointer-events-none text-[10px] font-mono font-bold text-slate-300 hidden sm:flex">
+              <span className="absolute inset-y-0 right-0 pr-3 flex items-center pointer-events-none text-xs font-mono font-bold text-slate-300 hidden sm:flex">
                 /
               </span>
             )}
             {searchQuery && (
               <button
                 onClick={() => setSearchQuery("")}
-                className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-400 hover:text-slate-600"
+                aria-label="Limpiar búsqueda de temas"
+                className="absolute inset-y-0 right-0 min-w-11 justify-center flex items-center text-slate-400 hover:text-slate-600"
               >
                 <X className="h-4 w-4" />
               </button>
@@ -676,7 +573,14 @@ export function TemarioView({
           </div>
 
           {/* Quick Segmented Filter Pills (Reordered & Simplified) */}
-          <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-0.5">
+          <div className="flex w-full min-w-0 flex-wrap items-center gap-1.5 py-0.5 xl:w-auto">
+            <select aria-label="Filtrar temas por estado" value={statusFilter} onChange={event => setStatusFilter(event.target.value as typeof statusFilter)} className="min-h-11 min-w-0 flex-1 rounded-xl border border-slate-200 bg-white px-3 text-xs text-slate-800 sm:hidden">
+              <option value="all">Todos ({subjectStats.total})</option>
+              <option value="due_today">Repasos hoy ({subjectStats.dueToday})</option>
+              <option value="en_refrescos">Refrescos ({subjectStats.enRefrescos})</option>
+              <option value="studied">Estudiados ({subjectStats.studiedCount})</option>
+              <option value="pending">Pendientes ({subjectStats.pending})</option>
+            </select>
             {[
               { id: "all", label: "Todos", count: subjectStats.total },
               { 
@@ -686,7 +590,7 @@ export function TemarioView({
                 count: subjectStats.dueToday > 0 ? subjectStats.dueToday : undefined,
                 icon: Flame
               },
-              { id: "en_refrescos", label: "En 3 Refrescos", count: subjectStats.enRefrescos },
+              { id: "en_refrescos", label: "Refrescos", count: subjectStats.enRefrescos },
               { id: "studied", label: "Estudiados", count: subjectStats.studiedCount },
               { id: "pending", label: "Pendientes", count: subjectStats.pending },
             ].map((filter: any) => {
@@ -695,9 +599,10 @@ export function TemarioView({
               return (
                 <button
                   key={filter.id}
+                  aria-pressed={isActive}
                   onClick={() => setStatusFilter(filter.id as any)}
                   className={cn(
-                    "px-3 py-1.5 rounded-xl text-xs font-bold transition-all whitespace-nowrap active:scale-95 shrink-0 border flex items-center gap-1.5",
+                    "hidden sm:flex min-h-11 px-3 py-2 rounded-xl text-xs font-semibold transition-all whitespace-nowrap active:scale-95 shrink-0 border items-center gap-1.5",
                     filter.alert && !isActive
                       ? "bg-rose-50 text-rose-700 border-rose-200/80 hover:bg-rose-100"
                       : isActive
@@ -713,7 +618,7 @@ export function TemarioView({
                   <span>{filter.label}</span>
                   {filter.count !== undefined && (
                     <span className={cn(
-                      "px-1.5 py-0.2 rounded-full text-[9px] font-black",
+                      "px-1.5 py-0.2 rounded-full text-xs font-black",
                       isActive
                         ? "bg-white/20 text-white"
                         : filter.alert 
@@ -730,18 +635,20 @@ export function TemarioView({
             {/* Add Custom Topic Primary Action */}
             <button
               onClick={handleAddCustomTopic}
-              className="flex items-center justify-center gap-1.5 px-3 py-1.5 bg-slate-100 hover:bg-slate-200/80 text-slate-700 border border-slate-200/80 hover:border-slate-300 text-xs font-bold rounded-xl transition-all shadow-sm active:scale-95 shrink-0 ml-1"
+              className="min-h-11 flex items-center justify-center gap-1.5 px-3 py-2 bg-slate-100 hover:bg-slate-200/80 text-slate-700 border border-slate-200/80 hover:border-slate-300 text-xs font-bold rounded-xl transition-all shadow-sm active:scale-95 shrink-0 ml-1"
               title="Añadir un nuevo tema personalizado a este bloque"
             >
               <Plus size={13} strokeWidth={2.5} />
-              <span>Tema</span>
+              <span>Nuevo tema</span>
             </button>
           </div>
         </div>
       </div>
 
       {/* TOPICS CONTAINER */}
-      <div className="flex-1 min-h-0 overflow-y-auto overscroll-y-contain touch-pan-y p-4 md:p-8 pb-28 relative z-10 w-full max-w-[100rem] mx-auto">
+      <div aria-busy={loading} className="flex-1 min-h-0 overflow-y-auto overscroll-y-contain touch-pan-y p-4 md:p-8 pb-28 relative z-10 w-full max-w-[100rem] mx-auto">
+        {loading && <p role="status" className="mb-4 text-sm text-slate-600">Cargando el progreso del temario…</p>}
+        <p className="mb-4 text-xs text-slate-600" role="status">{subjectTopics.length} {subjectTopics.length === 1 ? "tema mostrado" : "temas mostrados"}{searchQuery ? ` para «${searchQuery}»` : ""}</p>
         {viewMode === "grid" ? (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
             {subjectTopics.map((topic, index) => {
@@ -767,10 +674,10 @@ export function TemarioView({
             animate={{ opacity: 1, y: 0 }}
             className="bg-white rounded-[2rem] shadow-[0_8px_30px_rgb(0,0,0,0.03)] border border-slate-200/60 overflow-hidden relative"
           >
-            <div className="overflow-x-auto w-full">
+            <div className="overflow-x-auto w-full" role="region" aria-label="Lista de temas. Desplázate horizontalmente para consultar las columnas" tabIndex={0}>
               <table className="w-full text-left border-collapse">
                 <thead>
-                  <tr className="bg-slate-50/80 border-b border-slate-200/80 text-[10px] uppercase tracking-wider text-slate-400 font-bold">
+                  <tr className="bg-slate-50/80 border-b border-slate-200/80 text-xs uppercase tracking-wider text-slate-400 font-bold">
                     <th className="px-5 py-3.5 whitespace-nowrap w-24">Tema</th>
                     <th className="px-5 py-3.5 min-w-[280px]">Título Oficial</th>
                     <th className="px-5 py-3.5 whitespace-nowrap text-center">Estado</th>
@@ -803,7 +710,7 @@ export function TemarioView({
         )}
 
         {/* Empty State */}
-        {subjectTopics.length === 0 && (
+        {!loading && subjectTopics.length === 0 && (
           <div className="text-center py-20 flex flex-col items-center justify-center bg-white/70 backdrop-blur-md rounded-3xl border border-slate-200/60 p-8 shadow-sm">
             <div className="w-16 h-16 bg-slate-100 rounded-2xl flex items-center justify-center text-slate-400 mb-4 shadow-inner">
               <Search size={24} strokeWidth={2} />
@@ -819,7 +726,7 @@ export function TemarioView({
                 setSearchQuery("");
                 setStatusFilter("all");
               }}
-              className="px-5 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-xl transition-all shadow-sm active:scale-95"
+              className="min-h-11 px-5 py-2 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-xl transition-all shadow-sm active:scale-95"
             >
               Restablecer Filtros
             </button>
@@ -828,6 +735,7 @@ export function TemarioView({
       </div>
 
       {/* TOPIC EDITOR SHEET MODAL */}
+      {observedSessionTarget && <StudySessionDialog target={observedSessionTarget} onClose={() => setObservedSessionTarget(null)} onSave={async session => { await addStudySession(session as any); playSound.success(); }} />}
       {selectedTopicId && (
         (() => {
           const activeTopic = allAvailableTopics.find((t) => t.id === selectedTopicId) || subjectTopics.find((t) => t.id === selectedTopicId);
@@ -880,7 +788,7 @@ const TopicCard = React.memo(function TopicCard({
     <div
       onClick={onClick}
       className={cn(
-        "group bg-white rounded-3xl p-5 md:p-6 cursor-pointer border border-slate-200/80 hover:border-slate-300 hover:shadow-[0_12px_32px_rgba(0,0,0,0.06)] hover:-translate-y-1 active:scale-[0.99] transition-all duration-300 flex flex-col justify-between h-full relative overflow-hidden shadow-xs",
+        DS.cardInteractive, "group min-w-0 p-4 sm:p-5 cursor-pointer flex flex-col justify-between h-full relative overflow-hidden",
         hasStarted ? "bg-white" : "bg-white/95"
       )}
     >
@@ -900,25 +808,25 @@ const TopicCard = React.memo(function TopicCard({
 
       <div>
         {/* Header Badges & Retention Indicator */}
-        <div className="flex items-center justify-between gap-2 mb-3">
+        <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
           <div className="flex items-center gap-1.5 flex-wrap">
-            <span className="inline-flex items-center px-2.5 py-0.5 bg-slate-100 text-slate-700 text-[10px] uppercase tracking-wider font-black rounded-lg border border-slate-200/50">
+            <span className="inline-flex items-center px-2.5 py-0.5 bg-slate-100 text-slate-700 text-xs uppercase tracking-wider font-black rounded-lg border border-slate-200/50">
               {topic.number === 999 ? "Extra" : `Tema ${topic.number}`}
             </span>
 
             {cycle.phase === "en_refrescos" ? (
-              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 bg-amber-50 text-amber-900 text-[10px] uppercase tracking-wider font-black rounded-full border border-amber-200/80 shadow-2xs">
+              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 bg-amber-50 text-amber-900 text-xs uppercase tracking-wider font-black rounded-full border border-amber-200/80 shadow-2xs">
                 <Flame size={11} className="text-amber-500" />
                 {cycle.refrescoDayLabel}
               </span>
             ) : cycle.phase === "listo_para_cantar" ? (
-              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 bg-fuchsia-50 text-fuchsia-800 text-[10px] uppercase tracking-wider font-black rounded-full border border-fuchsia-200/80 shadow-2xs">
+              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 bg-fuchsia-50 text-fuchsia-800 text-xs uppercase tracking-wider font-black rounded-full border border-fuchsia-200/80 shadow-2xs">
                 <Mic size={11} className="text-fuchsia-600" />
                 Listo Canto
               </span>
             ) : vueltas > 0 ? (
               <span className={cn(
-                "inline-flex items-center gap-1 px-2.5 py-0.5 text-[10px] uppercase tracking-wider font-black rounded-full border shadow-2xs",
+                "inline-flex items-center gap-1 px-2.5 py-0.5 text-xs uppercase tracking-wider font-black rounded-full border shadow-2xs",
                 vueltas >= 2 
                   ? "bg-indigo-50 text-indigo-800 border-indigo-200/80" 
                   : "bg-emerald-50 text-emerald-700 border-emerald-200/60"
@@ -927,29 +835,30 @@ const TopicCard = React.memo(function TopicCard({
                 Vuelta {vueltas}
               </span>
             ) : hasStarted ? (
-              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 bg-blue-50 text-blue-700 text-[10px] uppercase tracking-wider font-black rounded-full border border-blue-200/60 shadow-2xs">
+              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 bg-blue-50 text-blue-700 text-xs uppercase tracking-wider font-black rounded-full border border-blue-200/60 shadow-2xs">
                 <Clock size={11} className="text-blue-600" />
                 En Proceso
               </span>
             ) : (
-              <span className="text-[10px] font-semibold text-slate-400">
+              <span className="text-xs font-semibold text-slate-400">
                 Pendiente
               </span>
             )}
           </div>
 
           {/* Ebbinghaus Retention & Threshold Indicator (Apple Health Style) */}
-          {hasStarted && ebbinghaus && (
+          {hasStarted && ebbinghaus && !ebbinghaus.hasData && <span className="text-xs font-semibold text-slate-500" title={retentionDescription(telemetry?.memory)}>Sin estimación</span>}
+          {hasStarted && ebbinghaus?.hasData && (
             <div
               className={cn(
-                "flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-bold border transition-colors shrink-0 font-mono tabular-nums",
+                "flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-bold border transition-colors shrink-0 font-mono tabular-nums",
                 ebbinghaus.retention >= 80
                   ? "bg-emerald-50 text-emerald-800 border-emerald-200/90"
                   : ebbinghaus.retention >= 65
                     ? "bg-amber-50 text-amber-800 border-amber-200/90"
                     : "bg-rose-50 text-rose-800 border-rose-200/90"
               )}
-              title={`Curva Ebbinghaus: ${ebbinghaus.retention}% (${ebbinghaus.statusTitle}) · Vida media: ${ebbinghaus.stabilityDays}d · ${ebbinghaus.daysUntil80 > 0 ? `Margen de seguridad: +${ebbinghaus.daysUntil80} días hasta cruzar el 80% (${ebbinghaus.critical80DateStr || ''})` : 'Umbral del 80% superado: conviene repasar'}`}
+              title={retentionDescription(telemetry?.memory)}
             >
               <span
                 className={cn(
@@ -961,9 +870,9 @@ const TopicCard = React.memo(function TopicCard({
                       : "bg-rose-500 animate-pulse"
                 )}
               />
-              <span className="font-black">{ebbinghaus.retention}%</span>
-              <span className="text-[9px] text-slate-400 font-semibold border-l border-slate-200/80 pl-1 ml-0.5">
-                {ebbinghaus.daysUntil80 > 0 ? `+${ebbinghaus.daysUntil80}d` : "alerta"}
+              <span className="font-black">≈ {ebbinghaus.retention}%</span>
+              <span className="text-xs text-slate-400 font-semibold border-l border-slate-200/80 pl-1 ml-0.5">
+                {ebbinghaus.critical80DateStr ? ebbinghaus.daysUntil80 > 0 ? `+${ebbinghaus.daysUntil80}d` : "comprobar" : "sin fecha"}
               </span>
             </div>
           )}
@@ -974,12 +883,12 @@ const TopicCard = React.memo(function TopicCard({
           className="text-base font-black font-serif tracking-tight text-slate-900 leading-snug line-clamp-2 group-hover:text-indigo-600 transition-colors"
           title={topic.fullTitle || topic.title}
         >
-          {topic.title}
+          <button type="button" onClick={event => { event.stopPropagation(); onClick(); }} className="min-h-11 text-left" aria-label={`Abrir tema ${topic.number}: ${topic.title}`}>{topic.title}</button>
         </h3>
 
         {/* In-Refresco Step Progression Bar (if in refresco cycle) */}
         {cycle.phase === "en_refrescos" && (
-          <div className="mt-3.5 flex items-center gap-2 bg-amber-50/60 px-3 py-1.5 rounded-xl border border-amber-200/60 text-[11px]">
+          <div className="mt-3.5 flex items-center gap-2 bg-amber-50/60 px-3 py-1.5 rounded-xl border border-amber-200/60 text-xs">
             <Flame size={12} className="text-amber-600 shrink-0" />
             <span className="font-bold text-amber-950">Refrescos diarios:</span>
             <div className="flex items-center gap-1 ml-auto">
@@ -1001,11 +910,11 @@ const TopicCard = React.memo(function TopicCard({
         )}
 
         {/* Vitals Grid (Apple Health Style) */}
-        <div className="grid grid-cols-4 gap-1.5 mt-4">
+        <div className="grid min-w-0 grid-cols-2 gap-2 mt-4 sm:grid-cols-4">
           {/* Difficulty */}
           <div className="flex flex-col p-2 bg-slate-50/80 rounded-xl border border-slate-100/90 items-center justify-center text-center">
-            <span className="text-[9px] font-bold uppercase tracking-wider text-slate-400 mb-0.5">
-              Dif.
+            <span className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-0.5">
+              Dificultad
             </span>
             <span
               className={cn(
@@ -1026,10 +935,10 @@ const TopicCard = React.memo(function TopicCard({
             className="flex flex-col p-2 bg-slate-50/80 rounded-xl border border-slate-100/90 items-center justify-center text-center" 
             title={hasStarted ? `Tiempo estimado de repaso: ${repasoEstimate.formatted}` : "Tema pendiente"}
           >
-            <span className="text-[9px] font-bold uppercase tracking-wider text-slate-400 mb-0.5">
+            <span className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-0.5">
               Repaso
             </span>
-            <span className="font-black text-slate-800 text-xs whitespace-nowrap font-mono tabular-nums">
+            <span className="font-black text-slate-800 text-xs break-words font-mono tabular-nums">
               {hasStarted ? repasoEstimate.formatted : "-"}
             </span>
           </div>
@@ -1039,13 +948,13 @@ const TopicCard = React.memo(function TopicCard({
             className="flex flex-col p-2 bg-slate-50/80 rounded-xl border border-slate-100/90 items-center justify-center text-center" 
             title={lastCantoData.hasCanto ? `Último cante: ${lastCantoData.formatted}${lastCantoData.grade !== null ? ` (Nota: ${lastCantoData.grade.toFixed(1)}/10)` : ''}` : "Sin cantes registrados"}
           >
-            <span className="text-[9px] font-bold uppercase tracking-wider text-slate-400 mb-0.5">
+            <span className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-0.5">
               Cante
             </span>
             <span 
               className={cn(
-                "text-xs whitespace-nowrap font-mono tabular-nums",
-                lastCantoData.hasCanto ? "font-black text-slate-800" : "font-semibold text-slate-400 text-[11px]"
+                "text-xs break-words font-mono tabular-nums",
+                lastCantoData.hasCanto ? "font-black text-slate-800" : "font-semibold text-slate-400 text-xs"
               )}
             >
               {lastCantoData.formatted}
@@ -1054,12 +963,12 @@ const TopicCard = React.memo(function TopicCard({
 
           {/* Next SRS Review */}
           <div className="flex flex-col p-2 bg-slate-50/80 rounded-xl border border-slate-100/90 items-center justify-center text-center">
-            <span className="text-[9px] font-bold uppercase tracking-wider text-slate-400 mb-0.5">
+            <span className="text-xs font-bold uppercase tracking-wider text-slate-400 mb-0.5">
               Agenda
             </span>
             <span
               className={cn(
-                "font-black text-[11px] whitespace-nowrap tracking-tight font-mono tabular-nums",
+                "font-black text-xs whitespace-nowrap tracking-tight font-mono tabular-nums",
                 srs.isOverdue
                   ? "text-rose-600"
                   : srs.isDueToday
@@ -1079,13 +988,18 @@ const TopicCard = React.memo(function TopicCard({
             </span>
           </div>
         </div>
+        <details className="mt-3 border-t border-slate-100 pt-1" onClick={event => event.stopPropagation()}>
+          <summary className="min-h-11 cursor-pointer py-3 text-xs font-semibold text-slate-600">Estimaciones y alcance</summary>
+          <p className="pb-3 text-xs leading-relaxed text-slate-600">{retentionDescription(telemetry?.memory)}</p>
+          <p className="pb-3 text-xs leading-relaxed text-slate-600">Repaso: {repasoEstimate.formatted === "-" ? "sin estimación disponible" : repasoEstimate.formatted}. Es una orientación de duración, no tiempo ya trabajado.</p>
+        </details>
       </div>
 
       {/* 3. Footer Vitals & Quick Actions */}
-      <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-500 font-semibold gap-2">
+      <div className="mt-4 pt-3 border-t border-slate-100 flex flex-wrap items-center justify-between text-xs text-slate-500 font-semibold gap-2">
         {hasStarted ? (
           <div 
-            className="flex items-center gap-1.5 text-indigo-700 bg-indigo-50/70 px-2 py-0.5 rounded-lg border border-indigo-200/50 font-black text-[11px] font-mono tabular-nums"
+            className="flex items-center gap-1.5 text-indigo-700 bg-indigo-50/70 px-2 py-0.5 rounded-lg border border-indigo-200/50 font-black text-xs font-mono tabular-nums"
             title={`Inversión total acumulada en este tema: ${formatCleanStudyHours(progress?.studyTimeHours)}`}
           >
             <Clock size={12} className="text-indigo-600" />
@@ -1105,19 +1019,21 @@ const TopicCard = React.memo(function TopicCard({
             <button
               type="button"
               onClick={(e) => onQuickReview(topic, e)}
-              className="px-2.5 py-1 rounded-lg text-[10px] font-bold bg-slate-100 hover:bg-indigo-600 text-slate-700 hover:text-white border border-slate-200/80 hover:border-indigo-600 transition-all flex items-center gap-1 active:scale-95 shadow-2xs"
-              title="Registrar repaso rápido (+1 Vuelta oficial) en 1 solo clic"
+              className="min-h-11 px-3 py-2 rounded-lg text-xs font-semibold bg-slate-100 hover:bg-indigo-600 text-slate-700 hover:text-white border border-slate-200/80 hover:border-indigo-600 transition-all flex items-center gap-1 active:scale-95 shadow-2xs"
+              title="Registrar repaso con tiempo real"
+              aria-label={`Registrar repaso del tema ${topic.number}`}
             >
               <Zap size={11} className="text-amber-500 group-hover:text-amber-300" />
-              <span>+1 Vuelta</span>
+              <span>Registrar</span>
             </button>
           )}
 
           <button
             type="button"
-            onClick={onClick}
-            className="px-2.5 py-1 rounded-lg text-[10px] font-bold text-slate-600 hover:text-slate-900 bg-slate-50 hover:bg-slate-100 border border-slate-200/60 transition-colors flex items-center gap-0.5 active:scale-95"
+            onClick={event => { event.stopPropagation(); onClick(); }}
+            className="min-h-11 px-3 py-2 rounded-lg text-xs font-semibold text-slate-600 hover:text-slate-900 bg-slate-50 hover:bg-slate-100 border border-slate-200/60 transition-colors flex items-center gap-0.5 active:scale-95"
             title="Abrir ficha completa del tema"
+            aria-label={`Abrir ficha del tema ${topic.number}`}
           >
             <span>Ficha</span>
             <ChevronRight size={11} strokeWidth={2.5} />
@@ -1197,18 +1113,18 @@ const TopicTableRow = React.memo(function TopicTableRow({
       <td className="px-5 py-3.5 align-middle text-center whitespace-nowrap">
         <div className="flex flex-col items-center gap-1">
           {cycle.phase === "en_refrescos" ? (
-            <span className="inline-flex items-center gap-1 text-[10px] font-black text-amber-900 bg-amber-50 border border-amber-200/80 px-2.5 py-0.5 rounded-full uppercase tracking-wider shadow-2xs">
+            <span className="inline-flex items-center gap-1 text-xs font-black text-amber-900 bg-amber-50 border border-amber-200/80 px-2.5 py-0.5 rounded-full uppercase tracking-wider shadow-2xs">
               <Flame size={10} className="text-amber-500" />
               {cycle.refrescoDayLabel}
             </span>
           ) : cycle.phase === "listo_para_cantar" ? (
-            <span className="inline-flex items-center gap-1 text-[10px] font-black text-fuchsia-800 bg-fuchsia-50 border border-fuchsia-200/80 px-2.5 py-0.5 rounded-full uppercase tracking-wider shadow-2xs">
+            <span className="inline-flex items-center gap-1 text-xs font-black text-fuchsia-800 bg-fuchsia-50 border border-fuchsia-200/80 px-2.5 py-0.5 rounded-full uppercase tracking-wider shadow-2xs">
               <Mic size={10} className="text-fuchsia-600" />
               Listo Canto
             </span>
           ) : vueltas > 0 ? (
             <span className={cn(
-              "inline-flex items-center gap-1 text-[10px] font-black border px-2.5 py-0.5 rounded-full uppercase tracking-wider shadow-2xs",
+              "inline-flex items-center gap-1 text-xs font-black border px-2.5 py-0.5 rounded-full uppercase tracking-wider shadow-2xs",
               vueltas >= 2
                 ? "text-indigo-800 bg-indigo-50 border-indigo-200/80"
                 : "text-emerald-700 bg-emerald-50 border-emerald-200/60"
@@ -1217,27 +1133,28 @@ const TopicTableRow = React.memo(function TopicTableRow({
               {vueltas} {vueltas === 1 ? "Vuelta" : "Vueltas"}
             </span>
           ) : hasStarted ? (
-            <span className="inline-flex items-center gap-1 text-[10px] font-black text-blue-700 bg-blue-50 border border-blue-200/60 px-2.5 py-0.5 rounded-full uppercase tracking-wider shadow-2xs">
+            <span className="inline-flex items-center gap-1 text-xs font-black text-blue-700 bg-blue-50 border border-blue-200/60 px-2.5 py-0.5 rounded-full uppercase tracking-wider shadow-2xs">
               <Clock size={10} className="text-blue-500" />
               En Proceso
             </span>
           ) : (
-            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+            <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">
               Pendiente
             </span>
           )}
 
-          {hasStarted && ebbinghaus && (
+          {hasStarted && ebbinghaus && !ebbinghaus.hasData && <span className="text-xs font-semibold text-slate-500" title={retentionDescription(telemetry?.memory)}>Sin estimación</span>}
+          {hasStarted && ebbinghaus?.hasData && (
             <div
               className={cn(
-                "inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[9px] font-mono tabular-nums font-bold border transition-colors",
+                "inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-xs font-mono tabular-nums font-bold border transition-colors",
                 ebbinghaus.retention >= 80
                   ? "bg-emerald-50 text-emerald-800 border-emerald-200/80"
                   : ebbinghaus.retention >= 65
                     ? "bg-amber-50 text-amber-800 border-amber-200/80"
                     : "bg-rose-50 text-rose-800 border-rose-200/80"
               )}
-              title={`Ebbinghaus: ${ebbinghaus.retention}% (${ebbinghaus.statusTitle}) · ${ebbinghaus.daysUntil80 > 0 ? `+${ebbinghaus.daysUntil80}d hasta el 80%` : 'Bajo el 80%'}`}
+              title={retentionDescription(telemetry?.memory)}
             >
               <span
                 className={cn(
@@ -1249,9 +1166,9 @@ const TopicTableRow = React.memo(function TopicTableRow({
                       : "bg-rose-500"
                 )}
               />
-              <span>{ebbinghaus.retention}%</span>
-              <span className="text-[8px] text-slate-400 font-normal">
-                ({ebbinghaus.daysUntil80 > 0 ? `+${ebbinghaus.daysUntil80}d` : 'urg'})
+              <span>≈ {ebbinghaus.retention}%</span>
+              <span className="text-xs text-slate-400 font-normal">
+                {ebbinghaus.critical80DateStr ? ebbinghaus.daysUntil80 > 0 ? `+${ebbinghaus.daysUntil80}d` : "comprobar" : "sin fecha"}
               </span>
             </div>
           )}
@@ -1281,7 +1198,7 @@ const TopicTableRow = React.memo(function TopicTableRow({
         <div className="font-black text-slate-800 font-mono tabular-nums">
           {formatCleanStudyHours(progress?.studyTimeHours)}
         </div>
-        <div className="text-[10px] text-slate-400 font-semibold mt-0.5 font-mono tabular-nums">
+        <div className="text-xs text-slate-400 font-semibold mt-0.5 font-mono tabular-nums">
           {lastCantoData.hasCanto ? `Cante: ${lastCantoData.formatted}` : "Sin cante"}
         </div>
       </td>
@@ -1291,7 +1208,7 @@ const TopicTableRow = React.memo(function TopicTableRow({
         {srs.nextDate ? (
           <span
             className={cn(
-              "inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider border shadow-2xs font-mono tabular-nums",
+              "inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-black uppercase tracking-wider border shadow-2xs font-mono tabular-nums",
               srs.isOverdue
                 ? "bg-rose-50 text-rose-700 border-rose-200/80"
                 : srs.isDueToday
@@ -1327,11 +1244,12 @@ const TopicTableRow = React.memo(function TopicTableRow({
           {onQuickReview && (
             <button
               onClick={(e) => onQuickReview(topic, e)}
-              className="text-slate-700 hover:text-white bg-slate-100 hover:bg-indigo-600 border border-slate-200/80 hover:border-indigo-600 text-xs font-bold px-2.5 py-1.5 rounded-lg transition-all active:scale-95 inline-flex items-center gap-1 shadow-2xs"
-              title="Registrar repaso rápido (+1 Vuelta oficial)"
+              className="text-slate-700 hover:text-white bg-slate-100 hover:bg-indigo-600 border border-slate-200/80 hover:border-indigo-600 text-xs font-semibold min-h-11 px-3 py-2 rounded-lg transition-all active:scale-95 inline-flex items-center gap-1 shadow-2xs"
+              title="Registrar repaso con tiempo real"
+              aria-label={`Registrar repaso del tema ${topic.number}`}
             >
               <Zap size={11} className="text-amber-500" />
-              <span>+1 Vuelta</span>
+              <span>Registrar</span>
             </button>
           )}
 
@@ -1341,7 +1259,7 @@ const TopicTableRow = React.memo(function TopicTableRow({
               playSound.click();
               onClick();
             }}
-            className="text-slate-500 hover:text-slate-900 bg-slate-100 hover:bg-slate-200/80 text-xs font-bold px-3 py-1.5 rounded-lg transition-all active:scale-95 inline-flex items-center gap-1"
+            className="text-slate-500 hover:text-slate-900 bg-slate-100 hover:bg-slate-200/80 text-xs font-semibold min-h-11 px-3 py-2 rounded-lg transition-all active:scale-95 inline-flex items-center gap-1"
           >
             <span>Ficha</span>
             <ChevronRight size={13} strokeWidth={2.5} />

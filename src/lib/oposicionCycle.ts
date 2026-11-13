@@ -1,14 +1,21 @@
-import { TopicProgressData } from "./prediction";
-import { getLocalDateString, safeParseDate } from "./utils";
-import { sessionMatchesTopic } from "./cantoUtils";
+import type { TopicProgressData } from './prediction';
+import { getLocalDateString } from './utils';
+import { getCanonicalTopic, type CanonicalTopic } from './canonicalTopicService';
+import { calculateCanonicalRetention, getCanonicalReviewDate } from './ebbinghaus';
+import type { Topic } from '../types';
+import { parseAeroFocusTopicIdPrefix } from './topicResolver';
+import { getInitialStudyCompletionDate } from './topicCoverage';
 
-export type PreparadorPhase = 
-  | 'sin_iniciar'          // Tema nuevo sin estudio inicial
-  | 'en_refrescos'         // En el ciclo de 3 días de refresco consecutivos
-  | 'listo_para_cantar'    // Ha completado los 3 refrescos, esperando cante
-  | 'consolidado_mes'      // Cantado recientemente, en ventana de asimilación mensual (< 30 días)
-  | 'repaso_pendiente'     // Llegó el plazo de ~30 días: toca repaso mensual
-  | 'repaso_vencido';      // Han pasado más de 35 días desde el último cante o repaso
+/** Legacy identifiers retained for consumers; labels describe evidence and flexible dates. */
+export type PreparadorPhase =
+  | 'estudio_parcial'
+  | 'cobertura_desconocida'
+  | 'sin_iniciar'
+  | 'en_refrescos'
+  | 'listo_para_cantar'
+  | 'consolidado_mes'
+  | 'repaso_pendiente'
+  | 'repaso_vencido';
 
 export interface TopicCycleInfo {
   topicId: string;
@@ -16,300 +23,140 @@ export interface TopicCycleInfo {
   phaseLabel: string;
   phaseColor: string;
   phaseBadgeClass: string;
-  
-  // Vueltas oficiales del preparador
   vueltas: number;
-  
-  // Detalle del ciclo de 3 refrescos
-  refrescosCount: number;         // 0, 1, 2, 3 o más
-  targetRefrescos: number;        // Siempre 3
-  refrescosProgressPct: number;   // 0%, 33%, 66%, 100%
-  refrescoDayLabel: string;       // Ej: "Refresco 1/3 (Día 1)", "Refresco 2/3", "Refresco 3/3"
-  refrescoDates: string[];        // Fechas en que se hicieron los refrescos
-  
-  // Fechas clave
+  /** Distinct observed refresh days. They do not establish mastery. */
+  refrescosCount: number;
+  /** Compatibility fields: zero means there is no fixed refresh quota. */
+  targetRefrescos: number;
+  refrescosProgressPct: number;
+  refrescoDayLabel: string;
+  refrescoDates: string[];
   firstStudyDate: string | null;
+  initialStudyCompletionDate: string | null;
   lastStudyOrReviewDate: string | null;
   lastCantoDate: string | null;
   lastCantoScore: number | null;
-  
-  // Repaso mensual (~30 días)
   daysSinceLastCantoOrReview: number;
-  nextMonthlyReviewDate: string;
-  daysUntilMonthlyReview: number; // Positivo = faltan días, Negativo = días de retraso
+  /** Legacy names; the date is the shared, flexible retention recommendation. */
+  nextMonthlyReviewDate: string | null;
+  daysUntilMonthlyReview: number | null;
   isMonthlyReviewDue: boolean;
   isMonthlyReviewOverdue: boolean;
-  // Detección de acción para HOY
-  isDueToday: boolean;            // Toca refresco (D1, D2, D3) o repaso mensual hoy/vencido
-  isRefreshedToday: boolean;      // Ya ha registrado sesión de refresco hoy
-  daysSinceFirstStudy: number | null; // Días de calendario desde estudio inicial
-
-  // Próxima acción según el método de los preparadores
+  isDueToday: boolean;
+  isRefreshedToday: boolean;
+  daysSinceFirstStudy: number | null;
   nextActionTitle: string;
   nextActionDescription: string;
   nextActionType: 'estudio_inicial' | 'refresco' | 'canto' | 'repaso';
 }
 
+function dayTime(value: unknown): number | null {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+  const time = Date.parse(`${value}T00:00:00.000Z`);
+  return Number.isFinite(time) && new Date(time).toISOString().slice(0, 10) === value ? time : null;
+}
+
 /**
- * Calcula el estado exacto del tema de acuerdo con el método del preparador:
- * 1. Estudio Inicial (Fijación inicial del tema nuevo)
- * 2. 3 Refrescos en días consecutivos (Leer + cantar hasta dominarlo)
- * 3. Canto (ante preparador o en solitario) -> Culmina la Vuelta 1
- * 4. Repaso mensual (~30 días después) -> Cada ciclo suma Vuelta 2, 3...
+ * Study coverage and memory evidence are separate. This adapter keeps its old
+ * public shape while using the same review policy as every other view. Counts,
+ * elapsed days and oral grades never make a topic automatically ready to sing.
  */
 export function calculateTopicCycle(
   topicId: string,
   progress: TopicProgressData | undefined,
-  sessions: any[] = []
+  sessions: any[] = [],
+  canonicalTopic?: CanonicalTopic,
 ): TopicCycleInfo {
   const todayStr = getLocalDateString();
-  const todayDate = new Date(todayStr);
+  const todayTime = dayTime(todayStr)!;
+  const identity = parseAeroFocusTopicIdPrefix(topicId);
+  const canonical = canonicalTopic || getCanonicalTopic({
+    id: topicId, subjectId: identity?.subjectId || progress?.subjectId || '',
+    number: identity?.number || 0, title: progress?.customTitle || topicId,
+    pages: progress?.pages || 0, difficulty: progress?.difficulty || 0,
+  } as Topic, [], progress ? { [topicId]: progress } : {}, sessions);
+  const memory = calculateCanonicalRetention(canonical);
+  const suggestedDate = getCanonicalReviewDate(canonical, memory);
+  const nextMonthlyReviewDate = suggestedDate && dayTime(suggestedDate) !== null ? suggestedDate : null;
+  const daysUntilMonthlyReview = nextMonthlyReviewDate ? Math.round((dayTime(nextMonthlyReviewDate)! - todayTime) / 86_400_000) : null;
+  const isMonthlyReviewDue = daysUntilMonthlyReview !== null && daysUntilMonthlyReview <= 0;
+  const isMonthlyReviewOverdue = daysUntilMonthlyReview !== null && daysUntilMonthlyReview < 0;
+  const firstStudyDate = canonical.firstStudyDate || null;
+  const initialStudyCompletionDate = getInitialStudyCompletionDate(canonical.pages, canonical.sessions.filter(session => session.date <= todayStr));
+  const firstStudyTime = dayTime(firstStudyDate);
+  const daysSinceFirstStudy = firstStudyTime !== null ? Math.max(0, Math.floor((todayTime - firstStudyTime) / 86_400_000)) : null;
+  const lastCantoDate = canonical.lastCantoDate || null;
+  const lastCantoScore = canonical.lastCantoGrade ?? null;
+  const lastMajorAnchorDate = [lastCantoDate, canonical.lastReviewDate, firstStudyDate]
+    .filter((value): value is string => !!value && dayTime(value) !== null && value <= todayStr).sort().at(-1) || null;
+  const daysSinceLastCantoOrReview = lastMajorAnchorDate ? Math.max(0, Math.floor((todayTime - dayTime(lastMajorAnchorDate)!) / 86_400_000)) : 0;
+  const refrescoDates = [...new Set(canonical.refreshSessions.map(session => session.date)
+    .filter(date => dayTime(date) !== null && date <= todayStr && (!initialStudyCompletionDate || date > initialStudyCompletionDate)))].sort();
+  const refrescosCount = refrescoDates.length;
+  const refrescoDayLabel = `${refrescosCount} ${refrescosCount === 1 ? 'día de refresco registrado' : 'días de refresco registrados'}`;
+  const isRefreshedToday = refrescoDates.includes(todayStr);
+  const coverage = canonical.initialStudyCoverage;
+  const reason = memory.adaptive?.reasons.join(' ') || memory.diagnostic || 'Todavía no hay una evaluación de recuerdo suficiente para orientar la siguiente comprobación.';
+  const dateReason = nextMonthlyReviewDate ? `Fecha orientativa: ${nextMonthlyReviewDate}. Puede ajustarse con el siguiente resultado.` : 'No hay una fecha de revisión sugerida.';
 
-  // Normalización para concordancia infalible y estrictamente aislada por asignatura
-  const cleanTarget = String(topicId || "").toLowerCase().trim();
-  const parts = cleanTarget.split("-");
-  const targetSubject = parts.length > 1 ? parts[0] : "constitucional";
-  const numMatch = cleanTarget.match(/\d+/);
-  const targetNumber = numMatch ? parseInt(numMatch[0], 10) : undefined;
-  const targetTopicObj = {
-    id: cleanTarget,
-    subjectId: targetSubject,
-    number: targetNumber,
-  };
-
-  // Filtrar y ordenar sesiones cronológicamente respetando el aislamiento estricto de asignatura
-  const topicSessions = (sessions || [])
-    .filter((s) => {
-      if (!s) return false;
-      return sessionMatchesTopic(s, targetTopicObj);
-    })
-    .sort((a, b) => {
-      const dateCmp = (a.date || "").localeCompare(b.date || "");
-      if (dateCmp !== 0) return dateCmp;
-      const timeA = a.createdAt?.toMillis ? a.createdAt.toMillis() : (a.createdAt || 0);
-      const timeB = b.createdAt?.toMillis ? b.createdAt.toMillis() : (b.createdAt || 0);
-      return timeA - timeB;
-    });
-
-  const estudioSessions = topicSessions.filter(
-    (s) => s.type === "estudio_inicial" || s.type === "primer_estudio"
-  );
-  const cantosSessions = topicSessions.filter((s) => s.type === "canto" || s.type === "simulacro");
-  const repasosSessions = topicSessions.filter((s) => s.type === "repaso");
-  const refrescosSessions = topicSessions.filter((s) => s.type === "refresco");
-
-  const hasInitialStudy = estudioSessions.length > 0 || !!progress?.firstStudyDate;
-  const firstStudyDate = estudioSessions[0]?.date || progress?.firstStudyDate || null;
-
-  // Encontrar el último hito mayor (último cante o último repaso general)
-  const lastCanto = cantosSessions[cantosSessions.length - 1] || null;
-  const lastCantoDate = lastCanto?.date || null;
-  const lastCantoScore = lastCanto?.cantoGrade ?? (lastCanto as any)?.score ?? null;
-
-  const lastRepaso = repasosSessions[repasosSessions.length - 1] || null;
-  const lastRepasoDate = lastRepaso?.date || null;
-
-  // Fecha del último anclaje mayor (para el cómputo del mes de repaso)
-  let lastMajorAnchorDate = lastCantoDate;
-  if (lastRepasoDate && (!lastMajorAnchorDate || lastRepasoDate > lastMajorAnchorDate)) {
-    lastMajorAnchorDate = lastRepasoDate;
-  }
-  if (!lastMajorAnchorDate && firstStudyDate) {
-    lastMajorAnchorDate = firstStudyDate;
-  }
-
-  // Refrescos pertenecientes al ciclo actual (posteriores al último cante o estudio inicial)
-  let currentCycleRefrescos: any[] = [];
-  if (lastCantoDate) {
-    // Si ya se ha cantado, los refrescos del ciclo actual son los posteriores al cante
-    currentCycleRefrescos = refrescosSessions.filter((s) => s.date >= lastCantoDate);
-  } else if (firstStudyDate) {
-    // Si aún no se ha cantado, todos los refrescos hechos tras el estudio inicial
-    currentCycleRefrescos = refrescosSessions.filter((s) => s.date >= firstStudyDate);
-  } else {
-    currentCycleRefrescos = refrescosSessions;
-  }
-
-  const refrescosCount = currentCycleRefrescos.length;
-  const refrescoDates = currentCycleRefrescos.map((s) => s.date);
-  const refrescosProgressPct = Math.min(100, Math.round((refrescosCount / 3) * 100));
-
-  // Cómputo de vueltas según el preparador:
-  // - Si no se ha cantado nunca: 0 vueltas completadas (en asimilación).
-  // - Si se cantó la 1ª vez: Vuelta 1.
-  // - Cada repaso posterior (o cante posterior) suma a las vueltas.
-  let computedVueltas = 0;
-  if (cantosSessions.length > 0) {
-    // 1 vuelta por el primer cante + repasos posteriores
-    computedVueltas = 1 + repasosSessions.filter(r => lastCantoDate && r.date > cantosSessions[0].date).length;
-    // O si en progress se fijó explícitamente una vuelta superior, respetarla
-    if (progress?.vueltas && progress.vueltas > computedVueltas) {
-      computedVueltas = progress.vueltas;
-    }
-  } else if (progress?.vueltas && progress.vueltas > 0) {
-    computedVueltas = progress.vueltas;
-  }
-
-  // Cómputo de días transcurridos desde el último cante o repaso
-  let daysSinceLastCantoOrReview = 0;
-  if (lastMajorAnchorDate) {
-    const anchorDateObj = new Date(lastMajorAnchorDate);
-    const diffMs = todayDate.getTime() - anchorDateObj.getTime();
-    daysSinceLastCantoOrReview = Math.max(0, Math.floor(diffMs / (1000 * 60 * 60 * 24)));
-  }
-
-  // Intervalo mensual objetivo: 30 días (con modulación por dificultad si existe)
-  const topicDifficulty = progress?.difficulty || 5;
-  let monthlyIntervalDays = 30;
-  if (topicDifficulty >= 8) {
-    monthlyIntervalDays = 25; // Los muy difíciles se repasan un poco antes
-  } else if (topicDifficulty <= 3) {
-    monthlyIntervalDays = 35; // Los muy fluidos se espacian a 35 días
-  }
-
-  // Próxima fecha de repaso mensual estimada
-  let nextMonthlyReviewDate = progress?.nextReviewDate || todayStr;
-  if (lastMajorAnchorDate) {
-    const nextDateObj = new Date(lastMajorAnchorDate);
-    nextDateObj.setDate(nextDateObj.getDate() + monthlyIntervalDays);
-    nextMonthlyReviewDate = getLocalDateString(nextDateObj);
-  }
-
-  const nextDateParsed = new Date(nextMonthlyReviewDate);
-  const daysUntilMonthlyReview = Math.ceil(
-    (nextDateParsed.getTime() - todayDate.getTime()) / (1000 * 60 * 60 * 24)
-  );
-
-  const isMonthlyReviewDue = daysUntilMonthlyReview <= 0;
-  const isMonthlyReviewOverdue = daysUntilMonthlyReview <= -5; // Más de 5 días de retraso sobre los 30
-
-  // Días transcurridos desde el primer estudio
-  const daysSinceFirstStudy = firstStudyDate
-    ? Math.max(0, Math.floor((todayDate.getTime() - safeParseDate(firstStudyDate).getTime()) / (1000 * 60 * 60 * 24)))
-    : null;
-
-  // Determinación de la fase actual del método del preparador
   let phase: PreparadorPhase = 'sin_iniciar';
-  let phaseLabel = 'Sin Iniciar';
-  let phaseColor = 'text-slate-400';
-  let phaseBadgeClass = 'bg-slate-100 text-slate-600 border-slate-200';
-  let nextActionTitle = 'Estudio Inicial';
-  let nextActionDescription = 'Fijar el tema por primera vez con lectura analítica y estructuración.';
-  let nextActionType: 'estudio_inicial' | 'refresco' | 'canto' | 'repaso' = 'estudio_inicial';
+  let phaseLabel = 'Pendiente de estudio inicial';
+  let phaseColor = 'text-slate-500';
+  let phaseBadgeClass = 'bg-slate-100 text-slate-700 border-slate-200';
+  let nextActionTitle = 'Comenzar estudio inicial';
+  let nextActionDescription = 'Registra las páginas que trabajes y el tiempo real. Una sesión realizada no demuestra todavía recuerdo sin ayuda.';
+  let nextActionType: TopicCycleInfo['nextActionType'] = 'estudio_inicial';
 
-  if (!hasInitialStudy) {
-    phase = 'sin_iniciar';
-    phaseLabel = 'Pendiente Estudio Inicial';
-    phaseColor = 'text-slate-500';
-    phaseBadgeClass = 'bg-slate-100 text-slate-700 border-slate-200';
-    nextActionTitle = 'Comenzar Estudio Inicial';
-    nextActionDescription = 'Dedica una sesión intensiva a memorizar y asimilar los epígrafes principales.';
-    nextActionType = 'estudio_inicial';
-  } else if (cantosSessions.length === 0 && computedVueltas === 0) {
-    // REGLA SUPREMA: Cada tema nuevo debe ser refrescado en los 3 días siguientes (no 3 veces, sino días: D+1, D+2, D+3)
-    if (daysSinceFirstStudy === 0) {
-      phase = 'en_refrescos';
-      phaseLabel = 'Estudiado Hoy (D0)';
-      phaseColor = 'text-blue-600';
-      phaseBadgeClass = 'bg-blue-50 text-blue-800 border-blue-200/80 font-bold';
-      nextActionTitle = 'Refresco Día 1 Mañana';
-      nextActionDescription = 'Tema fijado hoy. Mañana toca el 1er día de refresco para asentar la huella sináptica.';
-      nextActionType = 'refresco';
-    } else if (daysSinceFirstStudy !== null && daysSinceFirstStudy >= 1 && daysSinceFirstStudy <= 3) {
-      phase = 'en_refrescos';
-      phaseLabel = `Refresco D${daysSinceFirstStudy} (HOY)`;
-      phaseColor = 'text-amber-600';
-      phaseBadgeClass = 'bg-amber-50 text-amber-800 border-amber-300 font-black animate-pulse shadow-xs';
-      nextActionTitle = `Refresco Día ${daysSinceFirstStudy} de 3 (Toca HOY)`;
-      nextActionDescription = `Día ${daysSinceFirstStudy} de 3 tras el estudio nuevo: lectura ágil y evocación activa obligatoria hoy.`;
-      nextActionType = 'refresco';
-    } else {
-      phase = 'listo_para_cantar';
-      phaseLabel = 'Listo para Cantar';
-      phaseColor = 'text-fuchsia-600';
-      phaseBadgeClass = 'bg-fuchsia-50 text-fuchsia-800 border-fuchsia-200/80 font-black';
-      nextActionTitle = 'Cantar al Preparador';
-      nextActionDescription = 'Han transcurrido los 3 días de refresco consecutivos. Toca exponer el tema con cronómetro para culminar la Vuelta 1.';
-      nextActionType = 'canto';
-    }
-  } else {
-    // Ya ha sido cantado al menos una vez (Vuelta >= 1)
-    if (isMonthlyReviewOverdue) {
+  if (canonical.hasStarted) {
+    if (coverage.remainingPages === null || coverage.status === 'conflict') {
+      phase = 'cobertura_desconocida';
+      phaseLabel = coverage.status === 'conflict' ? 'Cobertura inicial por aclarar' : 'Cobertura inicial sin medir';
+      nextActionTitle = isMonthlyReviewDue ? 'Comprobar recuerdo de lo trabajado' : 'Registrar la cobertura inicial';
+      nextActionType = isMonthlyReviewDue ? 'refresco' : 'estudio_inicial';
+      nextActionDescription = `El historial no permite calcular las páginas iniciales pendientes. Registra rangos reales; no se deducen de tiempos, notas o vueltas. ${reason} ${dateReason}`;
+    } else if (coverage.remainingPages > 0) {
+      phase = 'estudio_parcial';
+      phaseLabel = `Estudio inicial parcial (${coverage.remainingPages} páginas pendientes)`;
+      nextActionTitle = isMonthlyReviewDue ? 'Comprobar recuerdo de la parte estudiada' : 'Continuar estudio inicial';
+      nextActionType = isMonthlyReviewDue ? 'refresco' : 'estudio_inicial';
+      nextActionDescription = `Quedan ${coverage.remainingPages} páginas de estudio inicial identificadas. Los repasos y cantes no reducen esa cobertura pendiente. La orientación de recuerdo se refiere a lo trabajado. ${reason} ${dateReason}`;
+    } else if (isMonthlyReviewOverdue) {
       phase = 'repaso_vencido';
-      phaseLabel = 'Repaso Mensual Vencido';
-      phaseColor = 'text-rose-600';
-      phaseBadgeClass = 'bg-rose-50 text-rose-800 border-rose-200/80 font-black';
-      nextActionTitle = 'Repaso Mensual Urgente';
-      nextActionDescription = `Han pasado ${daysSinceLastCantoOrReview} días desde el último cante. Repásalo antes de que caiga la curva del olvido.`;
+      phaseLabel = 'Comprobación sugerida pendiente';
+      phaseColor = 'text-amber-700';
+      phaseBadgeClass = 'bg-amber-50 text-amber-900 border-amber-200';
+      nextActionTitle = 'Comprobar recuerdo sin ayuda';
+      nextActionDescription = `${reason} ${dateReason}`;
       nextActionType = 'repaso';
     } else if (isMonthlyReviewDue) {
       phase = 'repaso_pendiente';
-      phaseLabel = 'Toca Repaso Mensual';
+      phaseLabel = 'Comprobación sugerida hoy';
       phaseColor = 'text-indigo-600';
-      phaseBadgeClass = 'bg-indigo-50 text-indigo-800 border-indigo-200/80 font-bold';
-      nextActionTitle = 'Repaso Mensual de Vuelta';
-      nextActionDescription = 'Cumplido el ciclo de ~30 días. Realiza una vuelta de repaso para afianzar retención.';
+      phaseBadgeClass = 'bg-indigo-50 text-indigo-800 border-indigo-200';
+      nextActionTitle = 'Comprobar recuerdo sin ayuda';
+      nextActionDescription = `${reason} ${dateReason}`;
       nextActionType = 'repaso';
     } else {
+      // The historical identifier means "no review currently due", not mastery
+      // or a monthly interval. No refresh count or round count selects it.
       phase = 'consolidado_mes';
-      phaseLabel = `Al Día (${daysUntilMonthlyReview}d)`;
-      phaseColor = 'text-emerald-600';
-      phaseBadgeClass = 'bg-emerald-50 text-emerald-800 border-emerald-200/80';
-      nextActionTitle = `Próximo Repaso en ${daysUntilMonthlyReview} días`;
-      nextActionDescription = `Tema fijado en Vuelta ${computedVueltas}. En descanso activo hasta el ${nextMonthlyReviewDate}.`;
+      phaseLabel = daysUntilMonthlyReview === null ? 'Sin comprobación fechada' : `Próxima comprobación en ${daysUntilMonthlyReview} días`;
+      phaseColor = 'text-blue-600';
+      phaseBadgeClass = 'bg-blue-50 text-blue-800 border-blue-200';
+      nextActionTitle = daysUntilMonthlyReview === null ? 'Registrar una comprobación de recuerdo' : 'Comprobación de recuerdo sugerida';
+      nextActionDescription = `${reason} ${dateReason}`;
       nextActionType = 'repaso';
     }
   }
 
-  let refrescoDayLabel = "";
-  if (daysSinceFirstStudy === 0) {
-    refrescoDayLabel = "Refresco Mañana (D1)";
-  } else if (daysSinceFirstStudy !== null && daysSinceFirstStudy >= 1 && daysSinceFirstStudy <= 3) {
-    refrescoDayLabel = `Refresco Día ${daysSinceFirstStudy}/3 (HOY)`;
-  } else if (daysSinceFirstStudy !== null && daysSinceFirstStudy > 3) {
-    refrescoDayLabel = "3 Días Cumplidos (Listo Canto)";
-  } else {
-    refrescoDayLabel = `Refresco ${refrescosCount}/3`;
-  }
-
-  const isRefreshedToday = sessions.some(
-    (s) => s.date === todayStr && (s.type === 'refresco' || s.type === 'repaso')
-  );
-
-  const isDueToday =
-    (phase === 'en_refrescos' &&
-      daysSinceFirstStudy !== null &&
-      daysSinceFirstStudy >= 1 &&
-      daysSinceFirstStudy <= 3 &&
-      !isRefreshedToday) ||
-    isMonthlyReviewDue;
-
   return {
-    topicId,
-    phase,
-    phaseLabel,
-    phaseColor,
-    phaseBadgeClass,
-    vueltas: computedVueltas,
-    refrescosCount,
-    targetRefrescos: 3,
-    refrescosProgressPct,
-    refrescoDayLabel,
-    refrescoDates,
-    firstStudyDate,
-    lastStudyOrReviewDate: lastMajorAnchorDate,
-    lastCantoDate,
-    lastCantoScore,
-    daysSinceLastCantoOrReview,
-    nextMonthlyReviewDate,
-    daysUntilMonthlyReview,
-    isMonthlyReviewDue,
-    isMonthlyReviewOverdue,
-    isDueToday,
-    isRefreshedToday,
-    daysSinceFirstStudy,
-    nextActionTitle,
-    nextActionDescription,
-    nextActionType,
+    topicId, phase, phaseLabel, phaseColor, phaseBadgeClass, vueltas: canonical.vueltas,
+    refrescosCount, targetRefrescos: 0, refrescosProgressPct: 0, refrescoDayLabel, refrescoDates,
+    firstStudyDate, initialStudyCompletionDate, lastStudyOrReviewDate: lastMajorAnchorDate, lastCantoDate, lastCantoScore,
+    daysSinceLastCantoOrReview, nextMonthlyReviewDate, daysUntilMonthlyReview,
+    isMonthlyReviewDue, isMonthlyReviewOverdue,
+    isDueToday: canonical.hasStarted && isMonthlyReviewDue,
+    isRefreshedToday, daysSinceFirstStudy,
+    nextActionTitle, nextActionDescription, nextActionType,
   };
 }

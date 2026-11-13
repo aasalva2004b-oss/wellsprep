@@ -1,19 +1,17 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useId, useRef } from "react";
 import { motion } from "motion/react";
 import { toast } from "sonner";
 import { Topic } from "../types";
 import { useFirebase } from "../lib/FirebaseProvider";
 import { safeParseDate, getLocalDateString } from "../lib/utils";
-import { calculateNextReviewDate } from "../lib/prediction";
 import { calculateTopicCycle } from "../lib/oposicionCycle";
-import { calculateEbbinghausCurve } from "../lib/ebbinghaus";
+import { calculateCanonicalRetention } from "../lib/ebbinghaus";
+import { buildObservedSession } from "../lib/observedSession";
 import {
   isCantoSession,
   getCantoDuration,
-  sessionMatchesTopic,
   compareSessionsDesc,
   compareSessionsAsc,
-  extractSubjectFromTopicId,
 } from "../lib/cantoUtils";
 
 // Atomic Subcomponents
@@ -26,6 +24,8 @@ import { TopicDifficultyCard } from "./topic-editor/TopicDifficultyCard";
 import { TopicCantoRadarCard } from "./topic-editor/TopicCantoRadarCard";
 import { TopicHistoryCard } from "./topic-editor/TopicHistoryCard";
 import { EditSessionDialog } from "./EditSessionDialog";
+import { useDialogAccessibility } from "../hooks/useDialogAccessibility";
+import { DS } from "../lib/designSystem";
 
 export function TopicEditorDialog({
   topic,
@@ -36,8 +36,11 @@ export function TopicEditorDialog({
 }) {
   const {
     userProgress,
+    topicState,
     updateTopicProgress,
     addStudySession,
+    estimateDuration,
+    estimateRetentionForTopic,
     deleteStudySession,
     quickUpdateSessionDifficulty,
     mergeStudySessions,
@@ -46,26 +49,30 @@ export function TopicEditorDialog({
   } = useFirebase();
   const topicId = topic.id;
   const progress = userProgress[topicId];
+  const canonicalTopic = topicState.get(topicId);
+  const initialCoverage = canonicalTopic?.initialStudyCoverage;
 
   const [sessionToEdit, setSessionToEdit] = useState<any | null>(null);
 
-  if (!user) return null;
+  const initialDifficulty = canonicalTopic?.hasExplicitDifficulty ? canonicalTopic.difficulty : "";
 
-  const initialDifficulty =
-    progress?.difficulty || (topic.difficulty ? topic.difficulty * 2 : 5);
+  const [numeroPalabras, setNumeroPalabras] = useState((canonicalTopic?.numeroPalabras ?? "").toString());
+  const [pages, setPages] = useState(canonicalTopic?.hasExplicitPages ? String(canonicalTopic.pages) : "");
+  const [difficulty, setDifficulty] = useState<number | "">(initialDifficulty);
+  const [customTitle, setCustomTitle] = useState(canonicalTopic?.title ?? topic.title);
 
-  const [numeroPalabras, setNumeroPalabras] = useState((progress?.numeroPalabras || topic.numeroPalabras || "").toString());
-  const [pages, setPages] = useState((progress?.pages || topic.pages || 15).toString());
-  const [difficulty, setDifficulty] = useState<number>(initialDifficulty);
-  const [customTitle, setCustomTitle] = useState(progress?.customTitle || topic.title);
+  useEffect(() => setPages(canonicalTopic?.hasExplicitPages ? String(canonicalTopic.pages) : ""), [topicId, canonicalTopic?.pages, canonicalTopic?.hasExplicitPages]);
+  useEffect(() => setNumeroPalabras(canonicalTopic?.numeroPalabras === undefined ? "" : String(canonicalTopic.numeroPalabras)), [topicId, canonicalTopic?.numeroPalabras]);
+  useEffect(() => setDifficulty(canonicalTopic?.hasExplicitDifficulty ? canonicalTopic.difficulty : ""), [topicId, canonicalTopic?.difficulty, canonicalTopic?.hasExplicitDifficulty]);
+  useEffect(() => setCustomTitle(canonicalTopic?.title ?? topic.title), [topicId, canonicalTopic?.title]);
 
   const [sessions, setSessions] = useState<any[]>([]);
   const [logDate, setLogDate] = useState(getLocalDateString());
   const [logType, setLogType] = useState<"estudio_inicial" | "repaso" | "refresco" | "canto" | "simulacro">("repaso");
 
   const topicCycle = useMemo(() => {
-    return calculateTopicCycle(topicId, progress, sessions as any);
-  }, [topicId, progress, sessions]);
+    return calculateTopicCycle(topicId, progress, sessions as any, canonicalTopic);
+  }, [topicId, progress, sessions, canonicalTopic]);
 
   const suggestedType = useMemo(() => {
     if (topicCycle.phase === "sin_iniciar") return "estudio_inicial";
@@ -78,11 +85,7 @@ export function TopicEditorDialog({
   useEffect(() => {
     if (!hasManuallyChangedType) {
       setLogType(suggestedType);
-      if (suggestedType === "refresco" || suggestedType === "estudio_inicial") {
-        setLogCompletesVuelta(false);
-      } else {
-        setLogCompletesVuelta(true);
-      }
+      setLogCompletesVuelta(false);
     }
   }, [suggestedType, hasManuallyChangedType]);
 
@@ -93,38 +96,29 @@ export function TopicEditorDialog({
   const [logCantoGrade, setLogCantoGrade] = useState<number | "">("");
   const [logMistakes, setLogMistakes] = useState("");
   const [logNotes, setLogNotes] = useState("");
-  const [logCompletesVuelta, setLogCompletesVuelta] = useState(true);
+  const [logStartPage, setLogStartPage] = useState("");
+  const [logEndPage, setLogEndPage] = useState("");
+  const [logRecallOutcome, setLogRecallOutcome] = useState<"" | "success" | "failure">("");
+  const [logRecallCoverage, setLogRecallCoverage] = useState<"whole_topic" | "partial">("partial");
+  const [predictionRevision, setPredictionRevision] = useState(0);
+  const predictionSnapshot = useMemo(() => canonicalTopic ? estimateDuration(topicId, logType === "estudio_inicial" ? "estudio_nuevo" : logType === "canto" || logType === "simulacro" ? "cante" : logType) : undefined, [topicId, logType, predictionRevision]);
+  const retentionPrediction = useMemo(() => canonicalTopic ? estimateRetentionForTopic(topicId) : undefined, [topicId, logType, predictionRevision]);
+  const [logCompletesVuelta, setLogCompletesVuelta] = useState(false);
   const [cantoTimeRange, setCantoTimeRange] = useState<"all" | "10" | "5">("all");
 
-  const futureNextReviewDate = useMemo(() => {
-    if (logType === "estudio_inicial" || logType === "repaso") {
-      const v = (progress?.vueltas || 0) + 1;
-      const d = logDifficulty !== "" ? (logDifficulty as number) : (progress?.difficulty || difficulty || 3);
-      return calculateNextReviewDate(logDate, v, d);
-    }
-    return null;
-  }, [logType, logDifficulty, logDate, progress, difficulty]);
+  // La próxima fecha se deriva del historial guardado, después de registrar la sesión.
+  const futureNextReviewDate = null;
 
   const [isSavingSession, setIsSavingSession] = useState(false);
   const [sessionToDelete, setSessionToDelete] = useState<string | null>(null);
   const [saveSuccess, setSaveSuccess] = useState(false);
-
-  // Global Escape key listener to close dialog
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        if (!sessionToEdit && !sessionToDelete) {
-          onClose();
-        }
-      }
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [onClose, sessionToEdit, sessionToDelete]);
+  const dialogId = useId();
+  const dialogRef = useDialogAccessibility<HTMLDivElement>({ isOpen: !!user && !!canonicalTopic, onClose, disabled: isSavingSession });
+  const logSectionRef = useRef<HTMLElement>(null);
 
   // Synchronize and deduplicate sessions for this specific topic
   useEffect(() => {
-    const matched = recentSessions.filter((s) => sessionMatchesTopic(s, topic));
+    const matched = canonicalTopic?.sessions ?? [];
     const processed = matched.map((s) => {
       const isCante = isCantoSession(s);
       const dur = isCante
@@ -143,6 +137,7 @@ export function TopicEditorDialog({
           : undefined;
 
       return {
+        ...s,
         id: s.id,
         topicId: s.topicId || topicId,
         date: s.date || getLocalDateString(),
@@ -163,14 +158,15 @@ export function TopicEditorDialog({
     const dedupedSessions: any[] = [];
     const seenSessionKeys = new Set<string>();
     for (const s of processed) {
-      const key = `${s.date}-${s.type}-${s.durationMinutes}-${s.cantoSeconds || 0}-${s.cantoGrade ?? ""}`;
+      // Different document IDs can be legitimate sessions with identical measured values.
+      const key = s.id;
       if (!seenSessionKeys.has(key)) {
         seenSessionKeys.add(key);
         dedupedSessions.push(s);
       }
     }
     setSessions(dedupedSessions);
-  }, [topic.id, topic.number, recentSessions]);
+  }, [topicId, canonicalTopic?.sessions]);
 
   const groupedSessions = useMemo(() => {
     const chronological = [...sessions].reverse();
@@ -222,11 +218,10 @@ export function TopicEditorDialog({
     return result.reverse();
   }, [sessions]);
 
-  // Ebbinghaus analysis
+  // Retención e historial comparten la misma ficha canónica persistida.
   const ebbinghausAnalysis = useMemo(() => {
-    const p = parseFloat(String(pages).replace(",", ".")) || topic.pages || 15;
-    return calculateEbbinghausCurve(topic.id, p, difficulty, progress, sessions);
-  }, [topic.id, pages, difficulty, progress, sessions]);
+    return calculateCanonicalRetention(canonicalTopic);
+  }, [canonicalTopic]);
 
   // Subjective difficulty chart data
   const diffChartData = useMemo(() => {
@@ -423,27 +418,32 @@ export function TopicEditorDialog({
 
     try {
       setIsSavingSession(true);
-      await addStudySession(
-        topicId,
-        totalMinutes,
-        typeof logDifficulty === "number" ? logDifficulty : Number(progress?.difficulty) || 5,
-        logType as any,
-        logDate || getLocalDateString(),
-        {
-          cantoGrade:
-            (logType === "canto" || logType === "simulacro") && typeof logCantoGrade === "number"
-              ? logCantoGrade
-              : undefined,
-          notes: (logNotes || "").trim(),
-          completesVuelta: logCompletesVuelta,
-          cantoSeconds: logType === "canto" || logType === "simulacro" ? s : undefined,
-          mistakes:
-            (logType === "canto" || logType === "simulacro") && logMistakes ? logMistakes.trim() : undefined,
-          subjectId: topic.subjectId || extractSubjectFromTopicId(topic.id),
-          topicTitle: (customTitle || topic.title || "").trim(),
-        }
-      );
+      const form = {
+        minutes: String(totalMinutes), difficulty: String(typeof logDifficulty === "number" ? logDifficulty : canonicalTopic?.difficulty ?? 5),
+        date: logDate || getLocalDateString(), notes: logNotes || "", completesVuelta: logCompletesVuelta,
+        cantoGrade: logCantoGrade === "" ? "" : String(logCantoGrade), cantoSeconds: String(s),
+        startPage: logType !== "canto" && logType !== "simulacro" ? logStartPage : "",
+        endPage: logType !== "canto" && logType !== "simulacro" ? logEndPage : "",
+        recallOutcome: logRecallOutcome, recallCoverage: logRecallCoverage,
+      };
+      const session = buildObservedSession({
+        topicId, title: canonicalTopic?.title ?? topic.title,
+        type: logType === "simulacro" ? "canto" : logType,
+        predictionSnapshot,
+        retentionPrediction,
+        metadata: {
+          totalPages: predictionSnapshot?.inputs?.totalPages as number | undefined,
+          totalWords: predictionSnapshot?.inputs?.totalWords as number | undefined,
+        },
+      }, form);
+      if (logType === "simulacro") session.type = "simulacro";
+      if ((logType === "canto" || logType === "simulacro") && logMistakes.trim()) session.mistakes = logMistakes.trim();
+      await addStudySession(session as any);
+      setLogRecallOutcome(""); setLogRecallCoverage("partial");
+      setPredictionRevision(value => value + 1);
 
+      setLogStartPage("");
+      setLogEndPage("");
       setLogDurationHours("");
       setLogDurationMinutes("");
       setLogDurationSeconds("");
@@ -492,20 +492,27 @@ export function TopicEditorDialog({
     }
   };
 
+  if (!user || !canonicalTopic) return null;
+
   return (
     <div 
       onClick={(e) => {
-        if (e.target === e.currentTarget) onClose();
+        if (e.target === e.currentTarget && !isSavingSession) onClose();
       }}
-      className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/60 backdrop-blur-xl p-0 sm:p-4 md:p-6 animate-in fade-in duration-200"
+      className="wp-modal-overlay fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-0 sm:p-4 md:p-6"
     >
       <motion.div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={`${dialogId}-title`}
         initial={{ scale: 0.97, opacity: 0, y: 10 }}
         animate={{ scale: 1, opacity: 1, y: 0 }}
         exit={{ scale: 0.97, opacity: 0, y: 10 }}
         transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
-        className="bg-[#F8FAFC] w-full max-w-[92rem] h-[100dvh] sm:h-full sm:max-h-[96vh] rounded-none sm:rounded-3xl flex flex-col shadow-2xl overflow-hidden border border-slate-200/90 relative"
+        className="wp-modal-panel bg-[var(--wp-surface-muted)] w-full max-w-[92rem] h-[100dvh] sm:h-full sm:max-h-[96dvh] rounded-none sm:rounded-3xl flex flex-col shadow-xl overflow-hidden border border-slate-200/90 relative [&_header_button]:min-h-11 [&_header_button]:min-w-11"
       >
+        <span id={`${dialogId}-title`} className="sr-only">Ficha del tema {topic.number}: {customTitle || topic.title}</span>
         {/* Sticky Editorial Header */}
         <TopicEditorHeader
           topic={topic}
@@ -515,16 +522,18 @@ export function TopicEditorDialog({
           daysUntilReview={daysUntilReview}
           nextReviewDate={progress?.nextReviewDate || null}
           onClose={onClose}
+          disabled={isSavingSession}
         />
 
         {/* Scrollable Layout Body */}
-        <div className="flex-1 overflow-y-auto p-3 sm:p-6 md:p-8 pb-20 sm:pb-8 no-scrollbar relative">
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-3 sm:p-6 md:p-8 relative">
           <div className="grid grid-cols-1 xl:grid-cols-12 gap-4 sm:gap-6 max-w-[90rem] mx-auto">
             {/* LEFT COLUMN: Topic Settings & Log Form (Span 4) */}
             <div className="col-span-1 xl:col-span-4 flex flex-col gap-4 sm:gap-6">
               <TopicParametersCard
                 topic={topic}
                 customTitle={customTitle}
+                officialTitle={canonicalTopic.officialTitle}
                 setCustomTitle={setCustomTitle}
                 pages={pages}
                 setPages={setPages}
@@ -532,9 +541,42 @@ export function TopicEditorDialog({
                 setNumeroPalabras={setNumeroPalabras}
                 difficulty={difficulty}
                 setDifficulty={setDifficulty}
+                initialEpigrafes={canonicalTopic.epigrafes === undefined ? "" : String(canonicalTopic.epigrafes)}
                 updateTopicProgress={updateTopicProgress}
               />
 
+              <div className="rounded-2xl border border-slate-200 bg-white p-4 text-xs text-slate-700" role="status" data-testid="initial-study-coverage">
+                <p className="font-bold">
+                  {initialCoverage?.studiedPages !== null && initialCoverage?.studiedPages !== undefined && initialCoverage.remainingPages !== null
+                    ? `Estudio inicial: ${initialCoverage.studiedPages} de ${canonicalTopic.pages} páginas · ${initialCoverage.remainingPages} pendientes`
+                    : "Estudio inicial: cobertura pendiente de medir"}
+                </p>
+                {initialCoverage?.pageNumbers.length ? <p className="mt-1">Páginas identificadas: {initialCoverage.pageNumbers.join(", ")}</p> : null}
+                {initialCoverage?.unlocatedStudy && <p className="mt-1">Hay estudio histórico sin páginas identificadas. Los nuevos rangos no reconstruyen esa parte del historial.</p>}
+                {initialCoverage?.issues.length ? <p className="mt-1">{initialCoverage.issues.join(" · ")}</p> : null}
+              </div>
+
+              {logType !== "canto" && logType !== "simulacro" && <div className="rounded-2xl border border-slate-200 bg-white p-4 text-xs text-slate-700">
+                <p className="font-bold">Páginas trabajadas en esta sesión</p>
+                <p className="mt-1">Opcional. Identifica el rango realizado; el estudio inicial y los repasos se contabilizan por separado.</p>
+                <div className="mt-3 grid grid-cols-2 gap-3">
+                  <label>Página inicial<input aria-label="Página inicial de la sesión" type="number" min="1" step="1" value={logStartPage} onChange={e => setLogStartPage(e.target.value)} className="mt-1 w-full rounded-lg border border-slate-300 p-2" /></label>
+                  <label>Página final<input aria-label="Página final de la sesión" type="number" min="1" step="1" value={logEndPage} onChange={e => setLogEndPage(e.target.value)} className="mt-1 w-full rounded-lg border border-slate-300 p-2" /></label>
+                </div>
+              </div>}
+
+              <div className="rounded-2xl border border-slate-200 bg-white p-4 text-xs text-slate-700">
+                <p className="font-bold">Comprobación de memoria sin apuntes (opcional)</p>
+                <p className="mt-1">Completa estos campos solo si has intentado recordar el contenido sin consultar material. La nota del cante se guarda por separado.</p>
+                <label className="mt-3 block">Resultado<select aria-label="Resultado de recuerdo sin apuntes" value={logRecallOutcome} onChange={e => setLogRecallOutcome(e.target.value as "" | "success" | "failure")} className="mt-1 w-full rounded-lg border border-slate-300 p-2">
+                  <option value="">Sin evaluación de recuerdo</option><option value="success">He recordado el contenido evaluado</option><option value="failure">No he recordado el contenido evaluado</option>
+                </select></label>
+                {logRecallOutcome && <label className="mt-3 block">Contenido evaluado<select aria-label="Alcance del recuerdo evaluado" value={logRecallCoverage} onChange={e => setLogRecallCoverage(e.target.value as "whole_topic" | "partial")} className="mt-1 w-full rounded-lg border border-slate-300 p-2">
+                  <option value="partial">Una parte del tema</option><option value="whole_topic">El tema completo</option>
+                </select></label>}
+              </div>
+
+              <section ref={logSectionRef} aria-label="Registro de una sesión real">
               <TopicLogSessionCard
                 topicCycle={topicCycle}
                 logType={logType}
@@ -565,6 +607,7 @@ export function TopicEditorDialog({
                 saveSuccess={saveSuccess}
                 onAddSession={handleAddSession}
               />
+              </section>
             </div>
 
             {/* RIGHT COLUMN: KPIs, Ebbinghaus, Charts, History (Span 8) */}
@@ -607,6 +650,10 @@ export function TopicEditorDialog({
             </div>
           </div>
         </div>
+        <footer className="flex shrink-0 items-center justify-end gap-2 border-t border-slate-200 bg-white px-3 py-2 sm:px-6" style={{ paddingBottom: 'max(.5rem, env(safe-area-inset-bottom))' }}>
+          <button type="button" onClick={onClose} disabled={isSavingSession} className={DS.btnSecondary}>Cerrar ficha</button>
+          <button type="button" onClick={() => logSectionRef.current?.scrollIntoView({ block: 'start', behavior: 'smooth' })} className={DS.btnPrimary}>Ir al registro de sesión</button>
+        </footer>
       </motion.div>
 
       {/* MODAL DE PERSONALIZACIÓN DE SESIÓN */}

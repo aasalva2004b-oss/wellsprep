@@ -160,173 +160,41 @@ export function compareSessionsAsc(a: any, b: any): number {
   return compareSessionsDesc(b, a);
 }
 
-/**
- * Universal topic session matcher.
- * Matches whether a session `s` corresponds to the given `topic` (e.g. Tema 17 Constitucional),
- * handling variations such as:
- * - "constitucional-17"
- * - "17" or 17
- * - "tema-17" or "Tema 17"
- * - legacy "mercantil-17" if it was a mismapped Constitucional topic
- * - topicNumber: 17
- */
-import { 
-  normalizeCategoryToSubjectId, 
-  parseAeroFocusTopicIdPrefix,
-  resolveCanonicalJudicaturaId,
-  extractTopicNumber 
-} from "./topicResolver";
+import { normalizeCategoryToSubjectId, parseAeroFocusTopicIdPrefix } from "./topicResolver";
 
 /**
- * Deduce con certeza la asignatura a la que pertenece una sesión.
- * Jerarquía estricta:
- * 1. topicId con prefijo conocido (ej: "constitucional-5", "civil-12", "penal-3")
- * 2. subjectId explícito
- * 3. parseAeroFocusTopicIdPrefix (ej: "CONST_T5", "CIV_T12")
- * 4. resolveCanonicalJudicaturaId (ej: "jud-1" -> "constitucional", "jud-28" -> "civil")
- * 5. Campo materia / category / asignatura
- * 6. Fallback predeterminado: "constitucional" (ya que el usuario únicamente ha estudiado Constitucional)
- */
-export function extractSessionSubjectId(s: any): string {
-  if (!s) return "constitucional";
-
-  const rawTopicId = String(s.topicId || "").trim().toLowerCase();
-
-  // 1. Prefijo directo oficial de Wellsprep en topicId
-  if (rawTopicId.startsWith("constitucional-") || rawTopicId.startsWith("constitucional_") || rawTopicId.startsWith("const-") || rawTopicId.startsWith("const_")) {
-    return "constitucional";
-  }
-  if (rawTopicId.startsWith("civil-") || rawTopicId.startsWith("civil_") || rawTopicId.startsWith("civ-") || rawTopicId.startsWith("civ_")) {
-    return "civil";
-  }
-  if (rawTopicId.startsWith("penal-") || rawTopicId.startsWith("penal_") || rawTopicId.startsWith("pen-") || rawTopicId.startsWith("pen_")) {
-    return "penal";
-  }
-  if (rawTopicId.startsWith("procesal-civil-") || rawTopicId.startsWith("procesal_civil_") || rawTopicId.startsWith("proc-civ-") || rawTopicId.startsWith("pciv-")) {
-    return "procesal-civil";
-  }
-  if (rawTopicId.startsWith("procesal-penal-") || rawTopicId.startsWith("procesal_penal_") || rawTopicId.startsWith("proc-pen-") || rawTopicId.startsWith("ppen-")) {
-    return "procesal-penal";
-  }
-  if (rawTopicId.startsWith("mercantil-") || rawTopicId.startsWith("mercantil_") || rawTopicId.startsWith("merc-")) {
-    return "mercantil";
-  }
-  if (rawTopicId.startsWith("administrativo-laboral-") || rawTopicId.startsWith("administrativo_laboral_") || rawTopicId.startsWith("admin-lab-")) {
-    return "administrativo-laboral";
-  }
-
-  // 2. Campo subjectId directo
-  if (s.subjectId) {
-    const sId = normalizeCategoryToSubjectId(s.subjectId) || String(s.subjectId).toLowerCase().trim();
-    if (sId) return sId;
-  }
-
-  // 3. Formato AeroFocus (jud-1..jud-328 o prefijos CIV_T12, etc.)
-  const parsedPrefix = parseAeroFocusTopicIdPrefix(rawTopicId);
-  if (parsedPrefix?.subjectId) {
-    return parsedPrefix.subjectId;
-  }
-  const canonical = resolveCanonicalJudicaturaId(rawTopicId);
-  if (canonical?.subjectId) {
-    return canonical.subjectId;
-  }
-
-  // 4. Campo category, materia o asignatura
-  const cat = s.category || s.materia || s.asignatura;
-  if (cat) {
-    const normalized = normalizeCategoryToSubjectId(cat);
-    if (normalized) return normalized;
-  }
-
-  // 5. Título de tema o notas con mención explícita
-  const text = `${s.topicTitle || ""} ${s.notes || ""}`.toLowerCase();
-  const subjFromText = normalizeCategoryToSubjectId(text);
-  if (subjFromText) return subjFromText;
-
-  // 6. Por defecto, dado que la única asignatura estudiada en la oposición es Constitucional
-  return "constitucional";
-}
-
-export function extractSubjectFromTopicId(topicId: string): string {
-  const clean = String(topicId || "").trim().toLowerCase();
-  if (clean.startsWith("procesal-civil") || clean.startsWith("proc-civ") || clean.startsWith("pciv")) return "procesal-civil";
-  if (clean.startsWith("procesal-penal") || clean.startsWith("proc-pen") || clean.startsWith("ppen")) return "procesal-penal";
-  if (clean.startsWith("administrativo-laboral") || clean.startsWith("admin-lab")) return "administrativo-laboral";
-  if (clean.startsWith("constitucional") || clean.startsWith("const")) return "constitucional";
-  if (clean.startsWith("civil") || clean.startsWith("civ")) return "civil";
-  if (clean.startsWith("penal") || clean.startsWith("pen")) return "penal";
-  if (clean.startsWith("mercantil") || clean.startsWith("merc")) return "mercantil";
-  const parts = clean.split(/[-_]/);
-  return parts[0] || "constitucional";
-}
-
-/**
- * Universal topic session matcher.
- * Matches whether a session `s` corresponds to the given `topic` (e.g. Tema 5 Civil).
- * Strictly guarantees that sessions for one subject NEVER leak into another subject.
+ * Resolve session identity before using it in analytics. A complete topic ID is
+ * authoritative; never remap another subject's topic through notes or numbers.
+ * Legacy numeric IDs need an explicit matching subject. Ambiguous records must
+ * be resolved separately rather than being counted in several subjects.
  */
 export function sessionMatchesTopic(
   s: any,
-  topic: { id: string; number?: number; subjectId?: string; title?: string }
+  topic: { id: string; number: number; subjectId?: string; title?: string }
 ): boolean {
   if (!s || !topic) return false;
+  const sessionId = String(s.topicId ?? "").trim().toLowerCase();
+  const targetId = String(topic.id ?? "").trim().toLowerCase();
+  if (sessionId && sessionId === targetId) return true;
 
-  const targetId = String(topic.id || "").trim().toLowerCase();
-  const targetSubj = normalizeCategoryToSubjectId(topic.subjectId) || 
-    (topic.subjectId ? String(topic.subjectId).toLowerCase().trim() : "") ||
-    (topic.id ? extractSubjectFromTopicId(topic.id) : "constitucional");
-
-  const topicNum = topic.number !== undefined && !isNaN(Number(topic.number))
-    ? Number(topic.number)
-    : extractTopicNumber(topic.id);
-
-  // 1. Extraer asignatura de la sesión
-  const sessionSubj = extractSessionSubjectId(s);
-
-  // REGLA FUNDAMENTAL DE AISLAMIENTO:
-  // Si la sesión pertenece a una asignatura distinta de la del tema consultado, NO HAY COINCIDENCIA.
-  // Esto elimina de raíz la duplicación entre Constitucional, Civil, Penal, etc.
-  if (sessionSubj !== targetSubj) {
-    return false;
+  const targetIdentity = parseAeroFocusTopicIdPrefix(targetId);
+  const targetSubject = normalizeCategoryToSubjectId(topic.subjectId) || targetIdentity?.subjectId;
+  const targetNumber = Number(topic.number) || targetIdentity?.number;
+  const sessionIdentity = parseAeroFocusTopicIdPrefix(sessionId);
+  if (sessionIdentity) {
+    return sessionIdentity.subjectId === targetSubject && sessionIdentity.number === targetNumber;
   }
 
-  // 2. Si la asignatura coincide, comprobar el número de tema
-  const sTopicId = String(s.topicId || "").trim().toLowerCase();
-  if (sTopicId === targetId) return true;
+  const sessionSubject = normalizeCategoryToSubjectId(s.subjectId);
+  if (!targetSubject || !sessionSubject || sessionSubject !== targetSubject) return false;
+  const numericId = sessionId.match(/^(?:(?:tema|t)[-_ ]*)?(\d+)$/);
+  if (numericId) return Number(numericId[1]) === targetNumber;
+  if (s.topicNumber !== undefined) return Number(s.topicNumber) === targetNumber;
 
-  // Extraer número de la sesión
-  let sNum: number | null = null;
-  if (s.topicNumber !== undefined && !isNaN(Number(s.topicNumber))) {
-    sNum = Number(s.topicNumber);
-  } else if (s.temaNumero !== undefined && !isNaN(Number(s.temaNumero))) {
-    sNum = Number(s.temaNumero);
-  } else {
-    sNum = extractTopicNumber(sTopicId) || extractTopicNumber(s.topicTitle);
-  }
-
-  if (sNum !== null && topicNum !== null && sNum === topicNum) {
-    return true;
-  }
-
-  // Comprobar sufijos exactos: ej. "civil-5" o "tema-5"
-  if (topicNum !== null) {
-    const topicNumStr = String(topicNum);
-    if (
-      sTopicId === `${targetSubj}-${topicNumStr}` ||
-      sTopicId === `${targetSubj}_${topicNumStr}` ||
-      sTopicId === topicNumStr ||
-      sTopicId === `tema-${topicNumStr}` ||
-      sTopicId === `tema ${topicNumStr}` ||
-      sTopicId === `t-${topicNumStr}` ||
-      sTopicId === `t${topicNumStr}`
-    ) {
-      return true;
-    }
-  }
-
-  return false;
+  // An exact title plus an explicit subject can identify a legacy record. Free
+  // text notes and partial title/number matches cannot establish topic identity.
+  return !!topic.title && !!s.topicTitle && String(s.topicTitle).trim().toLowerCase() === topic.title.trim().toLowerCase();
 }
-
 
 
 /**

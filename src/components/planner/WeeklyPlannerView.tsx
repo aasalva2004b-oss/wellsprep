@@ -1,4 +1,5 @@
-import React, { useState, useMemo, useEffect } from "react";
+import { useLocalDay } from '../../hooks/useLocalDay';
+import React, { useState, useMemo, useEffect, useRef } from "react";
 import { 
   Calendar as CalendarIcon, 
   ChevronLeft, 
@@ -20,11 +21,9 @@ import {
   RefreshCw,
   Layers,
   ChevronDown,
-  Info,
-  Search
+  Info
 } from "lucide-react";
 import { Topic, Session } from "../../types";
-import { TopicProgressData } from "../../lib/prediction";
 import { 
   PlannerTask, 
   PlannerActivityType, 
@@ -33,41 +32,63 @@ import {
   ACTIVITY_CONFIG, 
   buildWeekPlan, 
   generateAutoRefrescos, 
-  proposeSmartRebalance, 
-  RebalanceProposal,
-  estimateTaskDurationMinutes
+  estimateTaskDurationMinutes,
+  estimateTaskAdaptiveDetails
 } from "../../lib/plannerEngine";
 import { getCanonicalTopic, buildCanonicalTopicMap } from "../../lib/canonicalTopicService";
 import { buildLearnerProfile } from "../../lib/adaptiveLearningEngine";
 import { TaskEditorModal } from "./TaskEditorModal";
-import { RebalanceConfirmModal } from "./RebalanceConfirmModal";
+import { CantePlanProposalModal, type CanteProposalConfig, type RefreshExceptions } from "./CantePlanProposalModal";
+import { generateCantePlanProposal, type CantePlanProposal } from "../../lib/cantePlanningEngine";
 import { EbbinghausRecommendationsModal } from "./EbbinghausRecommendationsModal";
 import { PlannerSettingsModal } from "./PlannerSettingsModal";
 import { cn, formatMinutesToHours, getLocalDateString, safeParseDate } from "../../lib/utils";
 import { playSound } from "../../lib/sound";
+import { DS } from "../../lib/designSystem";
 import { toast } from "sonner";
-import { motion, AnimatePresence } from "motion/react";
-import { doc, getDoc, setDoc, serverTimestamp } from "firebase/firestore";
+import { doc, onSnapshot, setDoc, runTransaction, serverTimestamp } from "firebase/firestore";
 import { db } from "../../lib/firebase";
 import { useFirebase } from "../../lib/FirebaseProvider";
+import { StudySessionDialog, StudySessionTarget } from '../StudySessionDialog';
 
 const STORAGE_TASKS_KEY = "wellsprep_judicial_planner_tasks_v2";
 const STORAGE_SETTINGS_KEY = "wellsprep_judicial_planner_settings_v2";
+
+function plannerStoredFingerprint(data: Record<string, any>): string {
+  const ordered = (value: any): any => Array.isArray(value) ? value.map(ordered) : value && typeof value === "object"
+    ? Object.fromEntries(Object.keys(value).sort().map(key => [key, ordered(value[key])])) : value;
+  return JSON.stringify(ordered({ tasks: Array.isArray(data.tasks) ? data.tasks : [], settings: data.settings || null, cantePlanning: data.cantePlanning || null }));
+}
 
 interface WeeklyPlannerViewProps {
   allTopics: Topic[];
   scheduleLunes?: string[];
   scheduleJueves?: string[];
-  onOpenPreparadorSession?: (day: "lunes" | "jueves") => void;
+  onOpenPreparadorSession?: (day: "lunes" | "jueves", date?: string) => void;
+  focusDate?: string;
+  canteProposalRequested?: boolean;
+  draftCanteGoal?: { date: string; topicIds: string[] };
+  onCanteProposalRequestHandled?: () => void;
 }
 
 export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
-  allTopics,
+  allTopics: suppliedTopics,
   scheduleLunes = [],
   scheduleJueves = [],
-  onOpenPreparadorSession
+  onOpenPreparadorSession,
+  focusDate,
+  canteProposalRequested = false,
+  draftCanteGoal,
+  onCanteProposalRequestHandled,
 }) => {
-  const { user, userProgress, recentSessions, addStudySession, updateTopicProgress } = useFirebase();
+  const { user, userSettings, userProgress, recentSessions, addStudySession, updateTopicProgress, estimateRetentionForTopic, topics: sharedTopics, topicState } = useFirebase();
+  const allTopics = sharedTopics || suppliedTopics;
+  const currentOwner = useRef(user?.uid);
+  currentOwner.current = user?.uid;
+  const storageTasksKey = `${STORAGE_TASKS_KEY}:${user?.uid || 'signed-out'}`;
+  const storageSettingsKey = `${STORAGE_SETTINGS_KEY}:${user?.uid || 'signed-out'}`;
+  const [plannerLoaded, setPlannerLoaded] = useState(false);
+  const [plannerStoredBasis, setPlannerStoredBasis] = useState("");
 
   // 1. Estados de Navegación Semanal
   const [weekOffset, setWeekOffset] = useState<number>(0);
@@ -76,40 +97,22 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
   const [searchTopicQuery, setSearchTopicQuery] = useState<string>("");
 
   // 2. Ajustes configurables del planificador
-  const [settings, setSettings] = useState<PlannerSettings>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_SETTINGS_KEY);
-      if (saved) return JSON.parse(saved);
-    } catch (e) {
-      console.error(e);
-    }
-    return DEFAULT_PLANNER_SETTINGS;
-  });
-
-  // 3. Tareas almacenadas del planificador
-  const [tasks, setTasks] = useState<PlannerTask[]>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_TASKS_KEY);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-      }
-    } catch (e) {
-      console.error(e);
-    }
-    return [];
-  });
+  const [settings, setSettings] = useState<PlannerSettings>(DEFAULT_PLANNER_SETTINGS);
+  // Remote planner documents are authoritative. Caches are scoped by UID.
+  const [tasks, setTasks] = useState<PlannerTask[]>([]);
 
   // 4. Modales
   const [isTaskEditorOpen, setIsTaskEditorOpen] = useState(false);
   const [editingTask, setEditingTask] = useState<PlannerTask | null>(null);
+  const [observedTask, setObservedTask] = useState<{ task: PlannerTask; target: StudySessionTarget } | null>(null);
   const [targetDateForNewTask, setTargetDateForNewTask] = useState<string>(getLocalDateString());
 
-  const [isRebalanceModalOpen, setIsRebalanceModalOpen] = useState(false);
-  const [currentProposal, setCurrentProposal] = useState<RebalanceProposal | null>(null);
 
   const [isEbbinghausModalOpen, setIsEbbinghausModalOpen] = useState(false);
   const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
+  const [isCanteProposalOpen, setIsCanteProposalOpen] = useState(false);
+  const [savedRefreshExceptions, setSavedRefreshExceptions] = useState<RefreshExceptions>({});
+  const [explicitEmptyDates, setExplicitEmptyDates] = useState<string[]>([]);
 
   // Mapa de temas para acceso O(1)
   const topicMap = useMemo(() => {
@@ -124,53 +127,96 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
     return buildLearnerProfile(recentSessions, cMap);
   }, [allTopics, userProgress, recentSessions]);
 
-  // Sincronizar tareas y configuración con Firestore
   useEffect(() => {
+    let active = true;
+    setIsCanteProposalOpen(false); setExplicitEmptyDates([]);
+    setTasks([]); setSettings(DEFAULT_PLANNER_SETTINGS); setSavedRefreshExceptions({}); setPlannerStoredBasis(""); setPlannerLoaded(false);
     if (!user) return;
-    const loadFromFirestore = async () => {
-      try {
-        const ref = doc(db, `users/${user.uid}/settings/weeklyPlannerState`);
-        const snap = await getDoc(ref);
-        if (snap.exists()) {
-          const data = snap.data();
-          if (Array.isArray(data.tasks) && data.tasks.length > 0) {
-            setTasks(data.tasks);
-            localStorage.setItem(STORAGE_TASKS_KEY, JSON.stringify(data.tasks));
-          }
-          if (data.settings) {
-            setSettings(data.settings);
-            localStorage.setItem(STORAGE_SETTINGS_KEY, JSON.stringify(data.settings));
-          }
-        }
-      } catch (e) {
-        console.error("Error loading planner state from Firestore:", e);
-      }
-    };
-    loadFromFirestore();
-  }, [user]);
+    const ref = doc(db, `users/${user.uid}/settings/weeklyPlannerState`);
+    const unsubscribe = onSnapshot(ref, snap => {
+      if (!active) return;
+      const data = snap.exists() ? snap.data() : {};
+      const nextTasks = Array.isArray(data.tasks) ? data.tasks : [];
+      const nextSettings = data.settings ? { ...DEFAULT_PLANNER_SETTINGS, ...data.settings } : DEFAULT_PLANNER_SETTINGS;
+      setExplicitEmptyDates(Array.isArray(data.cantePlanning?.canteGoals) ? data.cantePlanning.canteGoals.filter((goal: any) => Array.isArray(goal?.topicIds) && goal.topicIds.length === 0).map((goal: any) => goal.date) : []);
+      setTasks(nextTasks); setSettings(nextSettings); setSavedRefreshExceptions(data.cantePlanning?.refreshExceptions || {}); setPlannerStoredBasis(plannerStoredFingerprint(data)); setPlannerLoaded(true);
+      localStorage.setItem(storageTasksKey, JSON.stringify(nextTasks));
+      localStorage.setItem(storageSettingsKey, JSON.stringify(nextSettings));
+    }, error => {
+      if (!active) return;
+      setPlannerLoaded(false);
+      console.error('No se pudo cargar el planificador:', error);
+      toast.error('No se pudo cargar la planificación guardada.');
+    });
+    return () => { active = false; unsubscribe(); };
+  }, [user?.uid, storageTasksKey, storageSettingsKey]);
+
+  useEffect(() => {
+    if (plannerLoaded && canteProposalRequested) {
+      setIsCanteProposalOpen(true);
+      onCanteProposalRequestHandled?.();
+    }
+  }, [plannerLoaded, canteProposalRequested]);
+  useEffect(() => {
+    if (!focusDate) return;
+    const selected = safeParseDate(focusDate), today = new Date();
+    if (!Number.isFinite(selected.getTime())) return;
+    const monday = (date: Date) => { const value = new Date(date); value.setHours(0, 0, 0, 0); value.setDate(value.getDate() + (value.getDay() === 0 ? -6 : 1 - value.getDay())); return value; };
+    setMobileSelectedDate(focusDate);
+    setWeekOffset(Math.round((monday(selected).getTime() - monday(today).getTime()) / (7 * 86_400_000)));
+  }, [focusDate]);
 
   // Guardar en Firestore y LocalStorage
-  const persistTasks = async (updatedTasks: PlannerTask[]) => {
-    setTasks(updatedTasks);
+  const persistTasks = async (updatedTasks: PlannerTask[], planning?: { proposal: CantePlanProposal; config: CanteProposalConfig }) => {
+    if (!user) throw new Error("Inicia sesión para guardar la planificación.");
+    const ownerUid = user.uid;
     try {
-      localStorage.setItem(STORAGE_TASKS_KEY, JSON.stringify(updatedTasks));
-      if (user) {
-        const ref = doc(db, `users/${user.uid}/settings/weeklyPlannerState`);
-        await setDoc(ref, {
-          userId: user.uid,
-          tasks: updatedTasks,
-          updatedAt: serverTimestamp()
-        }, { merge: true });
+      const payload = JSON.parse(JSON.stringify(updatedTasks));
+      const ref = doc(db, `users/${user.uid}/settings/weeklyPlannerState`);
+      const update = {
+        userId: user.uid,
+        tasks: payload,
+        ...(planning ? { cantePlanning: {
+          signature: planning.proposal.signature,
+          canteGoals: planning.config.canteGoals,
+          refreshExceptions: planning.config.refreshExceptions,
+          horizonStart: planning.config.horizonStart,
+          horizonEnd: planning.config.horizonEnd,
+          generatedAt: planning.proposal.generatedAt,
+          confirmedAt: new Date().toISOString(),
+          viability: planning.proposal.viability,
+        } } : {}),
+        updatedAt: serverTimestamp(),
+      };
+      if (planning) {
+        const loadedBasis = plannerStoredBasis;
+        await runTransaction(db, async transaction => {
+          const current = await transaction.get(ref);
+          if (currentOwner.current !== ownerUid) throw new Error("La cuenta activa ha cambiado. Genera otra propuesta.");
+          const currentData = current.exists() ? current.data() : {};
+          if (plannerStoredFingerprint(currentData) !== loadedBasis) {
+            throw new Error("La planificación ha cambiado en otra pestaña o dispositivo. Recarga los datos y genera otra propuesta.");
+          }
+          transaction.set(ref, update, { merge: true });
+        });
+      } else {
+        await setDoc(ref, update, { merge: true });
       }
-    } catch (e) {
-      console.error("Error saving planner tasks:", e);
+      if (currentOwner.current !== ownerUid) return;
+      setTasks(updatedTasks);
+      localStorage.setItem(storageTasksKey, JSON.stringify(updatedTasks));
+      if (planning) setSavedRefreshExceptions(planning.config.refreshExceptions);
+    } catch (error) {
+      console.error("Error saving planner tasks:", error);
+      toast.error("No se pudo guardar la planificación.");
+      throw error;
     }
   };
 
   const persistSettings = async (newSettings: PlannerSettings) => {
     setSettings(newSettings);
     try {
-      localStorage.setItem(STORAGE_SETTINGS_KEY, JSON.stringify(newSettings));
+      localStorage.setItem(storageSettingsKey, JSON.stringify(newSettings));
       if (user) {
         const ref = doc(db, `users/${user.uid}/settings/weeklyPlannerState`);
         await setDoc(ref, {
@@ -184,94 +230,13 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
     }
   };
 
-  // Sembrado inicial inteligente con los temas oficiales de cante si la lista está vacía
-  useEffect(() => {
-    if (tasks.length === 0) {
-      let effectiveLunes = scheduleLunes;
-      let effectiveJueves = scheduleJueves;
-      if (effectiveLunes.length === 0 && effectiveJueves.length === 0) {
-        try {
-          const saved = localStorage.getItem("wellsprep_preparador_schedule_v2");
-          if (saved) {
-            const parsed = JSON.parse(saved);
-            effectiveLunes = parsed.lunes || [];
-            effectiveJueves = parsed.jueves || [];
-          }
-        } catch (e) {
-          console.error(e);
-        }
-      }
-      if (effectiveLunes.length === 0 && effectiveJueves.length === 0) {
-        effectiveLunes = ["constitucional-1", "constitucional-2"];
-        effectiveJueves = ["constitucional-3", "constitucional-4", "constitucional-5"];
-      }
-
-      const today = new Date();
-      const distToMon = today.getDay() === 0 ? -6 : 1 - today.getDay();
-      const monday = new Date(today);
-      monday.setDate(today.getDate() + distToMon);
-
-      const thursday = new Date(monday);
-      thursday.setDate(monday.getDate() + 3);
-
-      const monStr = getLocalDateString(monday);
-      const thuStr = getLocalDateString(thursday);
-
-      const initialList: PlannerTask[] = [];
-
-      effectiveLunes.forEach((id) => {
-        const t = topicMap.get(id);
-        if (t) {
-          const canonical = getCanonicalTopic(id, allTopics, userProgress, recentSessions);
-          initialList.push({
-            id: `cante-lunes-${id}`,
-            topicId: t.id,
-            topicNumber: canonical.number,
-            topicTitle: canonical.title,
-            subjectId: canonical.subjectId,
-            activityType: "cante",
-            date: monStr,
-            status: "pending",
-            estimatedMinutes: settings.duracionEstimadaCantePorTemaMinutos,
-            pagesCount: canonical.hasExplicitPages && canonical.pages > 0 ? canonical.pages : undefined,
-            createdAt: new Date().toISOString()
-          });
-        }
-      });
-
-      effectiveJueves.forEach((id) => {
-        const t = topicMap.get(id);
-        if (t) {
-          const canonical = getCanonicalTopic(id, allTopics, userProgress, recentSessions);
-          initialList.push({
-            id: `cante-jueves-${id}`,
-            topicId: t.id,
-            topicNumber: canonical.number,
-            topicTitle: canonical.title,
-            subjectId: canonical.subjectId,
-            activityType: "cante",
-            date: thuStr,
-            status: "pending",
-            estimatedMinutes: settings.duracionEstimadaCantePorTemaMinutos,
-            pagesCount: canonical.hasExplicitPages && canonical.pages > 0 ? canonical.pages : undefined,
-            createdAt: new Date().toISOString()
-          });
-        }
-      });
-
-      if (initialList.length > 0) {
-        persistTasks(initialList);
-      }
-    }
-  }, [scheduleLunes, scheduleJueves, topicMap, tasks.length, settings, allTopics, userProgress, recentSessions]);
-
   // Construcción del modelo de la semana actual con telemetría real (AeroFocus y WellsPrep)
   const weekPlan = useMemo(() => {
     return buildWeekPlan(tasks, weekOffset, settings, new Date(), recentSessions, userProgress, allTopics);
   }, [tasks, weekOffset, settings, recentSessions, userProgress, allTopics]);
 
   // Identificar jornada de hoy
-  const todayStr = useMemo(() => getLocalDateString(), []);
+  const todayStr = useLocalDay();
   const todayDayPlan = useMemo(() => {
     return weekPlan.days.find((d) => d.date === todayStr);
   }, [weekPlan, todayStr]);
@@ -333,45 +298,9 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
     }
 
     // Buscar tareas de cante programadas para esa fecha específica
-    let canteTasks = tasks.filter(
+    const canteTasks = tasks.filter(
       (t) => t.date === targetDateStr && t.activityType === "cante"
     );
-
-    // Si aún no hay tareas creadas para esa fecha, asociar los temas oficiales del horario
-    if (canteTasks.length === 0) {
-      let scheduleTopicIds: string[] = [];
-      try {
-        const saved = localStorage.getItem("wellsprep_preparador_schedule_v2");
-        if (saved) {
-          const parsed = JSON.parse(saved);
-          scheduleTopicIds = (canteKey === "lunes" ? parsed.lunes : parsed.jueves) || [];
-        }
-      } catch (e) {
-        console.error(e);
-      }
-      if (scheduleTopicIds.length === 0) {
-        scheduleTopicIds = canteKey === "lunes"
-          ? (scheduleLunes.length > 0 ? scheduleLunes : ["constitucional-1", "constitucional-2"])
-          : (scheduleJueves.length > 0 ? scheduleJueves : ["constitucional-3", "constitucional-4", "constitucional-5"]);
-      }
-
-      canteTasks = scheduleTopicIds.map((id) => {
-        const canonical = getCanonicalTopic(id, allTopics, userProgress, recentSessions);
-        return {
-          id: `virtual-cante-${id}-${targetDateStr}`,
-          topicId: id,
-          topicNumber: canonical.number,
-          topicTitle: canonical.title,
-          subjectId: canonical.subjectId,
-          activityType: "cante",
-          date: targetDateStr,
-          status: "pending",
-          estimatedMinutes: 30,
-          pagesCount: canonical.hasExplicitPages && canonical.pages > 0 ? canonical.pages : undefined,
-          createdAt: new Date().toISOString()
-        } as PlannerTask;
-      });
-    }
 
     return {
       date: targetDateStr,
@@ -420,13 +349,14 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
   const handleSaveTask = (taskData: Omit<PlannerTask, "id" | "createdAt"> & { id?: string }) => {
     if (taskData.id) {
       // Edición
-      const updated = tasks.map((t) => (t.id === taskData.id ? { ...t, ...taskData } : t));
+      const updated = tasks.map((t) => (t.id === taskData.id ? { ...t, ...taskData, pinned: true, planningOrigin: "manual" as const, confirmed: true } : t));
       persistTasks(updated);
       toast.success("Tarea actualizada correctamente.");
     } else {
       // Nueva tarea
       const newTask: PlannerTask = {
         ...taskData,
+        pinned: true, planningOrigin: "manual", confirmed: true,
         id: `task-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
         createdAt: new Date().toISOString()
       };
@@ -435,80 +365,30 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
     }
   };
 
-  // Manejador: Marcar tarea como completada (o pendiente)
+  // A completion requires its observed session; changing a checkbox never invents history.
   const handleToggleTaskStatus = (task: PlannerTask) => {
-    const nextStatus = task.status === "completed" ? "pending" : "completed";
-    let updatedTasks = tasks.map((t) => {
-      if (t.id === task.id) {
-        return {
-          ...t,
-          status: nextStatus as any,
-          completedAt: nextStatus === "completed" ? new Date().toISOString() : undefined
-        };
-      }
-      return t;
-    });
-
-    if (nextStatus === "completed") {
-      playSound.success();
-      toast.success(`¡Completado: T.${task.topicNumber}!`, {
-        description: `${ACTIVITY_CONFIG[task.activityType].label} marcado como realizado.`
-      });
-
-      // GENERACIÓN AUTOMÁTICA DE LOS 3 REFRESCOS (Regla 3)
-      if (task.activityType === "estudio_nuevo") {
-        const topic = topicMap.get(task.topicId);
-        const autoRefrescos = generateAutoRefrescos(task, topic, updatedTasks, settings);
-        if (autoRefrescos.length > 0) {
-          updatedTasks = [...updatedTasks, ...autoRefrescos];
-          setTimeout(() => {
-            playSound.bell();
-            toast.info("✨ Refrescos generados automáticamente", {
-              description: `Se han programado los 3 refrescos de T.${task.topicNumber} para los próximos 3 días hábiles.`
-            });
-          }, 300);
-        }
-      }
-    } else {
-      playSound.click();
+    if (task.status === "completed") {
+      toast.info("La tarea está vinculada a una sesión real. Corrige esa sesión desde el historial si es necesario.");
+      return;
     }
-
-    persistTasks(updatedTasks);
+    handleQuickRegisterStudy(task);
   };
 
   // Manejador: Registrar sesión real de estudio en WellsPrep y sincronizar con historial y curvas
-  const handleQuickRegisterStudy = async (task: PlannerTask) => {
-    try {
-      const minutes = task.estimatedMinutes || 30;
-      const typeMapping: Record<PlannerActivityType, "estudio_inicial" | "refresco" | "repaso" | "canto"> = {
-        estudio_nuevo: "estudio_inicial",
-        refresco: "refresco",
-        repaso: "repaso",
-        cante: "canto"
-      };
-      const sessionType = typeMapping[task.activityType] || "repaso";
-
-      await addStudySession(
-        task.topicId,
-        minutes,
-        4,
-        sessionType,
-        task.date
-      );
-
-      // Si la tarea aún no estaba completada, completarla
-      if (task.status !== "completed") {
-        handleToggleTaskStatus(task);
-      } else {
-        playSound.bell();
-        toast.success(`Sesión de ${minutes}m registrada para T.${task.topicNumber}`, {
-          description: "Sincronizada con el historial de estudio y AeroFocus."
-        });
-      }
-    } catch (e) {
-      console.error(e);
-      toast.error("Error al registrar la sesión de estudio.");
-    }
+  const handleQuickRegisterStudy = (task: PlannerTask) => {
+    const types = { estudio_nuevo: 'estudio_inicial', refresco: 'refresco', repaso: 'repaso', cante: 'canto' } as const;
+    const canonical = getCanonicalTopic(task.topicId, allTopics, userProgress, recentSessions);
+    setObservedTask({ task, target: {
+      topicId: task.topicId, title: task.topicTitle, type: types[task.activityType],
+      difficulty: canonical.difficulty, estimatedMinutes: task.estimatedMinutes,
+      retentionPrediction: estimateRetentionForTopic(task.topicId),
+      predictionSnapshot: (task.prediction || estimateTaskAdaptiveDetails(canonical, task.activityType, recentSessions, settings, task.refrescoIndex, userProgress, task.fromPage !== undefined && task.toPage !== undefined ? { fromPage: task.fromPage, toPage: task.toPage } : task.pagesCount ? { targetPages: task.pagesCount } : undefined, { allTopics, canonicalMap: topicState })).personalizedPrediction,
+      metadata: {
+        plannerTaskId: task.id, plannedDate: task.date, totalPages: canonical.pages || undefined, totalWords: canonical.numeroPalabras, pagesNumbers: task.pagesNumbers,
+        startPage: task.fromPage, endPage: task.toPage, pagesCount: task.pagesCount,
+        isPartial: Boolean(task.pagesCount && canonical.pages && task.pagesCount < canonical.pages),
+      },
+    } });
   };
 
   // Manejador: Eliminar tarea
@@ -522,42 +402,18 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
   // Manejador: Mover tarea a otro día
   const handleMoveTask = (taskId: string, newDate: string) => {
     playSound.click();
-    const updated = tasks.map((t) => (t.id === taskId ? { ...t, date: newDate } : t));
+    const updated = tasks.map((t) => (t.id === taskId ? { ...t, date: newDate, pinned: true, planningOrigin: "manual" as const, confirmed: true } : t));
     persistTasks(updated);
     toast.success(`Tarea reubicada al ${newDate}.`);
   };
 
   // Manejador: Lanzar análisis de sobrecarga y propuesta de redistribución
-  const handleTriggerRebalance = () => {
-    const proposal = proposeSmartRebalance(weekPlan, tasks, settings);
-    setCurrentProposal(proposal);
-    setIsRebalanceModalOpen(true);
-  };
-
-  // Manejador: Confirmar propuesta de redistribución
-  const handleConfirmRebalance = () => {
-    if (!currentProposal || currentProposal.moves.length === 0) return;
-    const movesMap = new Map<string, string>();
-    currentProposal.moves.forEach((m) => movesMap.set(m.taskId, m.toDate));
-
-    const updated = tasks.map((t) => {
-      const newTarget = movesMap.get(t.id);
-      if (newTarget) {
-        return { ...t, date: newTarget };
-      }
-      return t;
-    });
-
-    persistTasks(updated);
-    toast.success("¡Redistribución inteligente aplicada con éxito!", {
-      description: `Se han reubicado ${currentProposal.moves.length} tareas para evitar sobrecargas.`
-    });
-  };
+  const handleTriggerRebalance = () => setIsCanteProposalOpen(true);
 
   // Manejador: Añadir recomendación de Ebbinghaus
   const handleAddEbbinghausReview = (topicId: string, dateStr: string) => {
     const canonical = getCanonicalTopic(topicId, allTopics, userProgress, recentSessions);
-    const estMins = estimateTaskDurationMinutes(canonical, "repaso", recentSessions, settings);
+    const estMins = estimateTaskDurationMinutes(canonical, "repaso", recentSessions, settings, undefined, userProgress, undefined, { allTopics, canonicalMap: topicState });
     const newTask: PlannerTask = {
       id: `ebbinghaus-review-${topicId}-${Date.now()}`,
       topicId: canonical.id,
@@ -576,220 +432,104 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
     toast.success(`Repaso de T.${canonical.number} programado para el ${dateStr}.`);
   };
 
-  // Manejador: Planificar repasos de víspera para los temas del próximo cante
-  const handleSchedulePreCanteReviews = () => {
-    if (!nextCanteInfo || nextCanteInfo.tasks.length === 0) return;
-    playSound.click();
-
-    const targetDate = safeParseDate(nextCanteInfo.date);
-    if (!targetDate) return;
-
-    // Calcular días previos (1 y 2 días antes)
-    const eveDates: string[] = [];
-    const d1 = new Date(targetDate);
-    d1.setDate(targetDate.getDate() - 1);
-    eveDates.push(getLocalDateString(d1));
-
-    const d2 = new Date(targetDate);
-    d2.setDate(targetDate.getDate() - 2);
-    eveDates.push(getLocalDateString(d2));
-
-    const newTasks: PlannerTask[] = [];
-    let addedCount = 0;
-
-    nextCanteInfo.tasks.forEach((canteTask, idx) => {
-      const assignedEveDate = eveDates[idx % eveDates.length];
-      const alreadyScheduled = tasks.some(
-        (t) => t.topicId === canteTask.topicId &&
-               (t.date === assignedEveDate || t.date === nextCanteInfo.date) &&
-               t.activityType === "repaso"
-      );
-
-      if (!alreadyScheduled) {
-        const canonical = getCanonicalTopic(canteTask.topicId, allTopics, userProgress, recentSessions);
-        const estMins = estimateTaskDurationMinutes(canonical, "repaso", recentSessions, settings);
-        newTasks.push({
-          id: `pre-cante-repaso-${canteTask.topicId}-${assignedEveDate}-${Date.now()}-${idx}`,
-          topicId: canonical.id,
-          topicNumber: canonical.number,
-          topicTitle: canonical.title,
-          subjectId: canonical.subjectId,
-          activityType: "repaso",
-          date: assignedEveDate,
-          status: "pending",
-          estimatedMinutes: estMins,
-          pagesCount: canonical.hasExplicitPages && canonical.pages > 0 ? canonical.pages : undefined,
-          notes: `Repaso previo intensivo para el Cante de ${nextCanteInfo.dayName} ${nextCanteInfo.dayNumber}.`,
-          createdAt: new Date().toISOString()
-        });
-        addedCount++;
-      }
-    });
-
-    if (addedCount === 0) {
-      toast.info("Los temas de este cante ya tienen repasos previos planificados.");
-      return;
-    }
-
-    persistTasks([...tasks, ...newTasks]);
-    playSound.success();
-    toast.success(`¡${addedCount} repasos pre-cante añadidos a los días previos!`, {
-      description: `Distribuidos en las vísperas del cante de ${nextCanteInfo.dayName}.`
-    });
+  const canteProposalBasis = useMemo(() => JSON.stringify({ tasks, settings, recentSessions, allTopics, plannerStoredBasis, retentionPolicy: userSettings?.retention }), [tasks, settings, recentSessions, allTopics, plannerStoredBasis, userSettings?.retention]);
+  const handleGenerateCanteProposal = (config: CanteProposalConfig) => generateCantePlanProposal({
+    canonicalMap: topicState,
+    sessions: recentSessions,
+    existingTasks: tasks,
+    settings,
+    canteGoals: config.canteGoals,
+    horizonStart: config.horizonStart,
+    horizonEnd: config.horizonEnd,
+    asOf: config.horizonStart,
+    forecastAt: new Date().toISOString(),
+    refreshExceptions: config.refreshExceptions,
+  });
+  const handleConfirmCanteProposal = async (proposal: CantePlanProposal, config: CanteProposalConfig, basis: string) => {
+    if (!plannerLoaded || !user) throw new Error("Espera a que se cargue la planificación guardada.");
+    if (config.horizonStart !== getLocalDateString()) throw new Error("Ha cambiado el día desde que se calculó la propuesta. Genérala de nuevo para las fechas actuales.");
+    if (basis !== canteProposalBasis) throw new Error("Los datos han cambiado. Genera de nuevo la propuesta antes de confirmar.");
+    const candidateIds = new Set(proposal.candidateTasks.map(task => task.id));
+    const confirmed = proposal.mergedTasks.map(task => candidateIds.has(task.id) ? { ...task, confirmed: true } : task);
+    await persistTasks(confirmed, { proposal, config });
+    toast.success(proposal.viability === "feasible" ? "Planificación confirmada y guardada." : "Planificación guardada con los conflictos indicados.");
   };
 
-  // Manejador: Reubicar todas las tareas retrasadas a hoy
-  const handleRescheduleDelayedTasks = () => {
-    playSound.success();
-    const updated = tasks.map((t) => {
-      if (t.date < todayStr && t.status !== "completed") {
-        return { ...t, date: todayStr };
-      }
-      return t;
-    });
-    persistTasks(updated);
-    toast.success("Tareas retrasadas trasladadas a la jornada de hoy.");
-  };
+  // Deadline planning and delayed work use the same reviewable proposal flow.
+  const handleSchedulePreCanteReviews = () => setIsCanteProposalOpen(true);
+  const handleRescheduleDelayedTasks = () => setIsCanteProposalOpen(true);
+
+  // A presentation shortcut into the existing real-session form. It never marks
+  // a task complete or records time before the user enters an observation.
+  const firstPendingToday = todayDayPlan?.tasks.find(task => task.status !== "completed" && task.activityType !== "cante")
+    || todayDayPlan?.tasks.find(task => task.status !== "completed");
 
   return (
-    <div className="space-y-4 max-w-[105rem] mx-auto w-full pb-32">
-      {/* 1. TOP EXECUTIVE COMMAND BAR & CONTROLS */}
-      <div className="bg-white/95 backdrop-blur-xl border border-slate-200/90 rounded-3xl p-4 sm:p-5 shadow-xs">
-        <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-4">
-          {/* Week Navigation & Range */}
-          <div className="flex items-center gap-3 flex-wrap">
-            <div className="flex items-center bg-slate-100 p-1 rounded-2xl border border-slate-200/70 shadow-2xs">
-              <button
-                type="button"
-                onClick={() => {
-                  playSound.click();
-                  setWeekOffset((w) => w - 1);
-                }}
-                className="p-1.5 rounded-xl text-slate-600 hover:text-slate-900 hover:bg-white transition-all active:scale-95"
-                title="Semana anterior"
-              >
-                <ChevronLeft size={16} />
-              </button>
-              
-              <button
-                type="button"
-                onClick={() => {
-                  if (weekOffset !== 0) {
-                    playSound.click();
-                    setWeekOffset(0);
-                  }
-                }}
-                className={cn(
-                  "px-3 py-1 rounded-xl text-xs font-serif font-black tracking-tight transition-all",
-                  weekOffset === 0 ? "text-slate-900 cursor-default" : "text-indigo-600 hover:bg-white active:scale-95"
-                )}
-                title="Ir a semana actual"
-              >
-                <span>{weekPlan.startDate} al {weekPlan.endDate}</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => {
-                  playSound.click();
-                  setWeekOffset((w) => w + 1);
-                }}
-                className="p-1.5 rounded-xl text-slate-600 hover:text-slate-900 hover:bg-white transition-all active:scale-95"
-                title="Semana siguiente"
-              >
-                <ChevronRight size={16} />
-              </button>
-            </div>
-
-            {/* Week Status & Target Badge */}
-            <div className="flex items-center gap-2">
-              {weekOffset === 0 ? (
-                <span className="text-[10px] font-bold uppercase tracking-wider px-2.5 py-1 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200/80">
-                  Semana Actual
-                </span>
-              ) : (
-                <span className="text-[10px] font-mono font-bold text-slate-600 bg-slate-100 px-2.5 py-1 rounded-full border border-slate-200/60">
-                  {weekOffset > 0 ? `+${weekOffset} sem` : `${weekOffset} sem`}
-                </span>
-              )}
-
-              <span className="text-xs text-slate-500 font-medium hidden sm:inline-flex items-center gap-1.5 bg-slate-50 px-2.5 py-1 rounded-full border border-slate-200/50">
-                <Clock size={12} className="text-slate-400" />
-                <span>Meta: <strong className="font-mono text-slate-800 font-bold">{settings.targetDailyHours}h</strong> / día</span>
-              </span>
-            </div>
+    <div className="mx-auto w-full max-w-[105rem] space-y-3 pb-6">
+      <section aria-label="Hoy y próximo cante" data-testid="planner-today" className={cn(DS.card, "divide-y divide-slate-100 px-3 sm:px-4 lg:grid lg:grid-cols-2 lg:divide-x lg:divide-y-0")}>
+        <div className="min-w-0 py-3 lg:pr-4">
+          <div className="flex flex-wrap items-baseline justify-between gap-x-2 gap-y-1">
+            <h2 className="text-sm font-bold text-slate-900">Hoy{todayDayPlan ? ` · ${todayDayPlan.dayName} ${todayDayPlan.dayNumber}` : ""}</h2>
+            {todayDayPlan && <p className="text-xs text-slate-600">{todayDayPlan.tasks.length} tareas · {formatMinutesToHours(todayDayPlan.totalEstimatedMinutes)} estimados{todayDayPlan.unknownDurationTaskCount > 0 ? " · tiempo incompleto" : ""}</p>}
           </div>
-
-          {/* Action Tools: Ebbinghaus, Smart Rebalance, Settings & Primary New Task */}
-          <div className="flex items-center gap-2 flex-wrap shrink-0">
-            {/* Ebbinghaus Integration Button */}
-            <button
-              type="button"
-              onClick={() => {
-                playSound.click();
-                setIsEbbinghausModalOpen(true);
-              }}
-              className="px-3 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200/80 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 shadow-2xs active:scale-95"
-              title="Añadir temas que necesitan repaso según la curva del olvido"
-            >
-              <Brain size={14} className="text-emerald-600" />
-              <span>Sugerencias Ebbinghaus</span>
-            </button>
-
-            {/* Smart Rebalance Button */}
-            <button
-              type="button"
-              onClick={() => {
-                playSound.click();
-                handleTriggerRebalance();
-              }}
-              className={cn(
-                "px-3 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 shadow-2xs active:scale-95",
-                weekPlan.overloadedDaysCount > 0
-                  ? "bg-amber-500 text-white hover:bg-amber-600 animate-pulse"
-                  : "bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200/60"
-              )}
-              title="Detectar sobrecargas y proponer redistribución inteligente"
-            >
-              <Sparkles size={14} className={weekPlan.overloadedDaysCount > 0 ? "text-amber-100" : "text-amber-500"} />
-              <span>Redistribuir Carga</span>
-              {weekPlan.overloadedDaysCount > 0 && (
-                <span className="w-2 h-2 rounded-full bg-white ring-1 ring-amber-300" />
-              )}
-            </button>
-
-            {/* Settings Button */}
-            <button
-              type="button"
-              onClick={() => {
-                playSound.click();
-                setIsSettingsModalOpen(true);
-              }}
-              className="p-2 bg-slate-100 hover:bg-slate-200 text-slate-600 hover:text-slate-900 rounded-xl transition-all border border-slate-200/60 active:scale-95"
-              title="Configurar velocidades de estudio y disponibilidades"
-            >
-              <Sliders size={16} />
-            </button>
-
-            {/* Primary Add Task Button */}
-            <button
-              type="button"
-              onClick={() => {
-                playSound.click();
-                setTargetDateForNewTask(todayStr);
-                setEditingTask(null);
-                setIsTaskEditorOpen(true);
-              }}
-              className="px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold transition-all shadow-xs flex items-center gap-1.5 shrink-0 active:scale-95 cursor-pointer ml-1"
-            >
-              <Plus size={14} strokeWidth={2.5} />
-              <span>Nueva Tarea</span>
-            </button>
+          {firstPendingToday ? <div data-testid="planner-next-task" className="mt-2 flex min-w-0 items-center gap-3">
+            <div className="min-w-0 flex-1">
+              <p className="line-clamp-2 break-words text-sm font-semibold leading-snug text-slate-900" title={firstPendingToday.topicTitle}>T.{firstPendingToday.topicNumber} · {firstPendingToday.topicTitle}</p>
+              <p className="mt-1 text-xs text-slate-600">{ACTIVITY_CONFIG[firstPendingToday.activityType].label} · {firstPendingToday.estimatedMinutes === null ? "Tiempo sin estimar" : `${formatMinutesToHours(firstPendingToday.estimatedMinutes)} previstos`}</p>
+            </div>
+            <button type="button" onClick={() => handleQuickRegisterStudy(firstPendingToday)} aria-label={`Registrar sesión real de T.${firstPendingToday.topicNumber}`} title="Registrar sesión real de la primera tarea de hoy" className={cn(DS.btnPrimary, "shrink-0 px-3")}>Registrar</button>
+          </div> : <p className="mt-2 text-sm text-slate-600">{!todayDayPlan ? "Consulta hoy desde la semana actual." : todayDayPlan.tasks.length ? "Todas las tareas de hoy están marcadas como completadas." : "No hay tareas programadas para hoy."}</p>}
+          {!todayDayPlan && <button type="button" onClick={() => { setWeekOffset(0); setMobileSelectedDate(todayStr); }} className={cn(DS.btnGhost, "mt-1")}>Volver a hoy</button>}
+        </div>
+        {nextCanteInfo && <div className="flex min-w-0 items-center justify-between gap-3 py-2 lg:pl-4">
+          <div className="min-w-0">
+            <h2 className="text-sm font-bold text-slate-900">{nextCanteInfo.isToday ? "Cante de hoy" : "Próximo cante"} · {nextCanteInfo.dayName} {nextCanteInfo.dayNumber} {nextCanteInfo.monthName}</h2>
+            <p className="mt-1 text-xs text-slate-600">{nextCanteInfo.tasks.length} temas asignados{nextCanteInfo.isTomorrow ? " · mañana" : ""}</p>
+          </div>
+          {onOpenPreparadorSession && <button type="button" onClick={() => onOpenPreparadorSession(nextCanteInfo.canteKey, nextCanteInfo.date)} aria-label={`Ver temas del cante del ${nextCanteInfo.dayName} ${nextCanteInfo.date}`} title="Cantar ante Preparador" className={cn(DS.iconButton, "shrink-0 border border-slate-200")}><ArrowRight size={18} aria-hidden="true" /></button>}
+        </div>}
+      </section>
+      <section aria-labelledby="planner-week-title" data-testid="planner-week-controls" className={cn(DS.card, "p-3 sm:p-4")}>
+        <div className="flex items-center justify-between gap-2">
+          <div className="min-w-0">
+            <h2 id="planner-week-title" className={cn(DS.titleSection, "text-sm sm:text-base")}>
+              {safeParseDate(weekPlan.startDate).toLocaleDateString("es-ES", { day: "numeric", month: "short" })}
+              {" – "}{safeParseDate(weekPlan.endDate).toLocaleDateString("es-ES", { day: "numeric", month: "short" })}
+            </h2>
+            <p className="mt-1 text-xs text-slate-600">{weekOffset === 0 ? "Semana actual" : `Semana ${weekOffset > 0 ? "+" : ""}${weekOffset}`} · {settings.targetDailyHours} h/día</p>
+          </div>
+          <div className="flex shrink-0 items-center gap-0.5 rounded-xl bg-slate-100 p-1" aria-label="Cambiar semana">
+            <button type="button" aria-label="Semana anterior" title="Semana anterior"
+              onClick={() => { playSound.click(); setWeekOffset(value => value - 1); }}
+              className="flex min-h-[44px] min-w-[44px] items-center justify-center rounded-lg text-slate-700 hover:bg-white"><ChevronLeft size={18} aria-hidden="true" /></button>
+            {weekOffset !== 0 && <button type="button" title="Volver a la semana actual"
+              onClick={() => { playSound.click(); setWeekOffset(0); }}
+              className="min-h-[44px] rounded-lg px-2 text-sm font-bold text-slate-700 hover:bg-white">Hoy</button>}
+            <button type="button" aria-label="Semana siguiente" title="Semana siguiente"
+              onClick={() => { playSound.click(); setWeekOffset(value => value + 1); }}
+              className="flex min-h-[44px] min-w-[44px] items-center justify-center rounded-lg text-slate-700 hover:bg-white"><ChevronRight size={18} aria-hidden="true" /></button>
           </div>
         </div>
+        <div className="mt-3 grid grid-cols-2 gap-2">
+          <button type="button" disabled={!plannerLoaded} onClick={() => setIsCanteProposalOpen(true)}
+            className={cn(DS.btnPrimary, "min-h-[44px] min-w-0 px-2")} aria-label="Planificar cantes" title="Preparar los temas antes de sus fechas de cante">
+            <CalendarIcon size={16} aria-hidden="true" className="shrink-0" /><span className="sm:hidden">Planificar</span><span className="hidden sm:inline">Planificar cantes</span>
+          </button>
+          <button type="button" onClick={() => {
+            setTargetDateForNewTask(weekPlan.days.some(day => day.date === mobileSelectedDate) ? mobileSelectedDate : weekPlan.startDate);
+            setEditingTask(null); setIsTaskEditorOpen(true);
+          }} className={cn(DS.btnSecondary, "min-h-[44px] min-w-0 px-2")}>
+            <Plus size={16} aria-hidden="true" className="shrink-0" /><span>Añadir tarea</span>
+          </button>
 
-        {/* 2. ACTIVITY FILTER AND QUICK SEARCH BAR */}
-        <div className="mt-3.5 pt-3.5 border-t border-slate-100 flex flex-col md:flex-row md:items-center justify-between gap-3">
+        </div>
+        <div className="mt-2 grid grid-cols-2 items-start gap-2">
+        <details className="min-w-0 open:col-span-2">
+          <summary className="flex min-h-[44px] cursor-pointer list-none items-center justify-between gap-2 text-sm font-semibold text-slate-600">
+            <span>Filtrar tareas{activityFilter !== "todos" || searchTopicQuery ? " · Filtro activo" : ""}</span><ChevronDown size={16} aria-hidden="true" />
+          </summary>
+        {/* 2. ACTIVITY FILTER AND SEARCH BAR */}
+        <div className="pt-3 border-t border-slate-100 flex flex-col md:flex-row md:items-center justify-between gap-3">
           {/* Activity Filters */}
           <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-0.5">
             <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-slate-400 mr-1 shrink-0">
@@ -799,9 +539,10 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
             {/* Todos */}
             <button
               type="button"
+              aria-pressed={activityFilter === "todos"}
               onClick={() => setActivityFilter("todos")}
               className={cn(
-                "px-2.5 py-1.5 rounded-xl text-xs font-bold transition-all shrink-0 flex items-center gap-1.5",
+                "min-h-[44px] px-3 py-2 rounded-xl text-sm font-bold transition-all shrink-0 flex items-center gap-1.5",
                 activityFilter === "todos"
                   ? "bg-slate-900 text-white shadow-2xs"
                   : "bg-slate-100 text-slate-600 hover:bg-slate-200"
@@ -819,9 +560,10 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
             {/* Estudio Nuevo */}
             <button
               type="button"
+              aria-pressed={activityFilter === "estudio_nuevo"}
               onClick={() => setActivityFilter("estudio_nuevo")}
               className={cn(
-                "px-2.5 py-1.5 rounded-xl text-xs font-bold transition-all shrink-0 flex items-center gap-1.5",
+                "min-h-[44px] px-3 py-2 rounded-xl text-sm font-bold transition-all shrink-0 flex items-center gap-1.5",
                 activityFilter === "estudio_nuevo"
                   ? "bg-blue-600 text-white shadow-2xs"
                   : "bg-blue-50 text-blue-800 hover:bg-blue-100 border border-blue-200/60"
@@ -837,9 +579,10 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
             {/* Refresco */}
             <button
               type="button"
+              aria-pressed={activityFilter === "refresco"}
               onClick={() => setActivityFilter("refresco")}
               className={cn(
-                "px-2.5 py-1.5 rounded-xl text-xs font-bold transition-all shrink-0 flex items-center gap-1.5",
+                "min-h-[44px] px-3 py-2 rounded-xl text-sm font-bold transition-all shrink-0 flex items-center gap-1.5",
                 activityFilter === "refresco"
                   ? "bg-orange-600 text-white shadow-2xs"
                   : "bg-orange-50 text-orange-800 hover:bg-orange-100 border border-orange-200/60"
@@ -855,9 +598,10 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
             {/* Repaso */}
             <button
               type="button"
+              aria-pressed={activityFilter === "repaso"}
               onClick={() => setActivityFilter("repaso")}
               className={cn(
-                "px-2.5 py-1.5 rounded-xl text-xs font-bold transition-all shrink-0 flex items-center gap-1.5",
+                "min-h-[44px] px-3 py-2 rounded-xl text-sm font-bold transition-all shrink-0 flex items-center gap-1.5",
                 activityFilter === "repaso"
                   ? "bg-emerald-600 text-white shadow-2xs"
                   : "bg-emerald-50 text-emerald-800 hover:bg-emerald-100 border border-emerald-200/60"
@@ -873,9 +617,10 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
             {/* Cante */}
             <button
               type="button"
+              aria-pressed={activityFilter === "cante"}
               onClick={() => setActivityFilter("cante")}
               className={cn(
-                "px-2.5 py-1.5 rounded-xl text-xs font-bold transition-all shrink-0 flex items-center gap-1.5",
+                "min-h-[44px] px-3 py-2 rounded-xl text-sm font-bold transition-all shrink-0 flex items-center gap-1.5",
                 activityFilter === "cante"
                   ? "bg-purple-600 text-white shadow-2xs"
                   : "bg-purple-50 text-purple-800 hover:bg-purple-100 border border-purple-200/60"
@@ -891,9 +636,10 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
             {/* Solo Pendientes */}
             <button
               type="button"
+              aria-pressed={activityFilter === "pendientes"}
               onClick={() => setActivityFilter("pendientes")}
               className={cn(
-                "px-2.5 py-1.5 rounded-xl text-xs font-bold transition-all shrink-0 flex items-center gap-1.5 ml-1",
+                "min-h-[44px] px-3 py-2 rounded-xl text-sm font-bold transition-all shrink-0 flex items-center gap-1.5 ml-1",
                 activityFilter === "pendientes"
                   ? "bg-amber-600 text-white shadow-2xs"
                   : "bg-amber-50 text-amber-800 hover:bg-amber-100 border border-amber-200/60"
@@ -908,251 +654,57 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
 
           {/* Quick Search in Week */}
           <div className="flex items-center gap-2">
-            <div className="relative w-full sm:w-60">
-              <input
-                type="text"
-                placeholder="Buscar tema en la semana..."
-                value={searchTopicQuery}
-                onChange={(e) => setSearchTopicQuery(e.target.value)}
-                className="w-full pl-8 pr-7 py-1.5 bg-slate-50 hover:bg-white focus:bg-white border border-slate-200 rounded-xl text-xs text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all"
-              />
-              <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
-              {searchTopicQuery && (
-                <button
-                  type="button"
-                  onClick={() => setSearchTopicQuery("")}
-                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-xs text-slate-400 hover:text-slate-600 font-bold"
-                >
-                  ✕
-                </button>
-              )}
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* 2.5 DUAL COMPLEMENTARY CARDS: RADAR DE PRÓXIMO CANTE & BALANCE SEMANAL */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-3.5">
-        {/* Radar de Próximo Cante (Columna 5/12 en desktop) */}
-        <div className="lg:col-span-5 bg-gradient-to-br from-purple-950/90 to-slate-900 text-white rounded-3xl p-4 sm:p-5 border border-purple-500/20 shadow-xs flex flex-col justify-between">
-          <div>
-            <div className="flex items-center justify-between">
-              <span className="text-[10px] font-mono font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-purple-500/20 text-purple-200 border border-purple-400/30 flex items-center gap-1">
-                <Award size={11} />
-                <span>Radar de Próximo Cante</span>
-              </span>
-
-              {nextCanteInfo && (
-                <span className={cn(
-                  "text-[10px] font-mono font-bold px-2 py-0.5 rounded-full",
-                  nextCanteInfo.isToday
-                    ? "bg-rose-500/30 text-rose-200 border border-rose-400/30 animate-pulse"
-                    : nextCanteInfo.isTomorrow
-                    ? "bg-amber-500/30 text-amber-200 border border-amber-400/30"
-                    : "bg-white/10 text-white/80"
-                )}>
-                  {nextCanteInfo.isToday ? "¡Hoy es el cante!" : nextCanteInfo.isTomorrow ? "Mañana cante" : `En ${nextCanteInfo.diffDays} días`}
-                </span>
-              )}
-            </div>
-
-            {nextCanteInfo ? (
-              <div className="mt-3">
-                <h3 className="text-base font-black font-serif text-white tracking-tight flex items-baseline gap-2">
-                  <span>{nextCanteInfo.dayName} {nextCanteInfo.dayNumber} {nextCanteInfo.monthName}</span>
-                  <span className="text-xs font-mono text-purple-300 font-normal">
-                    ({nextCanteInfo.tasks.length} temas asignados)
-                  </span>
-                </h3>
-
-                <div className="mt-2.5 space-y-1.5">
-                  {nextCanteInfo.tasks.length === 0 ? (
-                    <p className="text-xs text-purple-200/70 italic">
-                      No has asignado temas para este día de cante todavía. Usa el botón Añadir para programar los temas.
-                    </p>
-                  ) : (
-                    <div className="flex flex-wrap gap-1.5">
-                      {nextCanteInfo.tasks.map((task) => (
-                        <span
-                          key={task.id}
-                          className="text-[11px] font-bold px-2.5 py-1 rounded-xl bg-purple-800/60 text-purple-100 border border-purple-500/30 flex items-center gap-1"
-                        >
-                          <span className="font-mono text-amber-300">T.{task.topicNumber}</span>
-                          <span className="truncate max-w-[120px]">{task.topicTitle}</span>
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </div>
-            ) : (
-              <div className="mt-3 text-xs text-purple-200/80">
-                <p>No hay jornadas de cante oficiales en esta vista semanal.</p>
-                <p className="text-[11px] text-purple-300/60 mt-1">Los cantes oficiales se realizan habitualmente los lunes y jueves.</p>
-              </div>
-            )}
-          </div>
-
-          {nextCanteInfo && (
-            <div className="mt-3.5 pt-3 border-t border-purple-500/20 flex flex-wrap items-center justify-between gap-2">
+            <input
+              type="text"
+              aria-label="Buscar tema en la semana"
+              placeholder="Buscar tema en la semana..."
+              value={searchTopicQuery}
+              onChange={(e) => setSearchTopicQuery(e.target.value)}
+              className="min-h-[44px] px-3 py-2 bg-slate-50 hover:bg-white focus:bg-white border border-slate-200 rounded-xl text-xs text-slate-800 placeholder-slate-400 focus:outline-indigo-600 w-full sm:w-56 transition-all"
+            />
+            {searchTopicQuery && (
               <button
                 type="button"
-                onClick={handleSchedulePreCanteReviews}
-                className="px-2.5 py-1 bg-purple-800/80 hover:bg-purple-700/90 text-purple-100 border border-purple-400/30 rounded-xl text-xs font-bold transition-all shadow-xs flex items-center gap-1.5"
-                title="Generar tareas de repaso en los días previos para asegurar estos temas antes del cante"
+                onClick={() => setSearchTopicQuery("")}
+                aria-label="Borrar búsqueda de tareas"
+                className="min-h-[44px] min-w-[44px] text-xs text-slate-400 hover:text-slate-600 font-bold"
               >
-                <Sparkles size={12} className="text-amber-300" />
-                <span>Repasos de Víspera</span>
+                ✕
               </button>
-
-              {onOpenPreparadorSession && (
-                <button
-                  type="button"
-                  onClick={() => onOpenPreparadorSession(nextCanteInfo.canteKey)}
-                  className="px-3 py-1 bg-white text-slate-900 hover:bg-purple-50 rounded-xl text-xs font-bold transition-all shadow-xs flex items-center gap-1.5"
-                >
-                  <Award size={13} className="text-purple-600" />
-                  <span>Cantar ante Preparador</span>
-                </button>
-              )}
-            </div>
-          )}
-        </div>
-
-        {/* Balance Semanal Previsto vs Real (Columna 7/12 en desktop) */}
-        <div className="lg:col-span-7 bg-white rounded-3xl p-4 sm:p-5 border border-slate-200/90 shadow-xs flex flex-col justify-between">
-          <div>
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-slate-500">
-                  Balance Semanal de Rendimiento
-                </span>
-                <span className="text-[10px] font-mono text-slate-400">· Telemetría AeroFocus</span>
-              </div>
-
-              {/* Intensity Badge */}
-              <span className={cn(
-                "text-[10px] font-black uppercase tracking-wider font-mono px-2.5 py-0.5 rounded-full border",
-                weekPlan.intensityLevel === "optima" && "bg-emerald-50 text-emerald-800 border-emerald-200",
-                weekPlan.intensityLevel === "exigente" && "bg-blue-50 text-blue-800 border-blue-200",
-                weekPlan.intensityLevel === "sobrecargada" && "bg-amber-50 text-amber-900 border-amber-200"
-              )}>
-                Carga {weekPlan.intensityLevel === "optima" ? "Óptima" : weekPlan.intensityLevel === "exigente" ? "Exigente" : "Sobrecargada"}
-              </span>
-            </div>
-
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-3">
-              {/* Previsto */}
-              <div className="p-2.5 rounded-2xl bg-slate-50 border border-slate-100">
-                <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-slate-400 block">
-                  Previsto
-                </span>
-                <span className="text-lg font-black font-serif text-slate-900 block mt-0.5">
-                  {weekPlan.totalEstimatedHours}h
-                </span>
-                <span className="text-[10px] text-slate-500 font-mono">
-                  {weekPlan.totalTasksCount} tareas
-                </span>
-              </div>
-
-              {/* Real (AeroFocus + Manual) */}
-              <div className="p-2.5 rounded-2xl bg-indigo-50/70 border border-indigo-100/80">
-                <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-indigo-700 block">
-                  Estudio Real
-                </span>
-                <span className="text-lg font-black font-serif text-indigo-950 block mt-0.5">
-                  {weekPlan.totalActualHours}h
-                </span>
-                <span className="text-[10px] text-indigo-700/80 font-mono">
-                  sincronizado
-                </span>
-              </div>
-
-              {/* Variación */}
-              <div className="p-2.5 rounded-2xl bg-slate-50 border border-slate-100">
-                <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-slate-400 block">
-                  Diferencia
-                </span>
-                <span className={cn(
-                  "text-lg font-black font-serif block mt-0.5",
-                  weekPlan.hoursVariance >= 0 ? "text-emerald-700" : "text-amber-700"
-                )}>
-                  {weekPlan.hoursVariance >= 0 ? `+${weekPlan.hoursVariance}h` : `${weekPlan.hoursVariance}h`}
-                </span>
-                <span className="text-[10px] text-slate-500 font-mono">
-                  vs estimado
-                </span>
-              </div>
-
-              {/* Tasa Cumplimiento */}
-              <div className="p-2.5 rounded-2xl bg-slate-50 border border-slate-100">
-                <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-slate-400 block">
-                  Avance
-                </span>
-                <span className="text-lg font-black font-serif text-emerald-800 block mt-0.5">
-                  {weekPlan.completionRatePct}%
-                </span>
-                <span className="text-[10px] text-slate-500 font-mono">
-                  {weekPlan.totalCompletedTasks}/{weekPlan.totalTasksCount} hechas
-                </span>
-              </div>
-            </div>
-
-            {/* Ciclo de Aprendizaje Empírico & Calibración de Tiempos */}
-            {learnerProfile && (
-              <div className="mt-3 pt-2.5 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-600 flex-wrap gap-2">
-                <div className="flex items-center gap-1.5 font-mono">
-                  <span className="font-bold text-slate-800">Ritmo personal:</span>
-                  <span className="bg-blue-50 text-blue-800 px-1.5 py-0.2 rounded border border-blue-200">
-                    Estudio: {learnerProfile.studyPaceMinPerPage}m/p
-                  </span>
-                  <span className="bg-emerald-50 text-emerald-800 px-1.5 py-0.2 rounded border border-emerald-200">
-                    Repaso: {learnerProfile.reviewPaceMinPerPage}m/p
-                  </span>
-                  <span className="bg-orange-50 text-orange-800 px-1.5 py-0.2 rounded border border-orange-200">
-                    Refresco: {learnerProfile.refreshPaceMinPerPage}m/p
-                  </span>
-                </div>
-
-                {learnerProfile.predictionAccuracy && (
-                  <div className="flex items-center gap-1 text-[10px] font-mono font-bold text-indigo-700 bg-indigo-50/80 px-2 py-0.5 rounded-full border border-indigo-200">
-                    <span>Precisión modelo: {learnerProfile.predictionAccuracy.accuracyPct}%</span>
-                    <span>(±{learnerProfile.predictionAccuracy.meanAbsoluteErrorMinutes}m MAE)</span>
-                  </div>
-                )}
-              </div>
             )}
           </div>
-
-          {/* Progress Bar */}
-          <div className="mt-3 pt-2.5 border-t border-slate-100">
-            <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
-              <div
-                className="bg-emerald-600 h-full rounded-full transition-all duration-500"
-                style={{ width: `${Math.min(100, weekPlan.completionRatePct)}%` }}
-              />
-            </div>
-          </div>
         </div>
-      </div>
-
-      {/* 2.8 PROACTIVE DIAGNOSTICS & ADVICE (Avisos de Inteligencia Preventiva) */}
-      {weekPlan.proactiveWarnings && weekPlan.proactiveWarnings.length > 0 && (
-        <div className="space-y-2">
-          {weekPlan.proactiveWarnings.map((warn, idx) => (
-            <div
-              key={idx}
-              className="p-3 rounded-2xl bg-indigo-50/80 border border-indigo-200/80 text-xs text-indigo-950 flex items-start gap-2.5"
-            >
-              <Info size={16} className="text-indigo-600 shrink-0 mt-0.5" />
-              <div className="flex-1 font-medium leading-relaxed">
-                <strong className="font-bold mr-1">Consejo de preparación:</strong>
-                {warn}
-              </div>
+        </details>
+          <details className="relative justify-self-end">
+            <summary className="flex min-h-[44px] cursor-pointer list-none items-center gap-1 rounded-xl px-3 text-sm font-semibold text-slate-700 hover:bg-slate-100">
+              Opciones <ChevronDown size={16} aria-hidden="true" />
+            </summary>
+            <div className="absolute right-0 top-full z-30 mt-2 w-72 space-y-1 rounded-2xl border border-slate-200 bg-white p-2 shadow-lg">
+              <button type="button" onClick={event => { playSound.click(); setIsEbbinghausModalOpen(true); event.currentTarget.closest("details")?.removeAttribute("open"); }}
+                className={cn(DS.btnGhost, "min-h-[44px] w-full text-left")} title="Añadir temas que necesitan repaso según la curva del olvido">
+                <Brain size={16} aria-hidden="true" />Sugerencias Ebbinghaus
+              </button>
+              <button type="button" onClick={event => { playSound.click(); handleTriggerRebalance(); event.currentTarget.closest("details")?.removeAttribute("open"); }}
+                className={cn(DS.btnGhost, "min-h-[44px] w-full text-left")} title="Detectar sobrecargas y proponer redistribución inteligente">
+                <Sparkles size={16} aria-hidden="true" />Redistribuir Semana
+                {weekPlan.overloadedDaysCount > 0 && <span className="rounded-full bg-amber-100 px-2 text-xs text-amber-900">{weekPlan.overloadedDaysCount}</span>}
+              </button>
+              <button type="button" onClick={event => { playSound.click(); setIsSettingsModalOpen(true); event.currentTarget.closest("details")?.removeAttribute("open"); }}
+                className={cn(DS.btnGhost, "min-h-[44px] w-full text-left")} title="Configurar velocidades y horas">
+                <Sliders size={16} aria-hidden="true" />Disponibilidad y tiempos
+              </button>
             </div>
-          ))}
+          </details>
         </div>
-      )}
+      </section>
+
+
+      {weekPlan.proactiveWarnings && weekPlan.proactiveWarnings.length > 0 && <details className="rounded-2xl border border-amber-200 bg-amber-50 px-4">
+        <summary className="flex min-h-[44px] cursor-pointer list-none items-center justify-between gap-2 text-sm font-semibold text-amber-900">
+          <span className="flex items-center gap-2"><AlertTriangle size={16} aria-hidden="true" />{weekPlan.proactiveWarnings.length} avisos de la semana{weekPlan.unknownDurationTaskCount > 0 ? " · faltan estimaciones" : ""}</span><ChevronDown size={16} aria-hidden="true" />
+        </summary>
+        <ul className="space-y-2 pb-3 text-sm leading-relaxed text-amber-950">{weekPlan.proactiveWarnings.map((warning, index) => <li key={index}>{warning}</li>)}</ul>
+      </details>}
 
       {/* 3. ALERT FOR DELAYED TASKS (IF ANY) */}
       {weekPlan.delayedTasksCount > 0 && (
@@ -1166,73 +718,33 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
           <button
             type="button"
             onClick={handleRescheduleDelayedTasks}
-            className="px-3 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded-xl font-bold transition-all shadow-2xs shrink-0"
+            className="min-h-[44px] px-3 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-xl font-bold transition-all shadow-2xs shrink-0"
           >
-            Mover a Hoy
+            Revisar atrasadas
           </button>
         </div>
       )}
 
-      {/* 4. MODO HOY BANNER (Si estamos en la semana actual) */}
-      {todayDayPlan && (
-        <div className="bg-gradient-to-r from-slate-950 via-slate-900 to-indigo-950 text-white rounded-3xl p-4 sm:p-5 shadow-sm relative overflow-hidden border border-slate-800/80">
-          <div className="relative z-10 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-            <div>
-              <div className="flex items-center gap-2">
-                <span className="text-[10px] font-black uppercase tracking-wider px-2.5 py-0.5 rounded-full bg-amber-400/20 text-amber-300 border border-amber-400/30 font-mono">
-                  Jornada de Hoy
-                </span>
-                <span className="text-xs font-mono text-slate-300 font-medium">
-                  {todayDayPlan.dayName} {todayDayPlan.dayNumber} {todayDayPlan.monthName}
-                </span>
-              </div>
-              <h3 className="text-base sm:text-lg font-black font-serif mt-1.5 tracking-tight text-white flex items-baseline gap-2 flex-wrap">
-                <span>
-                  {todayDayPlan.tasks.length === 0
-                    ? "Jornada libre o sin tareas programadas para hoy."
-                    : `${todayDayPlan.tasks.length} ${todayDayPlan.tasks.length === 1 ? "tarea programada" : "tareas programadas"} · ${formatMinutesToHours(todayDayPlan.totalEstimatedMinutes)} de estudio previsto`}
-                </span>
-                {todayDayPlan.completedTasksCount > 0 && (
-                  <span className="text-xs font-mono text-emerald-400 font-normal">
-                    ({todayDayPlan.completedTasksCount} completadas)
-                  </span>
-                )}
-              </h3>
-            </div>
-
-            <button
-              type="button"
-              onClick={() => {
-                setTargetDateForNewTask(todayStr);
-                setEditingTask(null);
-                setIsTaskEditorOpen(true);
-              }}
-              className="px-4 py-2 bg-white text-slate-900 hover:bg-slate-100 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 shrink-0 self-start sm:self-center shadow-xs active:scale-95 cursor-pointer"
-            >
-              <Plus size={14} strokeWidth={2.5} />
-              <span>Añadir Tarea a Hoy</span>
-            </button>
-          </div>
-        </div>
-      )}
-
       {/* 5. MOBILE DAY SELECTOR (Visible en pantallas pequeñas con puntos de color de actividad) */}
-      <div className="md:hidden flex items-center justify-between gap-1 overflow-x-auto no-scrollbar p-1.5 bg-white rounded-2xl border border-slate-200 shadow-2xs">
+      <div aria-label="Seleccionar día de la semana"
+      className="md:hidden flex items-center justify-between gap-1 overflow-x-auto no-scrollbar p-1.5 bg-white rounded-2xl border border-slate-200">
         {weekPlan.days.map((day) => {
           const isSelected = mobileSelectedDate === day.date;
           return (
             <button
               key={day.date}
               type="button"
+              aria-pressed={isSelected}
+              aria-label={`${day.dayName} ${day.dayNumber} ${day.monthName}${day.isToday ? ", hoy" : ""}, ${day.tasks.length} tareas`}
               onClick={() => setMobileSelectedDate(day.date)}
               className={cn(
-                "flex-1 py-2 px-1 text-center rounded-xl transition-all min-w-[44px]",
+                "flex-1 min-h-[64px] py-2 px-1 text-center rounded-xl transition-all min-w-[44px]",
                 isSelected
                   ? "bg-slate-900 text-white shadow-xs font-bold"
                   : "text-slate-600 hover:bg-slate-100"
               )}
             >
-              <span className="text-[9px] font-mono block uppercase">{day.shortName}</span>
+              <span className="text-[11px] font-semibold block uppercase">{day.shortName}</span>
               <span className="text-sm font-black font-serif tabular-nums block mt-0.5">{day.dayNumber}</span>
               
               {/* Activity Indicator Dots on Mobile */}
@@ -1269,16 +781,16 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
             <div
               key={day.date}
               className={cn(
-                "bg-white rounded-3xl border transition-all flex flex-col min-h-[380px] sm:min-h-[520px] shadow-2xs relative overflow-hidden",
-                day.isToday ? "border-indigo-400 ring-2 ring-indigo-200/60 shadow-sm" : "border-slate-200/85 hover:border-slate-300",
+                "bg-[var(--wp-surface)] rounded-2xl border transition-colors flex flex-col min-h-[260px] md:min-h-[400px] relative overflow-hidden",
+                day.isToday ? "border-indigo-400 ring-2 ring-indigo-200/60" : "border-slate-200/85",
                 day.isOverloaded && "border-amber-300 ring-1 ring-amber-200",
                 !isMobileVisible && "hidden md:flex"
               )}
             >
               {/* Day Column Header */}
               <div className={cn(
-                "p-3.5 border-b flex flex-col gap-1.5 transition-colors",
-                day.isToday ? "bg-indigo-50/60 border-indigo-100" : "bg-slate-50/70 border-slate-100"
+                "p-3.5 border-b flex flex-col gap-1 transition-colors",
+                day.isToday ? "bg-indigo-50/50 border-indigo-100" : "bg-slate-50/70 border-slate-100"
               )}>
                 <div className="flex items-center justify-between">
                   <span className={cn(
@@ -1289,15 +801,15 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
                   </span>
 
                   {day.isToday && (
-                    <span className="text-[9px] font-black uppercase px-2 py-0.5 rounded-md bg-indigo-600 text-white font-mono shadow-2xs">
+                    <span className="text-[9px] font-black uppercase px-1.5 py-0.2 rounded-md bg-indigo-600 text-white font-mono">
                       Hoy
                     </span>
                   )}
                 </div>
 
-                <div className="flex items-baseline justify-between">
+                <div className="flex items-baseline justify-between mt-0.5">
                   <div className="flex items-baseline gap-1">
-                    <span className="text-2xl font-black font-serif text-slate-900 tabular-nums leading-none">
+                    <span className="text-xl font-black font-serif text-slate-900 tabular-nums">
                       {day.dayNumber}
                     </span>
                     <span className="text-xs text-slate-400 font-medium">
@@ -1306,7 +818,7 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
                   </div>
 
                   <span className={cn(
-                    "font-mono text-xs font-bold tabular-nums",
+                    "font-mono text-xs font-bold",
                     day.isOverloaded ? "text-amber-700" : "text-slate-600"
                   )}>
                     {formatMinutesToHours(day.totalEstimatedMinutes)}
@@ -1315,26 +827,27 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
 
                 {/* Overload Alert Badge */}
                 {day.isOverloaded && (
-                  <div className="p-1 px-2 rounded-lg bg-amber-100 text-amber-900 text-[10px] font-bold flex items-center justify-between border border-amber-200/60">
+                  <div className="mt-1 p-1 px-2 rounded-lg bg-amber-100 text-amber-900 text-[10px] font-bold flex items-center justify-between">
                     <span>Sobrecarga:</span>
-                    <span className="font-mono">+{Math.round(day.overloadMinutes)} min</span>
+                    <span>+{Math.round(day.overloadMinutes)} min</span>
                   </div>
                 )}
 
                 {/* Cante Official Day Badge */}
                 {day.isCanteOfficialDay && (
-                  <div className="flex items-center justify-between text-[10px] text-purple-900 font-bold px-2 py-1 bg-purple-100/80 border border-purple-200/70 rounded-xl">
+                  <div className="mt-1 flex items-center justify-between text-[10px] text-purple-800 font-bold px-2 py-0.5 bg-purple-100/70 rounded-lg">
                     <span className="flex items-center gap-1">
-                      <Award size={12} className="text-purple-700" />
-                      <span>Cante Oficial</span>
+                      <Award size={11} />
+                      <span>Cante</span>
                     </span>
                     {onOpenPreparadorSession && (
                       <button
                         type="button"
-                        onClick={() => onOpenPreparadorSession(day.shortName === "LUN" ? "lunes" : "jueves")}
-                        className="hover:underline text-[9px] font-mono text-purple-900 font-black cursor-pointer"
+                        onClick={() => onOpenPreparadorSession(day.shortName === "LUN" ? "lunes" : "jueves", day.date)}
+                        aria-label={`Abrir cante del ${day.dayName}`}
+                        className="min-h-[44px] min-w-[44px] px-1 text-sm font-semibold text-purple-900 hover:underline"
                       >
-                        Cantar →
+                        Abrir
                       </button>
                     )}
                   </div>
@@ -1342,9 +855,9 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
               </div>
 
               {/* Tasks List inside Day Column */}
-              <div className="p-2 sm:p-2.5 flex-1 space-y-2 overflow-y-auto max-h-[580px] no-scrollbar">
+              <div className="flex-1 space-y-2 p-2 md:max-h-[640px] md:overflow-y-auto">
                 {visibleTasks.length === 0 ? (
-                  <div className="p-6 text-center border border-dashed border-slate-200 rounded-2xl text-[11px] text-slate-400 mt-2">
+                  <div className="p-4 text-center border border-dashed border-slate-200 rounded-2xl text-[11px] text-slate-400 mt-2">
                     {day.tasks.length > 0 ? "Sin coincidencias con el filtro" : "Sin tareas programadas"}
                   </div>
                 ) : (
@@ -1356,16 +869,18 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
                     return (
                       <div
                         key={task.id}
+                        role="group"
+                        aria-labelledby={`task-title-${task.id}`}
                         className={cn(
-                          "p-2.5 sm:p-3 rounded-2xl border transition-all text-left relative group shadow-2xs hover:shadow-xs hover:-translate-y-0.5 duration-200",
+                          "p-2.5 sm:p-3 rounded-2xl border transition-all text-left relative group",
                           cfg.bgClass,
                           cfg.borderClass,
-                          isDone && "opacity-60 saturate-50 bg-slate-50 border-slate-200 shadow-none hover:translate-y-0",
-                          isDelayed && "border-amber-400 ring-1 ring-amber-200 shadow-2xs"
+                          isDone && "opacity-60 saturate-50 bg-slate-50 border-slate-200",
+                          isDelayed && "border-amber-400 shadow-2xs"
                         )}
                       >
                         {/* Task Top Meta */}
-                        <div className="flex items-center justify-between gap-1 mb-1.5">
+                        <div className="flex items-center justify-between gap-1 mb-1">
                           <div className="flex items-center gap-1.5 min-w-0">
                             <span className={cn("w-2 h-2 rounded-full shrink-0", cfg.dotClass)} />
                             <span className={cn("text-[10px] font-bold uppercase tracking-wider truncate", cfg.textClass)}>
@@ -1373,47 +888,45 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
                             </span>
                           </div>
 
-                          <span className="font-mono text-[10px] text-slate-500 font-bold shrink-0 tabular-nums">
-                            ~{task.estimatedMinutes}m
+                          <span className="font-mono text-[10px] text-slate-500 font-bold shrink-0">
+                            {task.estimatedMinutes === null || task.estimatedMinutes === undefined ? 'Sin estimación' : `~${task.estimatedMinutes}m`}
+                            {task.prediction?.interval && <span className="block font-normal">{Math.round(task.prediction.interval.low)}–{Math.round(task.prediction.interval.high)}m · n={task.prediction.evidenceCount}</span>}
                           </span>
                         </div>
 
-                        {/* Topic Title & Check Box */}
+                        {/* Topic Title */}
                         <div className="flex items-start gap-2">
                           <button
                             type="button"
                             onClick={() => handleToggleTaskStatus(task)}
-                            className={cn(
-                              "w-5 h-5 rounded-lg flex items-center justify-center transition-all shrink-0 mt-0.5 active:scale-90 cursor-pointer",
-                              isDone
-                                ? "bg-emerald-600 text-white shadow-2xs"
-                                : "border border-slate-300 hover:border-indigo-600 bg-white"
-                            )}
+                            aria-label={`${isDone ? "Marcar pendiente" : "Marcar completada"} la tarea del tema ${task.topicNumber}`}
+                            aria-pressed={isDone}
+                            className="flex min-h-[44px] min-w-[44px] shrink-0 items-start justify-center rounded-lg pt-1 text-slate-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-600"
                             title={isDone ? "Marcar pendiente" : "Marcar completado"}
                           >
-                            {isDone && <Check size={12} strokeWidth={3} />}
+                            <span className={cn("flex h-5 w-5 items-center justify-center rounded-md border", isDone ? "border-emerald-600 bg-emerald-600 text-white" : "border-slate-400 bg-white")}>
+                              {isDone && <Check size={12} strokeWidth={3} aria-hidden="true" />}
+                            </span>
                           </button>
 
                           <div className="min-w-0 flex-1">
-                            <h4 className={cn(
-                              "text-xs font-bold leading-snug line-clamp-2",
+                            <h4 id={`task-title-${task.id}`} className={cn(
+                              "text-sm font-semibold leading-snug line-clamp-3",
                               isDone ? "line-through text-slate-500" : "text-slate-900"
                             )}>
-                              <span className="font-mono text-slate-800 font-black mr-1 bg-white/70 px-1 py-0.2 rounded border border-slate-200/60">
-                                T.{task.topicNumber}
-                              </span>
+                              <span className="font-mono text-slate-700 mr-1">T.{task.topicNumber}</span>
                               <span>{task.topicTitle}</span>
                             </h4>
 
                             <div className="flex items-center gap-1.5 mt-1 text-[10px] text-slate-500 font-mono">
                               {task.pagesCount && task.pagesCount > 0 ? (
-                                <span className="tabular-nums font-semibold">{task.pagesCount} págs</span>
+                                <span>{task.pagesCount} págs</span>
                               ) : (
-                                <span className="text-slate-400 italic">Págs no indicadas</span>
+                                <span className="text-slate-400 italic">Págs sin registrar</span>
                               )}
                               {task.notes && (
                                 <>
-                                  <span className="text-slate-300">·</span>
+                                  <span>·</span>
                                   <span className="italic line-clamp-1">{task.notes}</span>
                                 </>
                               )}
@@ -1421,58 +934,37 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
                           </div>
                         </div>
 
-                        {/* Task Action Bar */}
-                        <div className="mt-2.5 pt-1.5 border-t border-slate-200/50 flex items-center justify-between text-[10px]">
-                          <div className="flex items-center gap-1">
-                            {/* 1-Click Registrar Estudio en WellsPrep */}
-                            <button
-                              type="button"
-                              onClick={() => handleQuickRegisterStudy(task)}
-                              className="px-2 py-0.5 rounded-lg bg-white/95 hover:bg-emerald-50 text-emerald-800 hover:text-emerald-900 border border-emerald-200/80 font-mono font-bold text-[9px] transition-all flex items-center gap-1 shadow-2xs active:scale-95 cursor-pointer"
-                              title="Registrar estudio real en WellsPrep y marcar tarea como completada"
-                            >
-                              <Zap size={10} className="text-emerald-600" />
-                              <span>Registrar</span>
-                            </button>
-
-                            {/* Mover al día siguiente */}
-                            <button
-                              type="button"
-                              onClick={() => {
-                                const nextDay = new Date(safeParseDate(day.date));
-                                nextDay.setDate(nextDay.getDate() + 1);
-                                handleMoveTask(task.id, getLocalDateString(nextDay));
-                              }}
-                              className="p-1 rounded-md text-slate-400 hover:text-slate-800 hover:bg-white/80 transition-colors"
-                              title="Pasar al día siguiente"
-                            >
-                              <MoveRight size={12} />
-                            </button>
-
-                            {/* Editar */}
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setEditingTask(task);
-                                setTargetDateForNewTask(task.date);
-                                setIsTaskEditorOpen(true);
-                              }}
-                              className="p-1 rounded-md text-slate-400 hover:text-slate-800 hover:bg-white/80 transition-colors"
-                              title="Editar tarea"
-                            >
-                              <Edit3 size={12} />
-                            </button>
-                          </div>
-
-                          {/* Eliminar */}
-                          <button
-                            type="button"
-                            onClick={() => handleDeleteTask(task.id)}
-                            className="p-1 rounded-md text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition-colors"
-                            title="Eliminar tarea"
-                          >
-                            <Trash2 size={12} />
+                        <div className="mt-3 space-y-1 border-t border-slate-200/70 pt-2">
+                          <button type="button" onClick={() => handleQuickRegisterStudy(task)}
+                            aria-label={`Registrar sesión real para el tema ${task.topicNumber}`}
+                            className="flex min-h-[44px] w-full items-center justify-center gap-1.5 rounded-xl border border-emerald-200 bg-white px-2 py-2 text-sm font-semibold text-emerald-900 hover:bg-emerald-50"
+                            title="Registrar estudio real en WellsPrep y marcar tarea como completada">
+                            <Clock size={15} aria-hidden="true" /><span>Registrar</span>
                           </button>
+                          <div className="flex items-start gap-1">
+                            <button type="button" onClick={() => { setEditingTask(task); setTargetDateForNewTask(task.date); setIsTaskEditorOpen(true); }}
+                              aria-label={`Editar tarea del tema ${task.topicNumber}`} title="Editar tarea" className={DS.iconButton}>
+                              <Edit3 size={16} aria-hidden="true" />
+                            </button>
+                            <details className="min-w-0 flex-1">
+                              <summary className="flex min-h-[44px] cursor-pointer list-none items-center justify-center gap-1 rounded-xl px-2 text-sm font-medium text-slate-700 hover:bg-white/80">
+                                Más <ChevronDown size={14} aria-hidden="true" />
+                              </summary>
+                              <div className="space-y-1 border-t border-slate-200/70 pt-1">
+                                <button type="button" onClick={() => {
+                                  const nextDay = new Date(safeParseDate(day.date)); nextDay.setDate(nextDay.getDate() + 1);
+                                  handleMoveTask(task.id, getLocalDateString(nextDay));
+                                }} aria-label={`Pasar la tarea del tema ${task.topicNumber} al día siguiente`} title="Pasar al día siguiente"
+                                  className="flex min-h-[44px] w-full items-center justify-center gap-1 rounded-lg px-2 py-2 text-sm text-slate-700 hover:bg-white/80">
+                                  <MoveRight size={15} aria-hidden="true" /><span>Mover</span>
+                                </button>
+                                <button type="button" onClick={() => handleDeleteTask(task.id)} aria-label={`Eliminar tarea del tema ${task.topicNumber}`} title="Eliminar tarea"
+                                  className="flex min-h-[44px] w-full items-center justify-center gap-1 rounded-lg px-2 py-2 text-sm text-rose-800 hover:bg-rose-50">
+                                  <Trash2 size={15} aria-hidden="true" /><span>Eliminar</span>
+                                </button>
+                              </div>
+                            </details>
+                          </div>
                         </div>
                       </div>
                     );
@@ -1489,7 +981,8 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
                     setEditingTask(null);
                     setIsTaskEditorOpen(true);
                   }}
-                  className="w-full py-1.5 px-2 bg-white hover:bg-slate-100 text-slate-700 border border-slate-200/80 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1 shadow-2xs hover:shadow-xs active:scale-98 cursor-pointer"
+                  aria-label={`Añadir tarea al ${day.dayName} ${day.dayNumber}`}
+                  className="min-h-[44px] w-full py-2 px-2 bg-white hover:bg-slate-100 text-slate-700 border border-slate-200/80 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1 shadow-2xs hover:shadow-xs active:scale-98"
                 >
                   <Plus size={13} strokeWidth={2.5} />
                   <span>Añadir</span>
@@ -1500,7 +993,142 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
         })}
       </div>
 
+      <details className={cn(DS.card, "p-4")}>
+        <summary className="flex min-h-[44px] cursor-pointer list-none items-center justify-between gap-2 text-sm font-bold text-slate-700">
+          Balance de la semana y ritmo personal <ChevronDown size={16} aria-hidden="true" />
+        </summary>
+        {/* Balance Semanal Previsto vs Real (Columna 7/12 en desktop) */}
+        <div className="space-y-3 pt-3">
+          <div>
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-slate-500">
+                  Tiempo y tareas de esta semana
+                </span>
+              </div>
+
+              {/* Intensity Badge */}
+              <span className={cn(
+                "text-[10px] font-black uppercase tracking-wider font-mono px-2.5 py-0.5 rounded-full border",
+                weekPlan.intensityLevel === "optima" && "bg-emerald-50 text-emerald-800 border-emerald-200",
+                weekPlan.intensityLevel === "exigente" && "bg-blue-50 text-blue-800 border-blue-200",
+                weekPlan.intensityLevel === "sobrecargada" && "bg-amber-50 text-amber-900 border-amber-200"
+              )}>
+                Carga {weekPlan.intensityLevel === "optima" ? "Óptima" : weekPlan.intensityLevel === "exigente" ? "Exigente" : "Sobrecargada"}
+              </span>
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-3">
+              {/* Previsto */}
+              <div className="p-2.5 rounded-2xl bg-slate-50 border border-slate-100">
+                <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-slate-400 block">
+                  Previsto
+                </span>
+                <span className="text-lg font-black font-serif text-slate-900 block mt-0.5">
+                  {weekPlan.totalEstimatedHours}h{weekPlan.unknownDurationTaskCount > 0 ? ' conocidas' : ''}
+                </span>
+                <span className="text-[10px] text-slate-500 font-mono">
+                  {weekPlan.totalTasksCount} tareas{weekPlan.unknownDurationTaskCount > 0 ? ` · ${weekPlan.unknownDurationTaskCount} sin estimación` : ''}
+                </span>
+              </div>
+
+              {/* Real (AeroFocus + Manual) */}
+              <div className="p-2.5 rounded-2xl bg-indigo-50/70 border border-indigo-100/80">
+                <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-indigo-700 block">
+                  Estudio Real
+                </span>
+                <span className="text-lg font-black font-serif text-indigo-950 block mt-0.5">
+                  {weekPlan.totalActualHours}h
+                </span>
+                <span className="text-[10px] text-indigo-700/80 font-mono">
+                  registradas en sesiones
+                </span>
+              </div>
+
+              {/* Variación */}
+              <div className="p-2.5 rounded-2xl bg-slate-50 border border-slate-100">
+                <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-slate-400 block">
+                  Diferencia
+                </span>
+                <span className={cn(
+                  "text-lg font-black font-serif block mt-0.5",
+                  weekPlan.hoursVariance >= 0 ? "text-emerald-700" : "text-amber-700"
+                )}>
+                  {weekPlan.unknownDurationTaskCount > 0 ? 'Sin comparación completa' : weekPlan.hoursVariance >= 0 ? `+${weekPlan.hoursVariance}h` : `${weekPlan.hoursVariance}h`}
+                </span>
+                <span className="text-[10px] text-slate-500 font-mono">
+                  vs estimado
+                </span>
+              </div>
+
+              {/* Tasa Cumplimiento */}
+              <div className="p-2.5 rounded-2xl bg-slate-50 border border-slate-100">
+                <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-slate-400 block">
+                  Avance
+                </span>
+                <span className="text-lg font-black font-serif text-emerald-800 block mt-0.5">
+                  {weekPlan.completionRatePct}%
+                </span>
+                <span className="text-[10px] text-slate-500 font-mono">
+                  {weekPlan.totalCompletedTasks}/{weekPlan.totalTasksCount} hechas
+                </span>
+              </div>
+            </div>
+
+            {/* Ciclo de Aprendizaje Empírico & Calibración de Tiempos */}
+            {learnerProfile && (
+              <div className="mt-3 pt-2.5 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-600 flex-wrap gap-2">
+                <div className="flex items-center gap-1.5 font-mono">
+                  <span className="font-bold text-slate-800">Ritmo personal:</span>
+                  <span className="bg-blue-50 text-blue-800 px-1.5 py-0.2 rounded border border-blue-200">
+                    Estudio: {learnerProfile.studyPaceMinPerPage === null ? 'sin datos' : `${learnerProfile.studyPaceMinPerPage}m/p`}
+                  </span>
+                  <span className="bg-emerald-50 text-emerald-800 px-1.5 py-0.2 rounded border border-emerald-200">
+                    Repaso: {learnerProfile.reviewPaceMinPerPage === null ? 'sin datos' : `${learnerProfile.reviewPaceMinPerPage}m/p`}
+                  </span>
+                  <span className="bg-orange-50 text-orange-800 px-1.5 py-0.2 rounded border border-orange-200">
+                    Refresco: {learnerProfile.refreshPaceMinPerPage === null ? 'sin datos' : `${learnerProfile.refreshPaceMinPerPage}m/p`}
+                  </span>
+                </div>
+
+                {learnerProfile.predictionAccuracy && (
+                  <div className="flex items-center gap-1 text-[10px] font-mono font-bold text-indigo-700 bg-indigo-50/80 px-2 py-0.5 rounded-full border border-indigo-200">
+                    <span>Error medio: {learnerProfile.predictionAccuracy.meanAbsoluteErrorMinutes} min</span>
+                    <span>· {learnerProfile.predictionAccuracy.totalEvaluatedSessions} sesiones · {learnerProfile.predictionAccuracy.sampleConfidence}</span>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* Progress Bar */}
+          <div className="mt-3 pt-2.5 border-t border-slate-100">
+            <div role="progressbar" aria-label="Tareas de la semana completadas" aria-valuemin={0} aria-valuemax={100} aria-valuenow={weekPlan.completionRatePct} className="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
+              <div
+                className="bg-emerald-600 h-full rounded-full transition-all duration-500"
+                style={{ width: `${Math.min(100, weekPlan.completionRatePct)}%` }}
+              />
+            </div>
+          </div>
+        </div>
+      </details>
+
       {/* 7. MODALS */}
+      {observedTask && <StudySessionDialog target={observedTask.target} onClose={() => setObservedTask(null)} onSave={async session => {
+        const recordedId = await addStudySession(session as any);
+        const task = observedTask.task;
+        let updated = tasks.map(item => item.id === task.id ? {
+          ...item, status: 'completed' as const, actualMinutes: session.durationMinutes + Number(session.cantoSeconds || 0) / 60,
+          completedAt: new Date().toISOString(), recordedDate: session.date,
+          sessionId: recordedId || `planner-${encodeURIComponent(task.id)}`, sessionLinkStatus: "linked" as const,
+        } : item);
+        if (task.activityType === 'estudio_nuevo') {
+          const nextHistory = [...recentSessions, { ...session, id: recordedId || `planner-${encodeURIComponent(task.id)}` } as Session];
+          const nextCanonicalMap = buildCanonicalTopicMap(allTopics, userProgress, nextHistory);
+          updated = [...updated, ...generateAutoRefrescos({ ...task, date: session.date }, topicMap.get(task.topicId), updated, settings, userProgress, nextHistory, { allTopics, canonicalMap: nextCanonicalMap })];
+        }
+        await persistTasks(updated);
+      }} />}
       {/* A. Task Editor Modal */}
       <TaskEditorModal
         isOpen={isTaskEditorOpen}
@@ -1518,12 +1146,22 @@ export const WeeklyPlannerView: React.FC<WeeklyPlannerViewProps> = ({
         onUpdateTopicProgress={updateTopicProgress}
       />
 
-      {/* B. Rebalance Confirm Modal (Regla: no modificar sin confirmación) */}
-      <RebalanceConfirmModal
-        isOpen={isRebalanceModalOpen}
-        onClose={() => setIsRebalanceModalOpen(false)}
-        proposal={currentProposal}
-        onConfirm={handleConfirmRebalance}
+      <CantePlanProposalModal
+        isOpen={isCanteProposalOpen}
+        suspended={isSettingsModalOpen}
+        onClose={() => setIsCanteProposalOpen(false)}
+        topics={allTopics}
+        existingTasks={tasks}
+        scheduleLunes={scheduleLunes}
+        scheduleJueves={scheduleJueves}
+        settings={settings}
+        basisVersion={canteProposalBasis}
+        initialExceptions={savedRefreshExceptions}
+        draftGoal={draftCanteGoal}
+        explicitEmptyDates={explicitEmptyDates}
+        onGenerate={handleGenerateCanteProposal}
+        onConfirm={handleConfirmCanteProposal}
+        onOpenSettings={() => setIsSettingsModalOpen(true)}
       />
 
       {/* C. Ebbinghaus Recommendations Modal */}

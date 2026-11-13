@@ -1,11 +1,14 @@
-import React, { useMemo } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { Award, Clock, ArrowRight, Brain, Target, Calendar, CheckCircle2 } from "lucide-react";
 import { useFirebase } from "../../lib/FirebaseProvider";
-import { initialTopics } from "../../data/initialData";
+import type { Topic } from "../../types";
+import { getUpcomingCanteAssignments, type CantePlannerState } from "../../lib/canteCommitments";
+import { doc, onSnapshot } from "firebase/firestore";
+import { db } from "../../lib/firebase";
 import { getDefaultPreparadorDay, getPreparadorScheduleStatus, evaluateTopicPreparation, TopicPreparationEvaluation } from "../../lib/preparationScore";
 import { getLatestCantoForTopic, sessionMatchesTopic } from "../../lib/cantoUtils";
 import { playSound } from "../../lib/sound";
-import { cn, safeParseDate } from "../../lib/utils";
+import { cn, safeParseDate, getLocalDateString } from "../../lib/utils";
 
 interface DashboardPreparadorExecutiveCardProps {
   onNavigateToPreparador?: () => void;
@@ -14,57 +17,54 @@ interface DashboardPreparadorExecutiveCardProps {
 export const DashboardPreparadorExecutiveCard: React.FC<DashboardPreparadorExecutiveCardProps> = ({
   onNavigateToPreparador,
 }) => {
-  const { userProgress, recentSessions } = useFirebase();
+  const { user, topics, topicState, userProgress, recentSessions } = useFirebase();
 
   // Active cante day (Lunes or Jueves)
   const defaultDay = useMemo(() => getDefaultPreparadorDay(), []);
   const scheduleStatus = useMemo(() => getPreparadorScheduleStatus(), []);
 
-  // Read schedule from local storage
-  const schedule = useMemo(() => {
-    try {
-      const saved = localStorage.getItem("wellsprep_preparador_schedule_v2");
-      if (saved) return JSON.parse(saved);
-    } catch {}
-    return {
-      lunes: ["constitucional-1", "constitucional-2"],
-      jueves: ["constitucional-3", "constitucional-4", "constitucional-5"],
-    };
-  }, []);
-
-  const assignedIds = defaultDay === "historial" ? [] : (schedule[defaultDay] || []);
-
-  const topicMap = useMemo(() => {
-    const map = new Map<string, any>();
-    initialTopics.forEach((t) => map.set(t.id, t));
-    Object.entries(userProgress || {}).forEach(([id, data]: [string, any]) => {
-      if (data.isCustom && !data.isDeleted) {
-        map.set(id, {
-          id,
-          subjectId: data.subjectId || "custom",
-          number: data.number || 999,
-          title: data.customTitle || "Tema Personalizado",
-          difficulty: data.difficulty || 5,
-        });
-      }
+  // Both views read actual dated commitments; recurring preferences only prefill a proposal.
+  const [recurring, setRecurring] = useState<{ lunes: string[]; jueves: string[] }>({ lunes: [], jueves: [] });
+  const [plannerState, setPlannerState] = useState<CantePlannerState | null>(null);
+  const [scheduleLoaded, setScheduleLoaded] = useState(false);
+  useEffect(() => {
+    let active = true;
+    setRecurring({ lunes: [], jueves: [] }); setPlannerState(null); setScheduleLoaded(false);
+    if (!user) return;
+    const stopRecurring = onSnapshot(doc(db, `users/${user.uid}/settings/preparador`), snapshot => {
+      if (!active) return;
+      const data = snapshot.exists() ? snapshot.data() : {};
+      setRecurring({ lunes: Array.isArray(data.lunes) ? data.lunes : [], jueves: Array.isArray(data.jueves) ? data.jueves : [] });
     });
-    return map;
-  }, [userProgress]);
+    const stopDated = onSnapshot(doc(db, `users/${user.uid}/settings/weeklyPlannerState`), snapshot => {
+      if (!active) return;
+      const data = snapshot.exists() ? snapshot.data() : {};
+      setPlannerState({ tasks: Array.isArray(data.tasks) ? data.tasks : [], cantePlanning: data.cantePlanning }); setScheduleLoaded(true);
+    }, () => { if (active) setScheduleLoaded(false); });
+    return () => { active = false; stopRecurring(); stopDated(); };
+  }, [user?.uid]);
+  const assignments = useMemo(() => getUpcomingCanteAssignments(plannerState, recurring, getLocalDateString()), [plannerState, recurring]);
+  const canteDay = defaultDay === "historial" ? (assignments.lunes.date < assignments.jueves.date ? "lunes" : "jueves") : defaultDay;
+  const assignment = assignments[canteDay];
+  const assignedIds = assignment.topicIds;
+
+  const topicMap = useMemo(() => new Map(topics.map(topic => [topic.id, topic])), [topics]);
 
   const assignedTopics = useMemo(() => {
     return assignedIds
       .map((id: string) => topicMap.get(id))
-      .filter((t: any): t is typeof initialTopics[0] => Boolean(t));
+      .filter((t: any): t is Topic => Boolean(t));
   }, [assignedIds, topicMap]);
 
   // Compute readiness
   const evaluationList = useMemo(() => {
-    return assignedTopics.map((topic: typeof initialTopics[0]) => {
+    return assignedTopics.map((topic: Topic) => {
       const prog = userProgress[topic.id];
-      const sessions = (recentSessions || []).filter((s) => sessionMatchesTopic(s, topic));
+      const canonical = topicState.get(topic.id);
+      const sessions = canonical?.sessions || [];
       const cantoData = getLatestCantoForTopic(recentSessions || [], topic, prog);
       
-      const lastSessionDate = sessions[0]?.date || prog?.lastReviewDate || prog?.firstStudyDate;
+      const lastSessionDate = canonical?.lastContactDate;
       const daysSinceTouch = lastSessionDate 
         ? Math.max(0, Math.floor((new Date().getTime() - safeParseDate(lastSessionDate).getTime()) / (1000 * 3600 * 24)))
         : null;
@@ -73,6 +73,7 @@ export const DashboardPreparadorExecutiveCard: React.FC<DashboardPreparadorExecu
         : null;
 
       return evaluateTopicPreparation({
+        canonicalTopic: topicState.get(topic.id),
         topicNumber: topic.number,
         topicTitle: topic.title,
         totalCantoSecs: cantoData.hasCanto ? cantoData.totalSecs : null,
@@ -81,48 +82,52 @@ export const DashboardPreparadorExecutiveCard: React.FC<DashboardPreparadorExecu
         daysSinceReview: daysSinceTouch,
         daysSinceTouch,
         vueltas: prog?.vueltas || 0,
-        reviewsCount: sessions.length,
+        reviewsCount: canonical?.reviewCount || 0,
         difficulty: topic.difficulty || 5,
       });
     });
-  }, [assignedTopics, userProgress, recentSessions]);
+  }, [assignedTopics, topicState, userProgress, recentSessions]);
 
   const stats = useMemo(() => {
     if (evaluationList.length === 0) {
       return {
         total: 0,
         avgScore: null,
-        listos: 0,
-        ajuste: 0,
-        riesgo: 0,
-        totalMinutes: 0,
+        scoreCount: 0,
+        passing: 0,
+        failing: 0,
+        missing: 0,
+        durationCount: 0,
+        totalMinutes: null,
         avgRetention: null,
       };
     }
 
     const total = evaluationList.length;
-    const sumScore = evaluationList.reduce((acc, ev) => acc + ev.projectedScore, 0);
-    const avgScore = Math.round((sumScore / total) * 10) / 10;
-    const listos = evaluationList.filter((ev) => ev.isReadyForTribunal).length;
-    const ajuste = evaluationList.filter((ev) => ev.overallScore >= 5.0 && !ev.isReadyForTribunal).length;
-    const riesgo = evaluationList.filter((ev) => ev.overallScore < 5.0).length;
-    const totalMinutes = Math.round(evaluationList.reduce((acc, ev) => acc + (ev.totalCantoSecs || 750), 0) / 60);
-
-    const retList = evaluationList.map((ev) => ev.retentionPct).filter((r) => r !== null) as number[];
-    const avgRetention = retList.length > 0 ? Math.round(retList.reduce((a, b) => a + b, 0) / retList.length) : null;
+    const knownScores = evaluationList.filter(ev => ev.scoreAvailable);
+    const avgScore = knownScores.length ? Math.round(knownScores.reduce((sum, ev) => sum + ev.overallScore, 0) / knownScores.length * 10) / 10 : null;
+    const passing = knownScores.filter(ev => ev.overallScore >= 5).length;
+    const failing = knownScores.filter(ev => ev.overallScore < 5).length;
+    const missing = total - knownScores.length;
+    const durations = evaluationList.filter(ev => ev.hasCanto);
+    const totalMinutes = durations.length ? Math.round(durations.reduce((sum, ev) => sum + ev.totalCantoSecs, 0) / 60) : null;
+    const retList = evaluationList.filter(ev => ev.retentionAvailable).map(ev => ev.retentionPct);
+    const avgRetention = retList.length ? Math.round(retList.reduce((sum, retention) => sum + retention, 0) / retList.length) : null;
 
     return {
       total,
       avgScore,
-      listos,
-      ajuste,
-      riesgo,
+      scoreCount: knownScores.length,
+      passing,
+      failing,
+      missing,
+      durationCount: durations.length,
       totalMinutes,
       avgRetention,
     };
   }, [evaluationList]);
 
-  const dayLabel = defaultDay === "lunes" ? "Lunes" : "Jueves";
+  const dayLabel = `${canteDay === "lunes" ? "Lunes" : "Jueves"} · ${assignment.date}`;
 
   return (
     <div className="bg-white/95 backdrop-blur-xl rounded-3xl p-5 sm:p-6 border border-slate-200/80 shadow-xs flex flex-col justify-between relative overflow-hidden group hover:border-slate-300 transition-all">
@@ -163,10 +168,10 @@ export const DashboardPreparadorExecutiveCard: React.FC<DashboardPreparadorExecu
 
       {/* Main KPI Strip */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 mb-4">
-        {/* 1. Nota Proyectada */}
+        {/* 1. Última nota media */}
         <div className="p-3 bg-slate-50/90 rounded-2xl border border-slate-100">
           <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block truncate">
-            Nota Proyectada
+            Última nota media
           </span>
           <div className="flex items-baseline gap-1 mt-0.5">
             <span
@@ -189,18 +194,19 @@ export const DashboardPreparadorExecutiveCard: React.FC<DashboardPreparadorExecu
           </div>
         </div>
 
-        {/* 2. Estado Tribunal */}
+        {/* 2. Notas registradas */}
         <div className="p-3 bg-slate-50/90 rounded-2xl border border-slate-100">
           <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block truncate">
-            Estado Tribunal
+            Notas registradas
           </span>
           <div className="flex items-center gap-1.5 mt-1 text-xs font-black tabular-nums">
             <span className="text-emerald-700 font-bold bg-emerald-100/70 px-1.5 py-0.5 rounded-md">
-              {stats.listos} Listos
+              {stats.passing} ≥5
             </span>
             <span className="text-amber-700 font-bold bg-amber-100/70 px-1.5 py-0.5 rounded-md">
-              {stats.ajuste} Ajuste
+              {stats.failing} &lt;5
             </span>
+            <span className="text-slate-500 font-medium">{stats.missing} sin nota</span>
           </div>
         </div>
 
@@ -211,22 +217,22 @@ export const DashboardPreparadorExecutiveCard: React.FC<DashboardPreparadorExecu
           </span>
           <div className="flex items-baseline gap-1 mt-0.5">
             <span className="text-xl sm:text-2xl font-black text-slate-900 tabular-nums">
-              {stats.avgRetention !== null ? `${stats.avgRetention}%` : "—"}
+              {stats.avgRetention !== null ? `≈ ${stats.avgRetention}%` : "—"}
             </span>
-            <span className="text-[10px] font-bold text-slate-400 ml-1">retención</span>
+            <span className="text-[10px] font-bold text-slate-400 ml-1">estimación</span>
           </div>
         </div>
 
         {/* 4. Duración Estimada */}
         <div className="p-3 bg-slate-50/90 rounded-2xl border border-slate-100">
           <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block truncate">
-            Tiempo Cante
+            Últimos tiempos
           </span>
           <div className="flex items-baseline gap-1 mt-0.5">
             <span className="text-xl sm:text-2xl font-black text-slate-900 tabular-nums">
-              ~{stats.totalMinutes}m
+              {stats.totalMinutes === null ? "—" : `${stats.totalMinutes}m`}
             </span>
-            <span className="text-[10px] font-bold text-slate-400 ml-1">({stats.total} temas)</span>
+            <span className="text-[10px] font-bold text-slate-400 ml-1">({stats.durationCount}/{stats.total} temas)</span>
           </div>
         </div>
       </div>
@@ -239,7 +245,7 @@ export const DashboardPreparadorExecutiveCard: React.FC<DashboardPreparadorExecu
         </div>
 
         {assignedTopics.length === 0 ? (
-          <p className="text-xs text-slate-400 italic py-1">No hay temas asignados para el {dayLabel}.</p>
+          <p className="text-xs text-slate-400 italic py-1">{scheduleLoaded ? `No hay temas asignados para el ${dayLabel}.` : "Asignación de temas pendiente de cargar."}</p>
         ) : (
           <div className="flex flex-wrap gap-1.5">
             {assignedTopics.slice(0, 8).map((t) => (

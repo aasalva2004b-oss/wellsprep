@@ -1,5 +1,7 @@
+import { useLocalDay } from '../hooks/useLocalDay';
 import { getLocalDateString, safeParseDate } from './utils';
 import { playSound } from './sound';
+import { authenticatedFetch } from './authenticatedApi';
 import {
   createContext,
   useContext,
@@ -7,6 +9,7 @@ import {
   useState,
   useCallback,
   useRef,
+  useMemo,
   ReactNode,
 } from "react";
 import { onAuthStateChanged, User } from "firebase/auth";
@@ -24,25 +27,39 @@ import {
   where,
   getDocs,
   writeBatch,
+  Timestamp,
+  runTransaction,
 } from "firebase/firestore";
-import { auth, db, defaultDb, handleFirestoreError, OperationType } from "./firebase";
+import { auth, db, defaultDb, handleFirestoreError, OperationType, isFirebaseEmulator } from "./firebase";
 import { toast } from "sonner";
 import { calculateNextSRSState } from "./srs";
 import Papa from "papaparse";
 import { Topic } from "../types";
 import { TopicProgressData } from "./prediction";
 import { WebhookSyncRecord, WebhookResolvedTopic } from "./webhookTypes";
-import { isCantoSession, getCantoDuration, sessionMatchesTopic, extractSessionSubjectId, extractSubjectFromTopicId } from "./cantoUtils";
-import { 
-  resolveAeroFocusTopic, 
-  extractMinutesFromAeroItem, 
-  extractTopicNumber, 
-  normalizeCategoryToSubjectId,
-  resolveCanonicalJudicaturaId,
-  parseAeroFocusTopicIdPrefix
-} from "./topicResolver";
+import { isCantoSession, getCantoDuration, sessionMatchesTopic } from "./cantoUtils";
+import { resolveAeroFocusTopic, extractMinutesFromAeroItem, extractTopicNumber, normalizeCategoryToSubjectId, normalizeKnownTopicId } from "./topicResolver";
 import { parseAeroFocusInput } from "./aeroFocusParser";
 import { initialTopics } from "../data/initialData";
+import { parseBackup, rehydrateBackupTimestamps } from './backup';
+import { extractSessionTelemetry } from './sessionTelemetry';
+import { buildTopicData, type TopicDataSnapshot } from './topicData';
+import { normalizeSessionRecord, stableSessionId } from './sessionCommands';
+import { estimatePersonalizedDuration, type EstimatedActivity, type EstimationWork } from './personalizedEstimator';
+import { capturePrediction } from './predictionSnapshot';
+import type { PredictionSnapshot } from './observedSession';
+import { getSessionCategory, sessionDurationMinutes } from './canonicalTopicService';
+import { deriveInitialStudyCoverage } from './topicCoverage';
+import { captureRetentionPrediction, estimateRetention, type RetentionConfig } from './retentionModel';
+
+/** Missing subject evidence stays unresolved; a bare number never implies Constitucional. */
+function resolveStoredTopicId(value: unknown, subject?: unknown): string {
+  return normalizeKnownTopicId(value, subject);
+}
+
+async function rejectHeuristicMaintenance(): Promise<never> {
+  throw new Error('Mantenimiento heurístico no disponible; los datos se conservan.');
+}
 
 export function cleanForFirestore<T>(data: T): T {
   if (data === null || data === undefined) {
@@ -98,49 +115,6 @@ export function cleanForFirestore<T>(data: T): T {
   return cleanObj as T;
 }
 
-export function normalizeCanonicalTopicId(rawId: any): string {
-  if (rawId === null || rawId === undefined) return "";
-  const str = String(rawId).trim().toLowerCase();
-
-  // 1. If it already has an official subject prefix, preserve it exactly
-  if (
-    str.startsWith("civil-") ||
-    str.startsWith("penal-") ||
-    str.startsWith("procesal-civil-") ||
-    str.startsWith("procesal-penal-") ||
-    str.startsWith("mercantil-") ||
-    str.startsWith("administrativo-laboral-") ||
-    str.startsWith("constitucional-")
-  ) {
-    return str;
-  }
-
-  // 2. Normalize common abbreviations to canonical subject IDs
-  if (str.startsWith("civ-") || str.startsWith("civ_") || str.startsWith("civil_")) {
-    return `civil-${str.replace(/^(civil|civ)[-_]/, "")}`;
-  }
-  if (str.startsWith("pen-") || str.startsWith("pen_") || str.startsWith("penal_")) {
-    return `penal-${str.replace(/^(penal|pen)[-_]/, "")}`;
-  }
-  if (str.startsWith("const-") || str.startsWith("const_") || str.startsWith("constitucion-") || str.startsWith("constitucional_")) {
-    return `constitucional-${str.replace(/^(constitucional|constitucion|const)[-_]/, "")}`;
-  }
-  if (str.startsWith("proc-civ-") || str.startsWith("pciv-") || str.startsWith("proc_civ_")) {
-    return `procesal-civil-${str.replace(/^(proc[-_]civ|pciv)[-_]/, "")}`;
-  }
-  if (str.startsWith("proc-pen-") || str.startsWith("ppen-") || str.startsWith("proc_pen_")) {
-    return `procesal-penal-${str.replace(/^(proc[-_]pen|ppen)[-_]/, "")}`;
-  }
-  if (str.startsWith("merc-") || str.startsWith("merc_") || str.startsWith("mercantil_")) {
-    return `mercantil-${str.replace(/^(mercantil|merc)[-_]/, "")}`;
-  }
-  if (str.startsWith("admin-lab-") || str.startsWith("admin_lab_") || str.startsWith("administrativo_laboral_")) {
-    return `administrativo-laboral-${str.replace(/^(administrativo[-_]laboral|admin[-_]lab)[-_]/, "")}`;
-  }
-
-  return str;
-}
-
 export interface UserSettingsData {
   userId: string;
   scheduleStr: string;
@@ -149,6 +123,7 @@ export interface UserSettingsData {
   activeSubjects?: string[];
   defaultSubject?: string;
   webhookToken?: string;
+  retention?: Partial<RetentionConfig>;
   updatedAt?: string;
 }
 
@@ -156,6 +131,11 @@ interface FirebaseContextType {
   user: User | null;
   loading: boolean;
   userProgress: Record<string, TopicProgressData>;
+  rawTopicProgress: Record<string, TopicProgressData>;
+  topics: Topic[];
+  topicState: TopicDataSnapshot['topicState'];
+  estimateDuration: (topicId: string, activity: EstimatedActivity, work?: EstimationWork) => PredictionSnapshot;
+  estimateRetentionForTopic: (topicId: string) => Record<string, any>;
   recentSessions: any[];
   userSettings: UserSettingsData | null;
   webhookToken: string;
@@ -227,7 +207,6 @@ interface FirebaseContextType {
   purgeAllAeroFocusData: () => Promise<void>;
   purgePhantomTema5Cante: () => Promise<void>;
   migratePenalSessionsToConstitucional5: (silent?: boolean) => Promise<{ migratedCount: number }>;
-  migrateAndPurgeNonConstitucionalData: (silent?: boolean) => Promise<{ migratedCount: number; purgedCount: number }>;
   deduplicateUserSessions: (silent?: boolean) => Promise<{ deletedCount: number; affectedTopics: string[] }>;
   recoverHistoricalUserData: (silent?: boolean) => Promise<any>;
   quarantinedEvents: WebhookSyncRecord[];
@@ -253,16 +232,34 @@ const FirebaseContext = createContext<FirebaseContextType | undefined>(
 export function FirebaseProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
-  const [userProgress, setUserProgress] = useState<
+  const [rawTopicProgress, setUserProgress] = useState<
     Record<string, TopicProgressData>
   >({});
   const [recentSessions, setRecentSessions] = useState<any[]>([]);
-  const [userSettings, setUserSettings] = useState<UserSettingsData | null>(
-    null,
-  );
+  const [userSettings, setUserSettings] = useState<UserSettingsData | null>(null);
+  const localDay = useLocalDay();
+  // Write paths see stored metadata; all UI reads receive the single derived domain snapshot.
+  const userProgress = rawTopicProgress;
+  const topicData = useMemo(() => buildTopicData(initialTopics, rawTopicProgress, recentSessions, userSettings?.retention), [rawTopicProgress, recentSessions, userSettings?.retention, localDay]);
+  const estimateDuration = (topicId: string, activity: EstimatedActivity, work?: EstimationWork) => {
+    const topic = topicData.topicState.get(topicId);
+    if (!topic) throw new Error('El tema no está definido en la fuente de datos compartida.');
+    const asOf = new Date();
+    const estimate = estimatePersonalizedDuration({ topic, activity, work, history: recentSessions, topics: topicData.topicState, asOf });
+    return capturePrediction(estimate, topic, activity, asOf, work);
+  };
+  const estimateRetentionForTopic = (topicId: string) => {
+    const topic = topicData.topicState.get(topicId);
+    if (!topic) throw new Error('El tema no está definido en la fuente de datos compartida.');
+    const asOf = new Date();
+    const estimate = topic.retentionEstimate?.generatedAt.slice(0, 10) === asOf.toISOString().slice(0, 10)
+      ? topic.retentionEstimate : estimateRetention({ topic, history: recentSessions, topics: topicData.topicState, asOf, config: userSettings?.retention });
+    return captureRetentionPrediction(estimate);
+  };
   const [isSyncingWebhooks, setIsSyncingWebhooks] = useState(false);
   const inFlightSessionLocks = useRef<Set<string>>(new Set());
   const deletedSessionIds = useRef<Set<string>>(new Set());
+  const activeUserId = useRef<string | null>(null);
   const [aerofocusBetaEnabled, setAerofocusBetaEnabledState] = useState<boolean>(() => {
     return localStorage.getItem("aerofocus_beta_enabled") !== "false";
   });
@@ -279,19 +276,35 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (u) => {
-      setUser(u);
-      if (!u) {
+      const nextUserId = u?.uid ?? null;
+      if (activeUserId.current !== nextUserId) {
+        activeUserId.current = nextUserId;
         setUserProgress({});
         setRecentSessions([]);
         setUserSettings(null);
-        setLoading(false);
+        setQuarantinedEvents([]);
+        setIsLoadingQuarantine(false);
+        setIsSyncingWebhooks(false);
+        inFlightSessionLocks.current.clear();
+        deletedSessionIds.current.clear();
+        setLoading(!!u);
       }
+      if (!u) setLoading(false);
+      setUser(u);
     });
     return () => unsubscribe();
   }, []);
 
   useEffect(() => {
     if (!user) return;
+    const ownerId = user.uid;
+    let active = true;
+    let progressLoaded = false;
+    let sessionsLoaded = false;
+    const isCurrentUser = () => active && activeUserId.current === ownerId;
+    const finishLoading = () => {
+      if (isCurrentUser() && progressLoaded && sessionsLoaded) setLoading(false);
+    };
 
     // Database-scoped real-time maps to cleanly handle deletions across namedDb and defaultDb
     const dbSessions: {
@@ -311,55 +324,29 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
     };
 
     const normalizeSession = (id: string, data: any, originDb: string) => {
-      const canonicalTopicId = normalizeCanonicalTopicId(data.topicId);
-      const sSubject = data.subjectId || (canonicalTopicId.includes("-") ? canonicalTopicId.split("-")[0] : "constitucional");
-
       return {
-        id,
         ...data,
-        topicId: canonicalTopicId,
-        subjectId: sSubject,
-        originalTopicId: data.topicId,
+        id,
+        topicId: resolveStoredTopicId(data.topicId, data.subjectId),
+        originalTopicId: data.originalTopicId ?? data.topicId,
         originDb,
       };
     };
 
     const handleSessionsSnapshot = (snapshot: any, originDb: "namedDb" | "defaultDb") => {
+      if (!isCurrentUser()) return;
       const currentMap = new Map<string, any>();
 
       snapshot.forEach((docSnap: any) => {
         // If explicitly deleted by user, purge and do not process
         if (deletedSessionIds.current.has(docSnap.id)) {
-          deleteDoc(doc(db, `users/${user.uid}/sessions`, docSnap.id)).catch(() => {});
-          if (defaultDb) {
-            deleteDoc(doc(defaultDb, `users/${user.uid}/sessions`, docSnap.id)).catch(() => {});
-          }
           return;
         }
 
         const s = normalizeSession(docSnap.id, docSnap.data(), originDb);
 
-        // Surgical shield: Reject phantom cante from AeroFocus or 8.5 grade/30s
-        const isPhantomAero =
-          (s.source === "aerofocus" || s.source === "aerofocus_pro") &&
-          (s.type === "canto" || s.modality === "canto" || Number(s.cantoGrade) === 8.5 || Number(s.cantoSeconds) === 30 || s.flightId === "cierre_22h");
-        const isPhantomDirect =
-          (s.topicId === "constitucional-5" || s.topicId === "5") &&
-          Number(s.cantoGrade) === 8.5 && Number(s.cantoSeconds) === 30;
-
-        // Auto-prune phantom 1-minute AeroFocus sessions (pings/distraction artifacts)
-        const isPhantomOneMin =
-          (s.source === "aerofocus" || s.source === "aerofocus_pro" || s.source === "aerofocus_approved") &&
-          (Number(s.durationMinutes || s.durationReal || 0) <= 1) &&
-          !s.cantoGrade && Number(s.cantoGrade || 0) === 0;
-
-        if (isPhantomAero || isPhantomDirect || isPhantomOneMin) {
-          deleteDoc(doc(db, `users/${user.uid}/sessions`, docSnap.id)).catch(() => {});
-          if (defaultDb) {
-            deleteDoc(doc(defaultDb, `users/${user.uid}/sessions`, docSnap.id)).catch(() => {});
-          }
-          return;
-        }
+        // A matching duration/grade/source is not proof that a historical session is false.
+        // Snapshot reads must preserve every record; maintenance is never performed here.
 
         currentMap.set(docSnap.id, s);
       });
@@ -370,12 +357,13 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
       // Merge: defaultDb first, namedDb takes priority
       const mergedSessions = new Map<string, any>();
       dbSessions.defaultDb.forEach((s, id) => {
-        if (!deletedSessionIds.current.has(id)) {
+        if (!deletedSessionIds.current.has(id) && !s.mergedIntoSessionId) {
           mergedSessions.set(id, s);
         }
       });
       dbSessions.namedDb.forEach((s, id) => {
-        if (!deletedSessionIds.current.has(id)) {
+        if (s.mergedIntoSessionId) mergedSessions.delete(id);
+        else if (!deletedSessionIds.current.has(id)) {
           mergedSessions.set(id, s);
         }
       });
@@ -391,39 +379,25 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
       });
 
       setRecentSessions(sList);
-      setLoading(false);
+      if (originDb === 'namedDb') sessionsLoaded = true;
+      finishLoading();
     };
 
     const handleProgressSnapshot = (snapshot: any, originDb: "namedDb" | "defaultDb") => {
+      if (!isCurrentUser()) return;
       const currentMap = new Map<string, TopicProgressData>();
 
       snapshot.forEach((docSnap: any) => {
         const rawData = { ...docSnap.data() };
-        const tId = normalizeCanonicalTopicId(docSnap.id);
+        const tId = resolveStoredTopicId(docSnap.id, rawData.subjectId);
 
         // Surgical shield: Prune phantom cante fields from progress document
-        if (Number(rawData.ultimoCantoNota) === 8.5 && Number(rawData.ultimoCantoSegundos) === 30) {
-          delete rawData.ultimoCantoNota;
-          delete rawData.ultimoCantoMinutos;
-          delete rawData.ultimoCantoSegundos;
-          delete rawData.ultimoCantoFecha;
-          delete rawData.mejorTiempoCantoMinutos;
-          delete rawData.mejorTiempoCantoSegundos;
-          updateDoc(doc(db, `users/${user.uid}/progress`, tId), {
-            ultimoCantoNota: deleteField(),
-            ultimoCantoMinutos: deleteField(),
-            ultimoCantoSegundos: deleteField(),
-            ultimoCantoFecha: deleteField(),
-            mejorTiempoCantoMinutos: deleteField(),
-            mejorTiempoCantoSegundos: deleteField(),
-            updatedAt: serverTimestamp(),
-          }).catch(() => {});
-        }
+        // Historical fields are data, not a trigger for deleting documents or fields.
 
-        currentMap.set(tId, {
-          ...rawData,
-          topicId: tId,
-        });
+        // A direct master document wins over its alias independent of snapshot order.
+        if (docSnap.id === tId || !currentMap.has(tId)) {
+          currentMap.set(tId, { ...rawData, topicId: tId, originalTopicId: rawData.originalTopicId ?? docSnap.id });
+        }
       });
 
       dbProgress[originDb] = currentMap;
@@ -437,6 +411,8 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
         pObj[k] = v;
       });
       setUserProgress(pObj);
+      if (originDb === 'namedDb') progressLoaded = true;
+      finishLoading();
     };
 
     // 1. Subscribe to named DB
@@ -449,7 +425,7 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
     // 2. Subscribe to default DB (catches data written by another version with the same Google account)
     let unsubProgress2 = () => {};
     let unsubSessions2 = () => {};
-    if (defaultDb) {
+    if (defaultDb && defaultDb !== db) {
       try {
         const progressRefDef = collection(defaultDb, `users/${user.uid}/progress`);
         unsubProgress2 = onSnapshot(progressRefDef, (snap) => handleProgressSnapshot(snap, "defaultDb"), () => {});
@@ -464,469 +440,73 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
     // 3. Subscribe to settings
     const settingsRef = doc(db, `users/${user.uid}/settings/general`);
     const unsubSettings = onSnapshot(settingsRef, (docSnap) => {
-      if (docSnap.exists()) {
-        setUserSettings(docSnap.data() as UserSettingsData);
-      }
+      if (!isCurrentUser()) return;
+      setUserSettings(docSnap.exists() ? docSnap.data() as UserSettingsData : null);
     });
 
     return () => {
+      active = false;
       unsubProgress1();
       unsubSessions1();
       unsubProgress2();
       unsubSessions2();
       unsubSettings();
     };
-  }, [user]);
+  }, [user?.uid]);
 
-  const addStudySession = async (
-    arg1: any,
-    arg2?: number,
-    arg3?: number,
-    arg4?: "estudio_inicial" | "repaso" | "refresco" | "canto" | "simulacro",
-    arg5?: string,
-    arg6?: any
-  ) => {
-    if (!user) {
-      toast.error("Debes iniciar sesión para registrar una sesión.");
-      return;
+  const addStudySession = async (arg1: any, arg2?: number, arg3?: number, arg4?: any, arg5?: string, arg6?: any) => {
+    if (!user) throw new Error('Debes iniciar sesión para registrar una sesión.');
+    const input = typeof arg1 === 'object' && arg1 !== null ? { ...arg1 } : {
+      ...arg6, topicId: arg1, durationMinutes: arg2, difficulty: arg3, type: arg4, date: arg5,
+    };
+    if (!input.retentionPrediction && topicData.topicState.has(input.topicId)) {
+      // Fallback capture precedes this write, but may follow entry of its outcome.
+      // generatedAt prevents backdated observations being scored as historical forecasts.
+      input.retentionPrediction = { ...estimateRetentionForTopic(input.topicId), captureStage: 'before_persistence' };
     }
-
-    let topicId: string;
-    let durationMinutes: number;
-    let difficulty: number;
-    let type: "estudio_inicial" | "repaso" | "refresco" | "canto" | "simulacro";
-    let providedDate: string | undefined;
-    let extraData: any;
-
-    if (arg1 && typeof arg1 === "object") {
-      topicId = String(arg1.topicId || "").trim();
-      durationMinutes = Number(arg1.durationMinutes || arg1.duration || 0);
-      difficulty = Number(arg1.difficulty || 5);
-      type = (arg1.type || "repaso") as "estudio_inicial" | "repaso" | "refresco" | "canto" | "simulacro";
-      providedDate = arg1.date;
-      extraData = arg1;
-    } else {
-      topicId = String(arg1 || "").trim();
-      durationMinutes = Number(arg2 || 0);
-      difficulty = Number(arg3 || 5);
-      type = (arg4 || "repaso") as "estudio_inicial" | "repaso" | "refresco" | "canto" | "simulacro";
-      providedDate = arg5;
-      extraData = arg6;
-    }
-
-    if (!topicId) {
-      toast.error("Error: ID de tema no válido.");
-      return;
-    }
-
+    const record = normalizeSessionRecord({ ...input, date: input.date || getLocalDateString() }, user.uid);
+    const generated = doc(collection(db, `users/${user.uid}/sessions`));
+    const id = stableSessionId(record, generated.id);
+    const ref = doc(db, `users/${user.uid}/sessions`, id);
+    const lockId = `${user.uid}:${id}`;
+    if (inFlightSessionLocks.current.has(lockId)) throw new Error('Esta sesión ya se está guardando.');
+    inFlightSessionLocks.current.add(lockId);
     try {
-      const cleanTopicId = normalizeCanonicalTopicId(topicId.trim());
-
-      const today = (providedDate && typeof providedDate === "string" && providedDate.trim()) 
-        ? providedDate.trim() 
-        : getLocalDateString();
-      const durMinutes = Math.max(0, Number(durationMinutes) || 0);
-      const safeDiff = Math.min(10, Math.max(1, Math.round(Number(difficulty) || 5)));
-      const extraSecs = Number(extraData?.cantoSeconds || extraData?.seconds || 0);
-      const extraGrade = extraData?.cantoGrade ?? extraData?.grade;
-
-      // ANTI-DUPLICATE GUARD 1: Bloqueo concurrente inmediato (doble click / re-envío en < 6 segundos)
-      const lockKey = `${cleanTopicId}_${today}_${type}_${durMinutes}_${extraSecs}_${extraGrade !== undefined ? extraGrade : "nograde"}`;
-      if (inFlightSessionLocks.current.has(lockKey)) {
-        console.warn(`[Anti-Duplicate] Petición duplicada bloqueada en vuelo:`, lockKey);
-        return;
-      }
-      inFlightSessionLocks.current.add(lockKey);
-      setTimeout(() => {
-        inFlightSessionLocks.current.delete(lockKey);
-      }, 6000);
-
-      // ANTI-DUPLICATE GUARD 2: Comprobar si ya existe una sesión idéntica registrada recientemente en la misma fecha
-      const isRecentDuplicate = (recentSessions || []).some((s) => {
-        const sTopic = String(s.topicId || "").toLowerCase().trim();
-        const sameTopic = sTopic === cleanTopicId;
-        const sameDate = s.date === today;
-        const sameType = (s.type || s.modality) === type;
-        const sameDurMin = Math.abs(Number(s.durationMinutes || s.duration || 0) - durMinutes) === 0;
-        const sameDurSec = Math.abs(Number(s.cantoSeconds || s.seconds || 0) - extraSecs) <= 1;
-        const sGrade = s.cantoGrade ?? s.grade;
-        const sameGrade = (sGrade === undefined && extraGrade === undefined) || sGrade === extraGrade;
-
-        if (sameTopic && sameDate && sameType && sameDurMin && sameDurSec && sameGrade) {
-          const sTime = s.createdAt?.toMillis
-            ? s.createdAt.toMillis()
-            : typeof s.createdAt === "number"
-            ? s.createdAt
-            : safeParseDate(s.createdAt || s.date).getTime();
-          // Si fue creado en los últimos 2 minutos
-          if (Date.now() - sTime < 120000) {
-            return true;
-          }
-        }
-        return false;
+      // No cached hours/vueltas are written. One transactional fact drives every projection.
+      await runTransaction(db, async transaction => {
+        const existing = await transaction.get(ref);
+        if (existing.exists()) throw new Error('Esta tarea ya tiene una sesión registrada. Edita su sesión existente.');
+        transaction.set(ref, cleanForFirestore({ ...record, createdAt: serverTimestamp() }));
+        transaction.set(doc(db, `users/${user.uid}/progress`, record.topicId), {
+          userId: user.uid, topicId: record.topicId, historyVersion: 3,
+        }, { merge: true });
       });
-
-      if (isRecentDuplicate) {
-        console.warn(`[Anti-Duplicate] Sesión idéntica detectada recientemente en memoria. Inserción evitada para no duplicar datos.`);
-        toast.info("Este cante ya quedó registrado correctamente.");
-        return;
-      }
-
-      const sessionRef = doc(collection(db, `users/${user.uid}/sessions`));
-      
-      const sessionSubject = extractSubjectFromTopicId(cleanTopicId);
-      const sessionDataToSave = cleanForFirestore({
-        userId: user.uid,
-        topicId: cleanTopicId,
-        subjectId: sessionSubject,
-        date: today,
-        durationMinutes: durMinutes,
-        durationReal: durMinutes,
-        difficulty: safeDiff,
-        dificultadReal: safeDiff,
-        type,
-        createdAt: serverTimestamp(),
-        ...extraData
-      });
-      
-      await setDoc(sessionRef, sessionDataToSave);
-
-      const progressRef = doc(db, `users/${user.uid}/progress`, cleanTopicId);
-      const existing = userProgress[cleanTopicId] || {};
-      
-      let addVuelta = false;
-      if (extraData?.completesVuelta !== undefined) {
-        addVuelta = Boolean(extraData.completesVuelta);
-      } else if (type === "canto") {
-        addVuelta = (Number(existing.vueltas) || 0) === 0;
-      } else if (type === "repaso") {
-        addVuelta = true;
-      } else {
-        addVuelta = false;
-      }
-      
-      const currentVueltas = Number(existing.vueltas) || 0;
-      const newVueltas = Math.max(0, currentVueltas + (addVuelta ? 1 : 0));
-
-      // Safe date calculation using cloned timestamps
-      const todayDateObj = safeParseDate(today);
-      let nextReviewDateToSet = today;
-
-      if (type === "estudio_inicial" || type === "refresco") {
-        // Mañana toca el siguiente día de refresco
-        const tomorrow = new Date(todayDateObj.getTime());
-        tomorrow.setDate(tomorrow.getDate() + 1);
-        nextReviewDateToSet = getLocalDateString(tomorrow);
-      } else if (type === "canto" || type === "repaso") {
-        // En un mes aprox. (~30 días, modulado por dificultad entre 25 y 35 días)
-        const effectiveDiff = Math.min(10, Math.max(1, Number(extraData?.dificultadReal ?? safeDiff)));
-        let daysOffset = 30;
-        if (effectiveDiff >= 8) daysOffset = 25;
-        else if (effectiveDiff <= 3) daysOffset = 35;
-
-        const nextMonthDate = new Date(todayDateObj.getTime());
-        nextMonthDate.setDate(nextMonthDate.getDate() + daysOffset);
-        nextReviewDateToSet = getLocalDateString(nextMonthDate);
-      } else {
-        nextReviewDateToSet = existing.nextReviewDate || today;
-      }
-
-      let lastReviewDateToSet = existing.lastReviewDate || today;
-      if (type === "canto" || type === "repaso") {
-        lastReviewDateToSet = today;
-      }
-
-      const prevDiffSum = Number(existing.difficultySum) || Number(existing.difficulty) || 5;
-      const prevDiffCount = Number(existing.difficultyCount) || 1;
-      const newDiffSum = Math.round((prevDiffSum + safeDiff) * 10) / 10;
-      const newDiffCount = prevDiffCount + 1;
-      const avgDifficulty = Math.round((newDiffSum / newDiffCount) * 10) / 10;
-
-      // Best Canto Time calculation
-      let bestCantoMins = Number(existing.mejorTiempoCantoMinutos) || 0;
-      let bestCantoSecs = Number(existing.mejorTiempoCantoSegundos) || 0;
-      const extraCantoSecs = Number(extraData?.cantoSeconds) || 0;
-
-      if ((type === "canto" || type === "simulacro") && (durMinutes > 0 || extraCantoSecs > 0)) {
-        const totalNewSecs = Math.floor(durMinutes * 60) + extraCantoSecs;
-        const totalOldSecs = (bestCantoMins * 60) + bestCantoSecs;
-        
-        if (totalOldSecs === 0 || totalNewSecs < totalOldSecs) {
-          bestCantoMins = Math.floor(totalNewSecs / 60);
-          bestCantoSecs = totalNewSecs % 60;
-        }
-      }
-
-      const prevHours = Number(existing.studyTimeHours) || 0;
-      const addedHours = (Number(extraData?.durationReal) || durMinutes) / 60;
-      const totalHours = Math.round((prevHours + addedHours) * 100) / 100;
-
-      const baseData: any = cleanForFirestore({
-        userId: user.uid,
-        topicId: cleanTopicId,
-        updatedAt: serverTimestamp(),
-        vueltas: newVueltas,
-        lastReviewDate: lastReviewDateToSet,
-        nextReviewDate: nextReviewDateToSet,
-        difficulty: avgDifficulty,
-        difficultySum: newDiffSum,
-        difficultyCount: newDiffCount,
-        srsEasinessFactor: Number(existing.srsEasinessFactor) || 2.5,
-        srsInterval: type === "canto" || type === "repaso" ? 30 : 1,
-        srsRepetitions: newVueltas,
-        mejorTiempoCantoMinutos: bestCantoMins,
-        mejorTiempoCantoSegundos: bestCantoSecs,
-        studyTimeHours: totalHours
-      });
-
-      if ((type === "estudio_inicial" || type === "repaso") && (!existing.firstStudyDate)) {
-        baseData.firstStudyDate = today;
-      }
-
-      await setDoc(progressRef, baseData, { merge: true });
-
-      // Immediate 0ms latency state update
-      setUserProgress(prev => ({
-        ...prev,
-        [cleanTopicId]: {
-          ...(prev[cleanTopicId] || {}),
-          ...baseData,
-          updatedAt: new Date().toISOString()
-        }
-      }));
-
-      // Optimistic recentSessions item
-      const newSessionItem = {
-        id: sessionRef.id,
-        ...sessionDataToSave,
-        createdAt: new Date().toISOString()
-      };
-      setRecentSessions(prev => [newSessionItem, ...(prev || [])]);
-
-      // Local storage backup
-      try {
-        const backupKey = `wp_sessions_backup_${user.uid}`;
-        const existingBackup = JSON.parse(localStorage.getItem(backupKey) || "[]");
-        existingBackup.unshift(newSessionItem);
-        localStorage.setItem(backupKey, JSON.stringify(existingBackup.slice(0, 500)));
-      } catch {
-        // quota ignore
-      }
-
-      if (type === "estudio_inicial") {
-        toast.success("Estudio inicial guardado. ¡Comienza el ciclo de 3 refrescos diarios!");
-      } else if (type === "refresco") {
-        toast.success("Refresco guardado correctamente.");
-      } else if (type === "canto") {
-        toast.success(`Canto registrado. Vuelta consolidada. Próximo repaso mensual: ${nextReviewDateToSet}`);
-      } else {
-        toast.success(`Sesión guardada (+1 Vuelta). Próximo repaso: ${nextReviewDateToSet}`);
-      }
-    } catch (e: any) {
-      console.error("Error al guardar sesión de estudio:", e);
-      toast.error("Error guardando sesión: " + (e?.message || e));
-      throw e;
+      toast.success('Sesión real guardada. Historial y progreso actualizados.');
+    } finally {
+      inFlightSessionLocks.current.delete(lockId);
     }
   };
 
-  const recalculateTopicFromSessions = async (targetTopicId: string) => {
-    if (!user || !targetTopicId) return;
-    try {
-      const targetSubject = extractSubjectFromTopicId(targetTopicId);
-      const numMatch = targetTopicId.match(/\d+/);
-      const targetNumber = numMatch ? parseInt(numMatch[0], 10) : 1;
-      const targetObj = {
-        id: targetTopicId,
-        number: targetNumber,
-        subjectId: targetSubject,
-      };
-
-      const sessionsSnap = await getDocs(collection(db, `users/${user.uid}/sessions`));
-
-      let totalHours = 0;
-      let estudioHours = 0;
-      let repasoHours = 0;
-      let refrescoHours = 0;
-      let diffSum = 0;
-      let diffCount = 0;
-      let bestCantoTotalSecs = 0;
-      let vueltasCount = 0;
-      let earliestDate: string | null = null;
-      let latestDate: string | null = null;
-      let latestCantoDate: string | null = null;
-      let latestCantoMins: number | null = null;
-      let latestCantoSecs: number | null = null;
-      let latestCantoNota: number | null = null;
-      let hasRealCante = false;
-
-      sessionsSnap.forEach((docSnap) => {
-        const s = { id: docSnap.id, ...docSnap.data() } as any;
-
-        // Skip & prune phantom cante
-        const isPhantomAero =
-          (s.source === "aerofocus" || s.source === "aerofocus_pro") &&
-          (s.type === "canto" || s.modality === "canto" || Number(s.cantoGrade) === 8.5 || Number(s.cantoSeconds) === 30 || s.flightId === "cierre_22h");
-        const isPhantomDirect =
-          (s.topicId === "constitucional-5" || s.topicId === "5") &&
-          Number(s.cantoGrade) === 8.5 && Number(s.cantoSeconds) === 30;
-
-        // Explicitly ignore sessions that have been deleted by the student
-        if (deletedSessionIds.current.has(docSnap.id)) {
-          return;
-        }
-        const sCleanId = String(docSnap.id).replace(/^group-[a-zA-Z0-9_]+-/, "").trim();
-        if (deletedSessionIds.current.has(sCleanId)) {
-          return;
-        }
-
-        if (!sessionMatchesTopic(s, targetObj)) return;
-
-        const durationMins = s.durationMinutes || s.durationReal || s.duration || 0;
-        const extraHours = (s.durationReal || durationMins) / 60;
-        totalHours += extraHours;
-
-        const sessionType = s.type || s.modality || "repaso";
-        if (sessionType === "estudio" || sessionType === "estudio_inicial" || sessionType === "primer_estudio") {
-          estudioHours += extraHours;
-        } else if (sessionType === "repaso") {
-          repasoHours += extraHours;
-        } else if (sessionType === "refresco") {
-          refrescoHours += extraHours;
-        }
-
-        // Lógica rigurosa de conteo de vueltas:
-        // Si completesVuelta es booleano: respeta estrictamente true (suma vuelta) o false (sesión parcial de un mismo repaso, no suma).
-        // Si completesVuelta es undefined (sesión previa sin flag): solo suma 1 vuelta si es repaso o canto.
-        if (s.completesVuelta === true) {
-          vueltasCount += 1;
-        } else if (s.completesVuelta === undefined && (sessionType === "repaso" || sessionType === "canto" || isCantoSession(s))) {
-          vueltasCount += 1;
-        }
-
-        if (s.date) {
-          if (!earliestDate || s.date < earliestDate) earliestDate = s.date;
-          if (!latestDate || s.date > latestDate) latestDate = s.date;
-        }
-
-        const diff = s.dificultadReal || s.difficulty;
-        if (diff && typeof diff === "number" && diff > 0) {
-          diffSum += diff;
-          diffCount++;
-        }
-
-        if (sessionType === "canto" || isCantoSession(s)) {
-          hasRealCante = true;
-          const dur = getCantoDuration(s);
-          if (dur.totalSecs > 0) {
-            if (bestCantoTotalSecs === 0 || dur.totalSecs < bestCantoTotalSecs) {
-              bestCantoTotalSecs = dur.totalSecs;
-            }
-          }
-          if (!latestCantoDate || (s.date && s.date >= latestCantoDate)) {
-            latestCantoDate = s.date;
-            latestCantoMins = dur.mins;
-            latestCantoSecs = dur.secs;
-            latestCantoNota = typeof s.cantoGrade === "number" ? s.cantoGrade : (typeof s.grade === "number" ? s.grade : null);
-          }
-        }
+  const refreshSessionHistory = async () => {
+    if (!user) return [];
+    const ownerId = user.uid;
+    const merged = new Map<string, any>();
+    for (const client of defaultDb && defaultDb !== db ? [defaultDb, db] : [db]) {
+      const snapshot = await getDocs(collection(client, `users/${user.uid}/sessions`));
+      snapshot.docs.forEach(record => {
+        const data = record.data();
+        if (data.mergedIntoSessionId) merged.delete(record.id);
+        else merged.set(record.id, { ...data, id: record.id, topicId: resolveStoredTopicId(data.topicId, data.subjectId), originalTopicId: data.originalTopicId ?? data.topicId, originDb: client === db ? 'namedDb' : 'defaultDb' });
       });
-
-      const avgDiff = diffCount > 0 ? Math.round((diffSum / diffCount) * 10) / 10 : 5;
-      const bestCantoMins = hasRealCante && bestCantoTotalSecs > 0 ? Math.floor(bestCantoTotalSecs / 60) : null;
-      const bestCantoSecs = hasRealCante && bestCantoTotalSecs > 0 ? bestCantoTotalSecs % 60 : null;
-
-      // Si el tema tiene sesiones o repasos acumulados, garantizar que cuente al menos 1 vuelta completa
-      if (vueltasCount === 0 && (repasoHours > 0 || (totalHours > 0 && targetTopicId === "constitucional-5"))) {
-        vueltasCount = 1;
-      }
-
-      const progressUpdate: any = {
-        userId: user.uid,
-        topicId: targetTopicId,
-        studyTimeHours: Math.round(totalHours * 100) / 100,
-        estudioHours: Math.round(estudioHours * 100) / 100,
-        repasoHours: Math.round(repasoHours * 100) / 100,
-        refrescoHours: Math.round(refrescoHours * 100) / 100,
-        difficulty: avgDiff,
-        difficultySum: diffSum,
-        difficultyCount: diffCount,
-        vueltas: vueltasCount,
-        updatedAt: serverTimestamp(),
-      };
-
-      if (hasRealCante) {
-        progressUpdate.ultimoCantoNota = latestCantoNota;
-        progressUpdate.ultimoCantoMinutos = latestCantoMins;
-        progressUpdate.ultimoCantoSegundos = latestCantoSecs;
-        progressUpdate.ultimoCantoFecha = latestCantoDate;
-        progressUpdate.mejorTiempoCantoMinutos = bestCantoMins;
-        progressUpdate.mejorTiempoCantoSegundos = bestCantoSecs;
-      } else {
-        progressUpdate.ultimoCantoNota = deleteField();
-        progressUpdate.ultimoCantoMinutos = deleteField();
-        progressUpdate.ultimoCantoSegundos = deleteField();
-        progressUpdate.ultimoCantoFecha = deleteField();
-        progressUpdate.mejorTiempoCantoMinutos = deleteField();
-        progressUpdate.mejorTiempoCantoSegundos = deleteField();
-      }
-
-      if (earliestDate) {
-        progressUpdate.firstStudyDate = earliestDate;
-      } else {
-        progressUpdate.firstStudyDate = deleteField();
-      }
-      if (latestDate) {
-        progressUpdate.lastReviewDate = latestDate;
-        let daysOffset = 30;
-        if (avgDiff >= 8) daysOffset = 25;
-        else if (avgDiff <= 3) daysOffset = 35;
-        const nextReviewDateObj = new Date(latestDate);
-        nextReviewDateObj.setDate(nextReviewDateObj.getDate() + daysOffset);
-        progressUpdate.nextReviewDate = getLocalDateString(nextReviewDateObj);
-      } else {
-        progressUpdate.lastReviewDate = deleteField();
-        progressUpdate.nextReviewDate = deleteField();
-      }
-      progressUpdate.srsRepetitions = vueltasCount;
-      progressUpdate.srsInterval = 30;
-
-      await setDoc(doc(db, `users/${user.uid}/progress`, targetTopicId), cleanForFirestore(progressUpdate), { merge: true });
-
-      // Immediate 0ms local state update
-      setUserProgress((prev) => {
-        const copy = { ...prev };
-        const existingTopic = copy[targetTopicId] || ({} as TopicProgressData);
-        if (hasRealCante) {
-          copy[targetTopicId] = {
-            ...existingTopic,
-            ...progressUpdate,
-            ultimoCantoNota: latestCantoNota ?? undefined,
-            ultimoCantoMinutos: latestCantoMins ?? undefined,
-            ultimoCantoSegundos: latestCantoSecs ?? undefined,
-            ultimoCantoFecha: latestCantoDate ?? undefined,
-            mejorTiempoCantoMinutos: bestCantoMins ?? undefined,
-            mejorTiempoCantoSegundos: bestCantoSecs ?? undefined,
-          };
-        } else {
-          const cleanTopic = { ...existingTopic, ...progressUpdate };
-          delete (cleanTopic as any).ultimoCantoNota;
-          delete (cleanTopic as any).ultimoCantoMinutos;
-          delete (cleanTopic as any).ultimoCantoSegundos;
-          delete (cleanTopic as any).ultimoCantoFecha;
-          delete (cleanTopic as any).mejorTiempoCantoMinutos;
-          delete (cleanTopic as any).mejorTiempoCantoSegundos;
-          if (!earliestDate) {
-            delete (cleanTopic as any).firstStudyDate;
-            delete (cleanTopic as any).lastReviewDate;
-            delete (cleanTopic as any).nextReviewDate;
-          }
-          copy[targetTopicId] = cleanTopic;
-        }
-        return copy;
-      });
-    } catch (e: any) {
-      console.error("Error recalculating topic:", e);
     }
+    const sessions = [...merged.values()];
+    if (activeUserId.current === ownerId) setRecentSessions(sessions);
+    return sessions;
+  };
+
+  const recalculateTopicFromSessions = async (_targetTopicId: string) => {
+    // Compatibility command: recomputation is a pure projection of persisted facts.
+    await refreshSessionHistory();
   };
 
   const isLikelyTopicId = (val: string) => {
@@ -951,163 +531,50 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
   };
 
   const deleteStudySession = async (arg1: string, arg2?: string) => {
-    if (!user) return;
-    try {
-      let targetSessionId = "";
-      let targetTopicId = "";
-
-      if (arg2) {
-        // Called with 2 arguments: can be (topicId, sessionId) or (sessionId, topicId)
-        if (isLikelyTopicId(arg1) && !isLikelyTopicId(arg2)) {
-          targetSessionId = arg2;
-          targetTopicId = arg1;
-        } else if (isLikelyTopicId(arg2) && !isLikelyTopicId(arg1)) {
-          targetSessionId = arg1;
-          targetTopicId = arg2;
-        } else {
-          const sByArg2 = recentSessions.find((s) => s.id === arg2);
-          const sByArg1 = recentSessions.find((s) => s.id === arg1);
-          if (sByArg2) {
-            targetSessionId = arg2;
-            targetTopicId = arg1 || sByArg2.topicId;
-          } else if (sByArg1) {
-            targetSessionId = arg1;
-            targetTopicId = arg2 || sByArg1.topicId;
-          } else {
-            targetSessionId = arg2;
-            targetTopicId = arg1;
-          }
+    if (!user) throw new Error('No user');
+    const first = recentSessions.find(session => session.id === arg1);
+    const second = arg2 && recentSessions.find(session => session.id === arg2);
+    const selected = first?.id || second?.id || arg2 || arg1;
+    const ids = String(selected).replace(/^group-[a-zA-Z0-9_]+-/, '').split(',').filter(Boolean);
+    for (const client of defaultDb && defaultDb !== db ? [db, defaultDb] : [db]) {
+      await runTransaction(client, async transaction => {
+        const snapshots = await Promise.all(ids.map(id => transaction.get(doc(client, `users/${user.uid}/sessions`, id))));
+        for (const snapshot of snapshots) {
+          const snapshotId = snapshot.id;
+          const record = snapshot.exists() ? snapshot.data() : recentSessions.find(session => session.id === snapshotId);
+          if (record?.topicId) transaction.set(doc(client, `users/${user.uid}/progress`, record.topicId), { userId: user.uid, topicId: record.topicId, historyVersion: 3 }, { merge: true });
+          if (snapshot.exists()) transaction.delete(snapshot.ref);
         }
-      } else {
-        // Called with 1 argument: (sessionId)
-        targetSessionId = arg1;
-        const found = recentSessions.find((s) => s.id === arg1);
-        if (found) targetTopicId = found.topicId;
-      }
-
-      // Strip any synthetic prefix e.g. "group-repaso-"
-      const cleanSessionId = String(targetSessionId).replace(/^group-[a-zA-Z0-9_]+-/, "").trim();
-
-      if (!cleanSessionId) {
-        console.warn("deleteStudySession called without valid sessionId");
-        return;
-      }
-
-      const idsToDelete = cleanSessionId.split(",").map((id) => id.trim()).filter(Boolean);
-      if (idsToDelete.length === 0) return;
-
-      // 1. Mark as deleted in session cache to prevent resurrection
-      idsToDelete.forEach((sId) => {
-        deletedSessionIds.current.add(sId);
       });
-      deletedSessionIds.current.add(targetSessionId);
-      deletedSessionIds.current.add(cleanSessionId);
-
-      // Persist in localStorage to prevent historical resurrection on future reloads
-      try {
-        const storedKey = `wp_deleted_session_ids_${user.uid}`;
-        const stored = JSON.parse(localStorage.getItem(storedKey) || "[]");
-        const updated = Array.from(new Set([...stored, ...idsToDelete, cleanSessionId])).slice(-500);
-        localStorage.setItem(storedKey, JSON.stringify(updated));
-      } catch {}
-
-      // 2. Immediate optimistic UI eviction (0ms latency)
-      setRecentSessions((prev) =>
-        (prev || []).filter((s) => {
-          const sClean = String(s.id).replace(/^group-[a-zA-Z0-9_]+-/, "").trim();
-          return !idsToDelete.includes(s.id) && !idsToDelete.includes(sClean) && s.id !== targetSessionId;
-        })
-      );
-
-      // 3. Delete across all user study & cante subcollections in both namedDb and defaultDb
-      const userSubcollections = [
-        "sessions",
-        "cantos",
-        "cantes",
-        "cante_sessions",
-        "preparador_sessions",
-        "study_sessions"
-      ];
-
-      for (const sId of idsToDelete) {
-        for (const col of userSubcollections) {
-          deleteDoc(doc(db, `users/${user.uid}/${col}`, sId)).catch(() => {});
-          if (defaultDb) {
-            deleteDoc(doc(defaultDb, `users/${user.uid}/${col}`, sId)).catch(() => {});
-          }
-        }
-      }
-
-      // 4. Evict from localStorage backup
-      try {
-        const backupKey = `wp_sessions_backup_${user.uid}`;
-        const stored = JSON.parse(localStorage.getItem(backupKey) || "[]");
-        const filtered = stored.filter((s: any) => !idsToDelete.includes(s.id) && s.id !== cleanSessionId);
-        localStorage.setItem(backupKey, JSON.stringify(filtered));
-      } catch {}
-
-      // 5. Recalculate topic progress and telemetry accurately
-      if (targetTopicId) {
-        await recalculateTopicFromSessions(targetTopicId);
-      }
-
-      toast.success("Registro eliminado y expediente actualizado.");
-    } catch (e: any) {
-      console.error("Error deleting session:", e);
-      toast.error("Error al eliminar sesión: " + e.message);
     }
+    toast.success('Sesión eliminada. La vista se recalcula desde los registros restantes.');
   };
 
-  const updateStudySession = async (
-    sessionId: string,
-    updatedData: Partial<any>,
-    previousSession: any
-  ) => {
-    if (!user) return;
-    try {
-      const sessionRef = doc(db, `users/${user.uid}/sessions`, sessionId);
-      const cleanData: any = cleanForFirestore({ ...updatedData, updatedAt: serverTimestamp() });
-      await updateDoc(sessionRef, cleanData);
-
-      const oldTopicId = previousSession?.topicId;
-      const newTopicId = updatedData.topicId || oldTopicId;
-
-      if (oldTopicId && oldTopicId !== newTopicId) {
-        await recalculateTopicFromSessions(oldTopicId);
+  const updateStudySession = async (sessionId: string, updatedData: Partial<any>, _previousSession: any) => {
+    if (!user) throw new Error('No user');
+    const client = recentSessions.find(session => session.id === sessionId)?.originDb === 'defaultDb' ? defaultDb : db;
+    const ref = doc(client, `users/${user.uid}/sessions`, sessionId);
+    await runTransaction(client, async transaction => {
+      const snapshot = await transaction.get(ref);
+      if (!snapshot.exists()) throw new Error('La sesión ya no existe.');
+      const stored = snapshot.data();
+      const record = normalizeSessionRecord({ ...stored, ...updatedData }, user.uid);
+      // Correcting observations must never rewrite what the model predicted before them.
+      for (const field of ['prediction', 'retentionPrediction', 'estimatedMinutes']) {
+        if (stored[field] !== undefined) record[field] = stored[field];
+        else delete record[field];
       }
-      if (newTopicId) {
-        await recalculateTopicFromSessions(newTopicId);
+      if (stored.completesVuelta === undefined && updatedData.completesVuelta === undefined) delete record.completesVuelta;
+      transaction.set(ref, cleanForFirestore({ ...record, createdAt: stored.createdAt, updatedAt: serverTimestamp() }));
+      for (const id of new Set([stored.topicId, record.topicId])) {
+        transaction.set(doc(client, `users/${user.uid}/progress`, String(id)), { userId: user.uid, topicId: id, historyVersion: 3 }, { merge: true });
       }
-
-      toast.success("Sesión actualizada con recálculo retroactivo completado.");
-    } catch (e: any) {
-      console.error("Error updating session:", e);
-      toast.error("Error actualizando la sesión: " + e.message);
-      throw e;
-    }
+    });
+    toast.success('Sesión actualizada. Las vistas se derivan del historial actualizado.');
   };
 
-  const quickUpdateSessionDifficulty = async (
-    sessionId: string,
-    difficulty: number,
-    topicId: string
-  ) => {
-    if (!user) return;
-    try {
-      const sessionRef = doc(db, `users/${user.uid}/sessions`, sessionId);
-      await updateDoc(sessionRef, {
-        difficulty,
-        dificultadReal: difficulty,
-        updatedAt: serverTimestamp(),
-      });
-      if (topicId) {
-        await recalculateTopicFromSessions(topicId);
-      }
-      toast.success(`Dificultad ${difficulty}/10 guardada.`);
-    } catch (e: any) {
-      console.error("Error setting session difficulty:", e);
-      toast.error("Error al guardar la dificultad: " + e.message);
-    }
+  const quickUpdateSessionDifficulty = async (sessionId: string, difficulty: number, _topicId: string) => {
+    await updateStudySession(sessionId, { difficulty, dificultadReal: difficulty }, undefined);
   };
 
   const mergeStudySessions = async (
@@ -1122,41 +589,69 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
       mistakes?: string;
     }
   ) => {
-    if (!user) return;
+    if (!user) throw new Error('Debes iniciar sesión para fusionar sesiones.');
     try {
-      const targetRef = doc(db, `users/${user.uid}/sessions`, targetSessionId);
-      const cleanData: any = cleanForFirestore({
-        durationMinutes: mergedData.durationMinutes,
-        durationReal: mergedData.durationMinutes,
-        effectiveHours: Math.round((mergedData.durationMinutes / 60) * 100) / 100,
-        difficulty: mergedData.difficulty !== undefined ? mergedData.difficulty : undefined,
-        dificultadReal: mergedData.difficulty !== undefined ? mergedData.difficulty : undefined,
-        completesVuelta: mergedData.completesVuelta,
-        type: mergedData.type || "repaso",
-        notes: mergedData.notes || "",
-        mistakes: mergedData.mistakes || "",
-        updatedAt: serverTimestamp(),
+      const ids = [...new Set([targetSessionId, ...sourceSessionIds])];
+      if (ids.length < 2 || ids.length > 400 || ids.some(id => !id || id.includes('/'))) throw new Error('Selecciona entre dos y cuatrocientas sesiones válidas.');
+      const selected = ids.map(id => recentSessions.find(session => session.id === id));
+      if (selected.some(session => !session)) throw new Error('El historial ha cambiado. Recarga las sesiones antes de fusionarlas.');
+      const origin = selected[0].originDb || 'namedDb';
+      if (selected.some(session => (session.originDb || 'namedDb') !== origin)) throw new Error('Las sesiones pertenecen a bases distintas. No se pueden fusionar de forma atómica.');
+      const client = origin === 'defaultDb' ? defaultDb : db;
+      const refs = ids.map(id => doc(client, `users/${user.uid}/sessions`, id));
+      await runTransaction(client, async transaction => {
+        // Firestore requires every read before the first write. A failure keeps all parts intact.
+        const snapshots = await Promise.all(refs.map(ref => transaction.get(ref)));
+        if (snapshots.some(snapshot => !snapshot.exists())) throw new Error('Una de las sesiones ya no existe. No se ha aplicado la fusión.');
+        const parts: Array<Record<string, any> & { id: string }> = snapshots.map(snapshot => ({ ...snapshot.data(), id: snapshot.id }));
+        if (parts.some(part => part.mergedIntoSessionId)) throw new Error('Una sesión ya fue fusionada. Recarga el historial.');
+        const target = parts[0];
+        const topicId = resolveStoredTopicId(target.topicId, target.subjectId);
+        const category = getSessionCategory(target);
+        if (category === 'unknown' || parts.some(part => resolveStoredTopicId(part.topicId, part.subjectId) !== topicId || getSessionCategory(part) !== category || part.date !== target.date)) {
+          throw new Error('Solo pueden fusionarse partes de la misma actividad, tema y fecha; así se conserva su cronología.');
+        }
+        const measuredMinutes = parts.reduce((sum, part) => sum + sessionDurationMinutes(part), 0);
+        if (parts.some(part => sessionDurationMinutes(part) <= 0)) throw new Error('Indica la duración real de cada parte antes de fusionarlas.');
+        if (!Number.isFinite(mergedData.durationMinutes) || Math.abs(mergedData.durationMinutes - measuredMinutes) > 1 / 60) throw new Error('Las duraciones han cambiado. Recarga el historial antes de fusionarlo.');
+        const type = category === 'initial_study' ? 'estudio_inicial' : category === 'refresh' ? 'refresco' : category === 'cante' ? 'canto' : 'repaso';
+        if (mergedData.type && getSessionCategory({ type: mergedData.type }) !== category) throw new Error('La fusión no puede convertir una actividad en otra.');
+        const merged: Record<string, any> = {
+          ...target, topicId, type, durationMinutes: category === 'cante' ? Math.floor(measuredMinutes) : measuredMinutes,
+          ...(category === 'cante' ? { cantoSeconds: Math.round(measuredMinutes * 60) % 60 } : {}),
+          difficulty: mergedData.difficulty ?? target.difficulty,
+          completesVuelta: (category === 'review' || category === 'cante') && mergedData.completesVuelta === true,
+          notes: mergedData.notes ?? target.notes ?? '', mistakes: mergedData.mistakes ?? target.mistakes,
+          mergedFromSessionIds: [...new Set(parts.flatMap(part => [part.id, ...(part.mergedFromSessionIds || [])]))],
+          // Originals remain recoverable, including per-page/phase telemetry and predictions.
+          mergedSessionParts: parts,
+          updatedAt: serverTimestamp(),
+        };
+        for (const field of ['pagesNumbers', 'pageNumbers', 'pageRanges', 'startPage', 'endPage', 'fromPage', 'toPage', 'pagesCount', 'pagesStudied', 'pages', 'coverage', 'pageBreakdown', 'plsema', 'fasesPlsema', 'studyBlocks', 'isTopicCompleted', 'minutesPerPage', 'secondsPerPage', 'effectiveSeconds', 'estimatedMinutes', 'predictionSnapshot', 'prediction', 'retentionPrediction', 'retrieval']) delete merged[field];
+        const extent = topicData.topicState.get(topicId)?.pages || undefined;
+        const coverage = deriveInitialStudyCoverage(extent, parts.map(part => ({ ...part, type: 'estudio_inicial' })) as any);
+        if (category === 'initial_study' && (coverage.status === 'conflict' || coverage.studiedPages === null)) throw new Error('Precisa los rangos de las partes de estudio inicial antes de fusionarlas para conservar su cobertura.');
+        if (coverage.studiedPages !== null && coverage.knownStudiedPages > 0) {
+          merged.pageRanges = coverage.intervals.map(interval => ({ startPage: interval.start + 1, endPage: interval.end }));
+          merged.pagesCount = coverage.knownStudiedPages;
+          if (extent) merged.totalPagesAtSession = extent;
+        }
+        const telemetry = parts.map(part => extractSessionTelemetry(part));
+        const phaseSeconds: Record<string, number> = {};
+        for (const phase of ['prelectura', 'lectura', 'subrayado', 'esquema', 'memorizar', 'cantar'] as const) {
+          if (telemetry.every(item => item.plsema?.observedPhases.includes(phase))) phaseSeconds[phase] = telemetry.reduce((sum, item) => sum + item.plsema!.seconds[phase], 0);
+        }
+        if (Object.keys(phaseSeconds).length) merged.plsema = extractSessionTelemetry({ plsema: { seconds: phaseSeconds } }).plsema;
+        const record = normalizeSessionRecord(merged, user.uid);
+        if (JSON.stringify(record).length > 750_000) throw new Error('La fusión contiene demasiado detalle para un único documento. Conserva las sesiones por separado.');
+        transaction.set(refs[0], cleanForFirestore(record));
+        snapshots.slice(1).forEach(snapshot => {
+          // Keep the stable ID as a tombstone: event replay cannot recreate a merged part.
+          transaction.set(snapshot.ref, { mergedIntoSessionId: targetSessionId, mergedAt: serverTimestamp() }, { merge: true });
+        });
+        transaction.set(doc(client, `users/${user.uid}/progress`, topicId), { userId: user.uid, topicId, historyVersion: 3 }, { merge: true });
       });
-      await updateDoc(targetRef, cleanData);
-
-      // Delete the secondary sessions that were unified
-      for (const srcId of sourceSessionIds) {
-        if (srcId !== targetSessionId) {
-          const srcRef = doc(db, `users/${user.uid}/sessions`, srcId);
-          await deleteDoc(srcRef);
-        }
-      }
-
-      // Read topicId to recalculate topic stats accurately
-      const targetSnap = await getDoc(targetRef);
-      if (targetSnap.exists()) {
-        const topicId = targetSnap.data().topicId;
-        if (topicId) {
-          await recalculateTopicFromSessions(topicId);
-        }
-      }
-
-      toast.success("Sesiones unificadas con éxito y expediente recalculado.");
+      toast.success('Sesiones fusionadas de forma atómica; originales conservados y vistas recalculadas.');
     } catch (e: any) {
       console.error("Error merging sessions:", e);
       toast.error("Error al fusionar sesiones: " + e.message);
@@ -1165,170 +660,11 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
   };
 
   const reconcileAllTopicsAndSessions = async (): Promise<{ updatedTopicsCount: number; totalSessionsCount: number }> => {
-    if (!user) return { updatedTopicsCount: 0, totalSessionsCount: 0 };
-    try {
-      // 1. Ejecución interna y automática de correcciones (limpieza de cante fantasma, migración penal y deduplicación)
-      try {
-        await purgePhantomTema5Cante();
-        await deduplicateUserSessions(true);
-      } catch (maintErr) {
-        console.warn("Aviso en mantenimiento interno de reconciliación:", maintErr);
-      }
-
-      const sessionsSnap = await getDocs(collection(db, `users/${user.uid}/sessions`));
-      const topicSessionsMap: Record<string, any[]> = {};
-
-      sessionsSnap.forEach((docSnap) => {
-        const s = { id: docSnap.id, ...docSnap.data() } as any;
-
-        // Purgar artefactos de tests automatizados si los hubiera
-        if (s.id === "test_curl_1" || s.source === "test_curl" || s.flightId === "test_flight_1") {
-          deleteDoc(doc(db, `users/${user.uid}/sessions`, docSnap.id)).catch(() => {});
-          return;
-        }
-
-        let tId = s.topicId;
-        if (tId === "5" || tId === 5) {
-          tId = "constitucional-5";
-        } else if (typeof tId === "string") {
-          const clean = tId.toLowerCase().trim();
-          if (clean === "5" || clean === "tema-5" || clean === "tema 5" || clean === "t5") {
-            tId = "constitucional-5";
-          } else if (clean.startsWith("const-") || clean.startsWith("const_")) {
-            tId = `constitucional-${clean.replace(/^const[-_]/, "")}`;
-          }
-        }
-        if (tId) {
-          if (!topicSessionsMap[tId]) topicSessionsMap[tId] = [];
-          topicSessionsMap[tId].push(s);
-        }
-      });
-
-      const uniqueTopicIds = Object.keys(topicSessionsMap);
-      let updatedCount = 0;
-
-      for (const tId of uniqueTopicIds) {
-        const sessions = topicSessionsMap[tId];
-        let totalHours = 0;
-        let estudioHours = 0;
-        let repasoHours = 0;
-        let refrescoHours = 0;
-        let diffSum = 0;
-        let diffCount = 0;
-        let bestCantoTotalSecs = 0;
-        let vueltasCount = 0;
-        let earliestDate: string | null = null;
-        let latestDate: string | null = null;
-        let latestCantoDate: string | null = null;
-        let latestCantoMins: number | null = null;
-        let latestCantoSecs: number | null = null;
-        let latestCantoNota: number | null = null;
-
-        sessions.forEach((s) => {
-          const durationMins = s.durationMinutes || s.durationReal || s.duration || 0;
-          const extraHours = (s.durationReal || durationMins) / 60;
-          totalHours += extraHours;
-
-          const sessionType = s.type || s.modality || "repaso";
-          if (sessionType === "estudio" || sessionType === "estudio_inicial" || sessionType === "primer_estudio") {
-            estudioHours += extraHours;
-          } else if (sessionType === "repaso") {
-            repasoHours += extraHours;
-          } else if (sessionType === "refresco") {
-            refrescoHours += extraHours;
-          }
-
-          if (s.completesVuelta === true) {
-            vueltasCount += 1;
-          } else if (s.completesVuelta === undefined && (sessionType === "repaso" || sessionType === "canto" || isCantoSession(s))) {
-            vueltasCount += 1;
-          }
-
-          if (s.date) {
-            if (!earliestDate || s.date < earliestDate) earliestDate = s.date;
-            if (!latestDate || s.date > latestDate) latestDate = s.date;
-          }
-
-          const diff = s.dificultadReal || s.difficulty;
-          if (diff && typeof diff === 'number' && diff > 0) {
-            diffSum += diff;
-            diffCount++;
-          }
-
-          if (sessionType === 'canto' || isCantoSession(s)) {
-            const dur = getCantoDuration(s);
-            if (dur.totalSecs > 0) {
-              if (bestCantoTotalSecs === 0 || dur.totalSecs < bestCantoTotalSecs) {
-                bestCantoTotalSecs = dur.totalSecs;
-              }
-            }
-            if (!latestCantoDate || (s.date && s.date >= latestCantoDate)) {
-              latestCantoDate = s.date;
-              latestCantoMins = dur.mins;
-              latestCantoSecs = dur.secs;
-              latestCantoNota = typeof s.cantoGrade === 'number' ? s.cantoGrade : (typeof s.grade === 'number' ? s.grade : null);
-            }
-          }
-        });
-
-        const avgDiff = diffCount > 0 ? Math.round((diffSum / diffCount) * 10) / 10 : 5;
-        const bestCantoMins = Math.floor(bestCantoTotalSecs / 60);
-        const bestCantoSecs = bestCantoTotalSecs % 60;
-
-        const updateData: any = {
-          userId: user.uid,
-          topicId: tId,
-          studyTimeHours: Math.round(totalHours * 100) / 100,
-          estudioHours: Math.round(estudioHours * 100) / 100,
-          repasoHours: Math.round(repasoHours * 100) / 100,
-          refrescoHours: Math.round(refrescoHours * 100) / 100,
-          difficulty: avgDiff,
-          difficultySum: diffSum,
-          difficultyCount: diffCount,
-          vueltas: vueltasCount,
-          updatedAt: serverTimestamp(),
-        };
-
-        if (latestCantoMins !== null) {
-          updateData.ultimoCantoMinutos = latestCantoMins;
-          updateData.ultimoCantoSegundos = latestCantoSecs || 0;
-          updateData.ultimoCantoFecha = latestCantoDate;
-          if (latestCantoNota !== null) updateData.ultimoCantoNota = latestCantoNota;
-          updateData.mejorTiempoCantoMinutos = bestCantoMins;
-          updateData.mejorTiempoCantoSegundos = bestCantoSecs;
-        } else {
-          updateData.ultimoCantoMinutos = deleteField();
-          updateData.ultimoCantoSegundos = deleteField();
-          updateData.ultimoCantoFecha = deleteField();
-          updateData.ultimoCantoNota = deleteField();
-          updateData.mejorTiempoCantoMinutos = deleteField();
-          updateData.mejorTiempoCantoSegundos = deleteField();
-        }
-
-        if (earliestDate) updateData.firstStudyDate = earliestDate;
-        if (latestDate) {
-          updateData.lastReviewDate = latestDate;
-          let daysOffset = 30;
-          if (avgDiff >= 8) daysOffset = 25;
-          else if (avgDiff <= 3) daysOffset = 35;
-          const nextReviewDateObj = new Date(latestDate);
-          nextReviewDateObj.setDate(nextReviewDateObj.getDate() + daysOffset);
-          updateData.nextReviewDate = getLocalDateString(nextReviewDateObj);
-        }
-        updateData.srsRepetitions = vueltasCount;
-        updateData.srsInterval = 30;
-
-        await setDoc(doc(db, `users/${user.uid}/progress`, tId), cleanForFirestore(updateData), { merge: true });
-        updatedCount++;
-      }
-
-      toast.success(`Reconciliación completa: ${updatedCount} temas auditados de ${sessionsSnap.size} sesiones.`);
-      return { updatedTopicsCount: updatedCount, totalSessionsCount: sessionsSnap.size };
-    } catch (e: any) {
-      console.error("Error in reconciliation:", e);
-      toast.error("Error en la reconciliación: " + e.message);
-      throw e;
-    }
+    const sessions = await refreshSessionHistory();
+    const snapshot = buildTopicData(initialTopics, rawTopicProgress, sessions);
+    const updatedTopicsCount = [...snapshot.topicState.values()].filter(topic => topic.sessions.length > 0).length;
+    toast.success('Vista recalculada desde el historial, sin modificar ni duplicar registros.');
+    return { updatedTopicsCount, totalSessionsCount: sessions.length };
   };
 
   const resetProgress = async () => {
@@ -1360,78 +696,94 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
   const exportData = async () => {
     if (!user) return;
     try {
-      const progressSnap = await getDocs(query(collection(db, `users/${user.uid}/progress`)));
-      const sessionsSnap = await getDocs(query(collection(db, `users/${user.uid}/sessions`)));
-      
-      const progress = progressSnap.docs.map(d => d.data());
-      const sessions = sessionsSnap.docs.map(d => {
-         const data = d.data();
-         return { id: d.id, ...data };
-      });
-      
-      const backup = { progress, sessions, timestamp: new Date().toISOString() };
-      
+      // Export the same database union as the UI, plus every settings/quarantine document.
+      const clients = defaultDb && defaultDb !== db ? [defaultDb, db] : [db];
+      const progressById = new Map<string, any>();
+      const sessionsById = new Map<string, any>();
+      for (const client of clients) {
+        const [progressSnap, sessionsSnap] = await Promise.all([
+          getDocs(collection(client, `users/${user.uid}/progress`)),
+          getDocs(collection(client, `users/${user.uid}/sessions`)),
+        ]);
+        progressSnap.docs.forEach(d => progressById.set(d.id, { ...d.data(), topicId: d.id }));
+        sessionsSnap.docs.forEach(d => sessionsById.set(d.id, { ...d.data(), id: d.id }));
+      }
+      const [settingsSnap, quarantineSnap] = await Promise.all([
+        getDocs(collection(db, `users/${user.uid}/settings`)),
+        getDocs(collection(db, `users/${user.uid}/quarantine`)),
+      ]);
+      const backup = {
+        schemaVersion: 2,
+        progress: [...progressById.values()], sessions: [...sessionsById.values()],
+        settings: Object.fromEntries(settingsSnap.docs.map(d => [d.id, d.data()])),
+        quarantine: quarantineSnap.docs.map(d => ({ ...d.data(), id: d.id })),
+        timestamp: new Date().toISOString(),
+      };
       const blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
-      const link = document.createElement("a");
+      const link = document.createElement('a');
       link.href = url;
       link.download = `backup_wellsprep_${new Date().toISOString().split('T')[0]}.json`;
       document.body.appendChild(link);
       link.click();
-      document.body.removeChild(link);
-      toast.success("Copia de seguridad descargada correctamente.");
-    } catch(e: any) {
-      console.error(e);
-      toast.error("Error al exportar datos: " + e.message);
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      toast.success('Copia de seguridad descargada con sesiones, progreso y configuración.');
+    } catch (e: any) {
+      toast.error('No se pudo exportar la copia completa: ' + e.message);
     }
   };
 
   const importData = async (jsonText: string) => {
-    if (!user) throw new Error("No user");
+    if (!user) throw new Error('No user');
+    // Validate the ENTIRE file before the first write; preserve historical warnings as data.
+    const validation = parseBackup(jsonText);
+    if (!validation.valid || !validation.backup) {
+      toast.error('Copia no válida: ' + validation.issues.filter(issue => issue.severity === 'error').map(issue => issue.message).slice(0, 3).join(' '));
+      return false;
+    }
+    const backup = validation.backup;
+    const toastId = toast.loading('Importando copia de seguridad...');
     try {
-      const data = JSON.parse(jsonText);
-      if (!data.progress || !data.sessions) throw new Error("El archivo no tiene el formato de copia de seguridad de WellsPrep.");
-      
-      const toastId = toast.loading("Restaurando copia de seguridad...");
-      let batch = writeBatch(db);
-      let count = 0;
-      
-      // Import progress
-      for (const p of data.progress) {
-         if (!p.topicId) continue;
-         const ref = doc(db, `users/${user.uid}/progress`, p.topicId);
-         batch.set(ref, p, { merge: true });
-         count++;
-         if (count >= 400) { await batch.commit(); batch = writeBatch(db); count = 0; }
+      const writes: Array<{ ref: ReturnType<typeof doc>; data: any }> = [];
+      const restore = (record: Record<string, unknown>): Record<string, any> => cleanForFirestore({
+        ...rehydrateBackupTimestamps(record, (seconds, nanoseconds) => new Timestamp(seconds, nanoseconds)),
+        userId: user.uid,
+      });
+      for (const progress of backup.progress) {
+        writes.push({ ref: doc(db, `users/${user.uid}/progress`, progress.topicId), data: restore(progress) });
       }
-      
-      // Import sessions
-      for (const s of data.sessions) {
-         if (!s.topicId) continue;
-         const ref = s.id ? doc(db, `users/${user.uid}/sessions`, s.id) : doc(collection(db, `users/${user.uid}/sessions`));
-         // Don't save the id inside the document itself if we can avoid it, but it's fine
-         const sData = { ...s };
-         delete sData.id; 
-         batch.set(ref, sData, { merge: true });
-         count++;
-         if (count >= 400) { await batch.commit(); batch = writeBatch(db); count = 0; }
+      for (const session of backup.sessions) {
+        const data = restore(session);
+        delete data.id;
+        writes.push({ ref: doc(db, `users/${user.uid}/sessions`, session.id), data });
       }
-      
-      if (count > 0) await batch.commit();
-      
-      toast.dismiss(toastId);
-      toast.success("Copia de seguridad restaurada correctamente.");
-      setTimeout(() => window.location.reload(), 1500);
+      for (const [id, settings] of Object.entries(backup.settings || {})) {
+        writes.push({ ref: doc(db, `users/${user.uid}/settings`, id), data: restore(settings) });
+      }
+      for (const record of backup.quarantine || []) {
+        writes.push({ ref: doc(db, `users/${user.uid}/quarantine`, String(record.id)), data: restore(record) });
+      }
+      for (let offset = 0; offset < writes.length; offset += 400) {
+        const batch = writeBatch(db);
+        writes.slice(offset, offset + 400).forEach(({ ref, data }) => batch.set(ref, data));
+        await batch.commit();
+      }
+      // Stable IDs make reimport idempotent. Unrelated documents are never deleted.
+      toast.success(`Importadas ${backup.progress.length} fichas y ${backup.sessions.length} sesiones.`);
+      if (validation.issues.some(issue => issue.severity === 'warning')) {
+        toast.info('Se han conservado los datos históricos con advertencias; no se han corregido ni eliminado automáticamente.');
+      }
       return true;
     } catch (e: any) {
-      console.error(e);
-      toast.error("Error al restaurar: " + e.message);
+      toast.error('Error al importar: ' + e.message);
       return false;
+    } finally {
+      toast.dismiss(toastId);
     }
   };
 
   
-  // Recuperación y vinculación profunda de datos históricos de Google (Multi-Database & Multi-Schema)
   const recoverHistoricalUserData = async (silent: boolean = false) => {
     if (!user) return { recoveredProgress: 0, recoveredSessions: 0 };
     const toastId = silent ? null : toast.loading("Comprobando y vinculando datos históricos de Google...");
@@ -1462,20 +814,9 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
           try {
             const pSnap = await getDocs(collection(dbClient, `users/${uid}/progress`));
             for (const d of pSnap.docs) {
-              let targetTopicId = d.id;
-              if (targetTopicId === "5") {
-                targetTopicId = "constitucional-5";
-              } else if (typeof targetTopicId === "string") {
-                const clean = targetTopicId.toLowerCase().trim();
-                if (clean === "5" || clean === "tema-5" || clean === "tema 5" || clean === "t5") {
-                  targetTopicId = "constitucional-5";
-                } else if (clean.startsWith("const-") || clean.startsWith("const_")) {
-                  targetTopicId = `constitucional-${clean.replace(/^const[-_]/, "")}`;
-                }
-              }
-
-              const targetDocRef = doc(db, `users/${user.uid}/progress`, targetTopicId);
               const incomingData = { ...d.data() };
+              const targetTopicId = resolveStoredTopicId(d.id, incomingData.subjectId);
+              const targetDocRef = doc(db, `users/${user.uid}/progress`, targetTopicId);
               const existingData = userProgress[targetTopicId] || {};
 
               // Protect against phantom cante
@@ -1531,17 +872,7 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
                 }
 
                 const sData = d.data();
-                let sTopicId = sData.topicId;
-                if (sTopicId === "5" || sTopicId === 5) {
-                  sTopicId = "constitucional-5";
-                } else if (typeof sTopicId === "string") {
-                  const clean = sTopicId.toLowerCase().trim();
-                  if (clean === "5" || clean === "tema-5" || clean === "tema 5" || clean === "t5") {
-                    sTopicId = "constitucional-5";
-                  } else if (clean.startsWith("const-") || clean.startsWith("const_")) {
-                    sTopicId = `constitucional-${clean.replace(/^const[-_]/, "")}`;
-                  }
-                }
+                const sTopicId = resolveStoredTopicId(sData.topicId, sData.subjectId);
 
                 // Skip phantom cante
                 const isPhantomAero =
@@ -1606,11 +937,7 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
                 for (const d of snap.docs) {
                   const data = d.data();
                   if (colName === "progress") {
-                    let targetTopicId = String(data.topicId || d.id);
-                    if (targetTopicId === "5") targetTopicId = "constitucional-5";
-                    else if (typeof targetTopicId === "string" && (targetTopicId.startsWith("const-") || targetTopicId.startsWith("const_"))) {
-                      targetTopicId = `constitucional-${targetTopicId.replace(/^const[-_]/, "")}`;
-                    }
+                    const targetTopicId = resolveStoredTopicId(data.topicId || d.id, data.subjectId);
 
                     if (Number(data.ultimoCantoNota) === 8.5 && Number(data.ultimoCantoSegundos) === 30) {
                       delete data.ultimoCantoNota;
@@ -1627,16 +954,7 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
                     );
                     recoveredProgress++;
                   } else {
-                    let sTopicId = String(data.topicId || "");
-                    if (sTopicId === "5") sTopicId = "constitucional-5";
-                    else if (typeof sTopicId === "string") {
-                      const clean = sTopicId.toLowerCase().trim();
-                      if (clean === "5" || clean === "tema-5" || clean === "tema 5" || clean === "t5") {
-                        sTopicId = "constitucional-5";
-                      } else if (clean.startsWith("const-") || clean.startsWith("const_")) {
-                        sTopicId = `constitucional-${clean.replace(/^const[-_]/, "")}`;
-                      }
-                    }
+                    const sTopicId = resolveStoredTopicId(data.topicId, data.subjectId);
 
                     const isPhantomAero =
                       (data.source === "aerofocus" || data.source === "aerofocus_pro") &&
@@ -1828,17 +1146,7 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
       // Normalizar y agrupar sesiones
       snap.docs.forEach((d) => {
         const data = d.data();
-        let topicId = String(data.topicId || "").trim().toLowerCase();
-        // Canonical topic ID normalization
-        if (topicId === "7" || topicId === "tema-7" || topicId === "t7" || topicId === "const-7") {
-          topicId = "constitucional-7";
-        } else if (topicId === "17" || topicId === "tema-17" || topicId === "t17" || topicId === "const-17") {
-          topicId = "constitucional-17";
-        } else if (topicId === "5" || topicId === "tema-5" || topicId === "t5" || topicId === "const-5") {
-          topicId = "constitucional-5";
-        } else if (topicId.startsWith("const-") || topicId.startsWith("const_")) {
-          topicId = `constitucional-${topicId.replace(/^const[-_]/, "")}`;
-        }
+        const topicId = resolveStoredTopicId(data.topicId, data.subjectId);
 
         const date = String(data.date || "").trim();
         const type = String(data.type || data.modality || "repaso").toLowerCase();
@@ -1946,7 +1254,7 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
 
       // Limpiar también eventos en el servidor (quarantine purge)
       try {
-        await fetch("/api/webhook/clear", { method: "POST" });
+        await authenticatedFetch("/api/webhook/clear", { method: "POST" });
       } catch {
         // ignore
       }
@@ -2027,24 +1335,12 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
     await auditAndRestoreTopicIntegrity();
   };
 
-  /**
-   * Verificación de aislamiento estricto por asignatura.
-   * Garantiza que cada materia (Constitucional, Civil, Penal, etc.) mantenga
-   * sus propios datos de forma 100% aislada e independiente sin migraciones destructivas.
-   */
-  const migrateAndPurgeNonConstitucionalData = async (silent: boolean = false) => {
-    if (!silent) {
-      toast.info("Aislamiento activo: Cada asignatura es 100% autónoma e independiente.");
-    }
-    return { migratedCount: 0, purgedCount: 0 };
-  };
-
-  // Sincronización automática de cuenta Google, deduplicación de cantes y blindaje
+  // Sincronización automática de cuenta Google, deduplicación de cantes y blindaje de cuarentena
   useEffect(() => {
+    // Synthetic scenarios must not trigger legacy recovery or destructive maintenance.
+    if (isFirebaseEmulator) return;
     if (user) {
-      recoverHistoricalUserData(true);
-      purgePhantomTema5Cante();
-      deduplicateUserSessions(true);
+      // Recovery/purge/deduplication are explicit maintenance actions, never login effects.
       fetchQuarantinedEvents();
     }
   }, [user?.uid]);
@@ -2052,8 +1348,17 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
   const updateTopicProgress = async (topicId: string, data: Partial<TopicProgressData>) => {
     if (!user) return;
     try {
+      const masters = new Set(['pages', 'numeroPalabras', 'difficulty', 'epigrafes', 'customTitle', 'notas', 'isCustom', 'subjectId', 'number', 'isDeleted']);
+      const patch: Record<string, any> = {};
+      for (const [key, value] of Object.entries(data)) {
+        if (!masters.has(key)) throw new Error('Los contadores y las fechas se derivan del historial; no se editan como parámetros del tema.');
+        if (value === undefined || value === null || value === '') { patch[key] = deleteField(); continue; }
+        if (['pages', 'numeroPalabras', 'epigrafes'].includes(key) && (!Number.isFinite(Number(value)) || Number(value) < 0)) throw new Error('La extensión debe ser un número no negativo.');
+        if (key === 'difficulty' && (!Number.isFinite(Number(value)) || Number(value) < 1 || Number(value) > 10)) throw new Error('La dificultad debe estar entre 1 y 10.');
+        patch[key] = value;
+      }
       const cleanData = cleanForFirestore({
-        ...data,
+        ...patch,
         updatedAt: serverTimestamp(),
         userId: user.uid,
         topicId: topicId,
@@ -2142,6 +1447,14 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
   const updateUserSettings = async (data: Partial<any>) => {
     if (!user) return;
     try {
+      if (data.retention !== undefined) {
+        if (!data.retention || typeof data.retention !== 'object' || Array.isArray(data.retention)) throw new Error('Configuración de retención no válida.');
+        const bounds = { initialStabilityDays: [.25, 365], initialRecallProbability: [.05, .99], reviewThreshold: [.05, .95], priorStrength: [1, 1000], recencyHalfLifeDays: [1, 3650], maxIntervalDays: [1, 3650] };
+        for (const [key, [minimum, maximum]] of Object.entries(bounds)) {
+          const value = data.retention[key];
+          if (value !== undefined && (typeof value !== 'number' || !Number.isFinite(value) || value < minimum || value > maximum)) throw new Error(`Parámetro de retención fuera de rango: ${key}.`);
+        }
+      }
       const cleanData = cleanForFirestore({
         userId: user.uid,
         ...data,
@@ -2154,22 +1467,27 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  const webhookToken = userSettings?.webhookToken || "wp_qLXi6WFkFY_live";
-
+  const webhookToken = userSettings?.webhookToken?.startsWith('wpa_') ? userSettings.webhookToken : '';
   const generateWebhookToken = async () => {
-    if (!user) return "wp_qLXi6WFkFY_live";
-    const newToken = `wp_live_${Math.random().toString(36).substring(2, 10)}${Math.random().toString(36).substring(2, 10)}`;
-    await updateUserSettings({ webhookToken: newToken });
-    toast.success("Nuevo Token de Webhook generado con éxito");
-    return newToken;
+    if (!user) { toast.error('Inicia sesión para generar la credencial.'); return ''; }
+    try {
+      const ownerId = user.uid;
+      const response = await authenticatedFetch('/api/webhook/credentials', { method: 'POST' });
+      if (!response.ok) throw new Error('El servidor no ha podido registrar la credencial.');
+      const result = await response.json();
+      if (activeUserId.current !== ownerId || typeof result.token !== 'string' || !/^wpa_[A-Za-z0-9_-]{43}$/.test(result.token)) throw new Error('La sesión ha cambiado o la credencial no es válida.');
+      await updateUserSettings({ webhookToken: result.token });
+      toast.success('Credencial personal registrada. Actualiza AeroFocus con el nuevo valor.');
+      return result.token;
+    } catch (error) { toast.error(error instanceof Error ? error.message : 'No se ha podido registrar la credencial.'); return ''; }
   };
 
   const LOCAL_STORAGE_QUARANTINE_KEY = "wp_quarantined_events";
 
   const loadLocalQuarantinedEvents = useCallback((): WebhookSyncRecord[] => {
     try {
-      if (typeof window === "undefined" || !window.localStorage) return [];
-      const raw = localStorage.getItem(LOCAL_STORAGE_QUARANTINE_KEY);
+      if (!user?.uid || typeof window === "undefined" || !window.localStorage) return [];
+      const raw = localStorage.getItem(`${LOCAL_STORAGE_QUARANTINE_KEY}:${user.uid}`);
       if (raw) {
         const parsed = JSON.parse(raw);
         if (Array.isArray(parsed)) {
@@ -2178,28 +1496,19 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
       }
     } catch {}
     return [];
-  }, []);
+  }, [user?.uid]);
 
   const saveLocalQuarantinedEvents = useCallback((events: WebhookSyncRecord[]) => {
     try {
-      if (typeof window === "undefined" || !window.localStorage) return;
+      if (!user?.uid || typeof window === "undefined" || !window.localStorage) return;
       const pending = events.filter((e: any) => e.status === "quarantined" || e.status === "pending");
-      localStorage.setItem(LOCAL_STORAGE_QUARANTINE_KEY, JSON.stringify(pending));
+      const key = `${LOCAL_STORAGE_QUARANTINE_KEY}:${user.uid}`;
+      if (pending.length) localStorage.setItem(key, JSON.stringify(pending));
+      else localStorage.removeItem(key);
     } catch {}
-  }, []);
+  }, [user?.uid]);
 
-  const [quarantinedEvents, setQuarantinedEvents] = useState<WebhookSyncRecord[]>(() => {
-    try {
-      if (typeof window !== "undefined" && window.localStorage) {
-        const raw = localStorage.getItem("wp_quarantined_events");
-        if (raw) {
-          const parsed = JSON.parse(raw);
-          if (Array.isArray(parsed)) return parsed.filter((e: any) => e.status === "quarantined" || e.status === "pending");
-        }
-      }
-    } catch {}
-    return [];
-  });
+  const [quarantinedEvents, setQuarantinedEvents] = useState<WebhookSyncRecord[]>([]);
   const [isLoadingQuarantine, setIsLoadingQuarantine] = useState(false);
 
   // Detector de artefactos de prueba antiguos para mantener la bandeja limpia sin descartar sesiones de estudio
@@ -2244,131 +1553,37 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
 
   // Carga reactiva de eventos retenidos en cuarentena (Triple redundancia: LocalStorage + Servidor + Firestore)
   const fetchQuarantinedEvents = useCallback(async () => {
+    if (!user) return [];
+    const ownerId = user.uid;
+    setIsLoadingQuarantine(true);
     try {
-      setIsLoadingQuarantine(true);
-      const combined = new Map<string, WebhookSyncRecord>();
+      const snapshot = await getDocs(collection(db, `users/${ownerId}/quarantine`));
+      const events = snapshot.docs.map(item => ({ ...item.data(), id: item.id }))
+        .filter((event: any) => (event.userId === undefined || event.userId === ownerId) && !isTestArtifact(event) && ['pending','quarantined'].includes(event.status))
+        .map((event: any) => ({ ...event, userId: ownerId })) as WebhookSyncRecord[];
+      if (activeUserId.current !== ownerId) return [];
+      saveLocalQuarantinedEvents(events); setQuarantinedEvents(events); return events;
+    } finally { if (activeUserId.current === ownerId) setIsLoadingQuarantine(false); }
+  }, [user, saveLocalQuarantinedEvents, isTestArtifact]);
 
-      // 1. Cargar backup local primero (garantiza visualización inmediata)
-      const localEvents = loadLocalQuarantinedEvents();
-      localEvents.forEach(e => {
-        if (!isTestArtifact(e) && (e.status === "quarantined" || e.status === "pending")) {
-          combined.set(e.id, e);
-        }
-      });
-
-      // 2. Intentar servidor HTTP local / Vercel
-      try {
-        const res = await fetch("/api/webhook/events");
-        if (res.ok) {
-          const text = await res.text();
-          try {
-            const data = JSON.parse(text);
-            const serverEvents: WebhookSyncRecord[] = data.events || [];
-            serverEvents.forEach((e) => {
-              if (isTestArtifact(e)) return;
-              combined.set(e.id, e);
-              if (user && (e.status === "quarantined" || e.status === "pending")) {
-                setDoc(doc(db, `users/${user.uid}/quarantine`, e.id), cleanForFirestore(e), { merge: true }).catch(() => {});
-              }
-            });
-          } catch {}
-        }
-      } catch (err) {
-        // Red / servidor desconectado
-      }
-
-      // 3. Cargar desde Firestore (garantiza persistencia entre dispositivos y recargas)
-      if (user) {
-        try {
-          const qSnap = await getDocs(collection(db, `users/${user.uid}/quarantine`));
-          qSnap.forEach((docSnap) => {
-            const record = { id: docSnap.id, ...docSnap.data() } as WebhookSyncRecord;
-            if (isTestArtifact(record)) {
-              deleteDoc(doc(db, `users/${user.uid}/quarantine`, docSnap.id)).catch(() => {});
-              return;
-            }
-            combined.set(record.id, record);
-          });
-        } catch (fErr) {
-          // Firestore
-        }
-      }
-
-      const inQuarantine = Array.from(combined.values()).filter(
-        (e: any) => e.status === "quarantined" || e.status === "pending"
-      );
-      
-      saveLocalQuarantinedEvents(inQuarantine);
-      setQuarantinedEvents(inQuarantine);
-      return inQuarantine;
-    } catch (e) {
-      console.error("Error fetching quarantined events:", e);
-      return [];
-    } finally {
-      setIsLoadingQuarantine(false);
-    }
-  }, [user, loadLocalQuarantinedEvents, saveLocalQuarantinedEvents, isTestArtifact]);
-
-  // Sincronización automática de alta frecuencia y escucha reactiva de la Bandeja de Cuarentena
+  // The backend and client share this UID-owned collection. No file/server mirror,
+  // polling copy, heuristic adoption or cache union can resurrect deleted events.
   useEffect(() => {
-    fetchQuarantinedEvents();
-
-    // 1. Polling adaptativo cada 4 segundos sobre /api/webhook/events
-    const pollTimer = setInterval(() => {
-      fetchQuarantinedEvents();
-    }, 4000);
-
-    // 2. Listener en tiempo real de Firestore para sincronización multi-dispositivo y multi-pestaña (si autenticado)
-    let unsubscribeQuarantine: (() => void) | null = null;
-    if (user) {
-      const qCol = collection(db, `users/${user.uid}/quarantine`);
-      unsubscribeQuarantine = onSnapshot(
-        qCol,
-        (snap) => {
-          const firestoreEvents: WebhookSyncRecord[] = [];
-          snap.forEach((docSnap) => {
-            const rec = { id: docSnap.id, ...docSnap.data() } as WebhookSyncRecord;
-            if (!isTestArtifact(rec) && (rec.status === "quarantined" || rec.status === "pending")) {
-              firestoreEvents.push(rec);
-            }
-          });
-          setQuarantinedEvents((prev) => {
-            const map = new Map<string, WebhookSyncRecord>();
-            loadLocalQuarantinedEvents().forEach(e => map.set(e.id, e));
-            prev.forEach((e) => map.set(e.id, e));
-            firestoreEvents.forEach((e) => map.set(e.id, e));
-            const merged = Array.from(map.values()).filter(
-              (e: any) => e.status === "quarantined" || e.status === "pending"
-            );
-            saveLocalQuarantinedEvents(merged);
-            return merged;
-          });
-        },
-        (err) => {
-          console.warn("Aviso en listener de cuarentena:", err);
-        }
-      );
-    }
-
-    // 3. Forzar sincronización inmediata al volver a la pestaña o ventana
-    const handleVisibility = () => {
-      if (document.visibilityState === "visible") {
-        fetchQuarantinedEvents();
-      }
-    };
-    document.addEventListener("visibilitychange", handleVisibility);
-    window.addEventListener("focus", fetchQuarantinedEvents);
-
-    return () => {
-      clearInterval(pollTimer);
-      if (unsubscribeQuarantine) unsubscribeQuarantine();
-      document.removeEventListener("visibilitychange", handleVisibility);
-      window.removeEventListener("focus", fetchQuarantinedEvents);
-    };
-  }, [user, fetchQuarantinedEvents, loadLocalQuarantinedEvents, saveLocalQuarantinedEvents, isTestArtifact]);
+    if (!user) return;
+    const ownerId = user.uid;
+    return onSnapshot(collection(db, `users/${ownerId}/quarantine`), snapshot => {
+      if (activeUserId.current !== ownerId) return;
+      const events = snapshot.docs.map(item => ({ ...item.data(), id: item.id }))
+        .filter((event: any) => (event.userId === undefined || event.userId === ownerId) && !isTestArtifact(event) && ['pending','quarantined'].includes(event.status))
+        .map((event: any) => ({ ...event, userId: ownerId })) as WebhookSyncRecord[];
+      saveLocalQuarantinedEvents(events); setQuarantinedEvents(events);
+    }, () => toast.error('No se ha podido sincronizar la cuarentena. Comprueba la conexión y los permisos.'));
+  }, [user, saveLocalQuarantinedEvents, isTestArtifact]);
 
   // Importación e inserción manual de transmisiones de AeroFocus a la Bandeja de Cuarentena
   const addQuarantineEventManually = useCallback(async (rawInput: any): Promise<boolean> => {
+    if (!user) return false;
+    const ownerId = user.uid;
     try {
       const parsedRes = parseAeroFocusInput(rawInput);
       if (!parsedRes.success || !parsedRes.payload) {
@@ -2412,25 +1627,19 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
       }
 
       // Si no hay temas individuales pero sí tiempo total de estudio registrado
-      const detectedFlightMins = Number(
-        rawPayload.minutosEfectivos ??
-        rawPayload.totalEffectiveStudyMinutes ??
-        rawPayload.effectiveMinutes ??
-        rawPayload.dailyTotalEffectiveMinutes ??
-        rawPayload.totalFlightEffectiveMinutes ??
-        (rawPayload.dailyTotalEffectiveHours ? rawPayload.dailyTotalEffectiveHours * 60 : 0) ??
-        (rawPayload.effectiveHours ? rawPayload.effectiveHours * 60 : 0) ??
-        (rawPayload.horasEfectivas ? rawPayload.horasEfectivas * 60 : 0) ??
-        0
-      );
+      const detectedFlightMins = [
+        rawPayload.minutosEfectivos, rawPayload.totalEffectiveStudyMinutes, rawPayload.effectiveMinutes,
+        rawPayload.dailyTotalEffectiveMinutes, rawPayload.totalFlightEffectiveMinutes,
+        Number(rawPayload.dailyTotalEffectiveHours) * 60, Number(rawPayload.effectiveHours) * 60, Number(rawPayload.horasEfectivas) * 60,
+      ].filter(value => typeof value === 'number' || typeof value === 'string').map(Number).find(value => Number.isFinite(value) && value > 0) ?? 0;
 
       if (rawTopics.length === 0) {
-        const fallbackSub = rawPayload.materia || rawPayload.subject || rawPayload.category || "Constitucional";
-        const fallbackMins = detectedFlightMins > 0 ? detectedFlightMins : 60;
+        const fallbackSub = rawPayload.materia || rawPayload.subject || rawPayload.category || "";
+        const fallbackMins = detectedFlightMins;
         rawTopics = [{
           materia: fallbackSub,
           topicTitle: rawPayload.topicTitle || rawPayload.title || `Sesión de Estudio (${fallbackSub})`,
-          topicNumber: extractTopicNumber(rawPayload.topicNumber) || 1,
+          topicNumber: extractTopicNumber(rawPayload.topicNumber) || undefined,
           effectiveMinutes: fallbackMins,
           effectiveHours: Math.round((fallbackMins / 60) * 100) / 100,
           modality: rawPayload.modality || "repaso"
@@ -2453,17 +1662,16 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
       });
 
       const effectiveTopicsList = filteredRawTopics.length > 0 ? filteredRawTopics : rawTopics;
-      const topicsCount = effectiveTopicsList.length || 1;
-      const distributedFallbackMins = detectedFlightMins > 0 ? Math.max(15, Math.round(detectedFlightMins / topicsCount)) : 45;
+      // A flight total can describe its sole row; it cannot allocate minutes among several topics.
+      const singleTopicFlightMinutes = effectiveTopicsList.length === 1 ? detectedFlightMins : 0;
 
       for (const t of effectiveTopicsList) {
-        const materia = t.materia || t.subject || t.subjectName || t.category || rawPayload.materia || rawPayload.subject || "Constitucional";
+        const materia = t.materia || t.subject || t.subjectName || t.category || rawPayload.materia || rawPayload.subject || "";
         const modalidad = t.modalidad || t.modality || t.type || rawPayload.modalidad || rawPayload.modality || "repaso";
         
         // Extracción precisa de los minutos del tema
         const directMins = extractMinutesFromAeroItem(t, 0);
-        let minutos = directMins > 0 ? directMins : distributedFallbackMins;
-        if (minutos <= 0) minutos = 1;
+        const minutos = directMins > 0 ? directMins : singleTopicFlightMinutes;
         const horas = Math.round((minutos / 60) * 100) / 100;
 
         const startPage = t.startPage ?? t.pages?.pageStart ?? null;
@@ -2508,9 +1716,9 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
           const parsedNum = extractTopicNumber(t.topicNumber) || extractTopicNumber(t.temaNumero) || extractTopicNumber(rawTitleStr) || extractTopicNumber(t.id);
           const matchedOfficial = parsedNum && subId ? initialTopics.find(it => it.subjectId === subId && it.number === parsedNum) : undefined;
 
-          const finalSubId = matchedOfficial ? matchedOfficial.subjectId : (subId || (parsedNum ? 'constitucional' : 'otros'));
-          const finalNum = matchedOfficial ? matchedOfficial.number : (parsedNum && parsedNum > 0 ? parsedNum : 1);
-          const finalTopicId = matchedOfficial ? matchedOfficial.id : (finalNum ? `${finalSubId}-${finalNum}` : `pendiente_${Date.now()}`);
+          const finalSubId = matchedOfficial ? matchedOfficial.subjectId : (subId || 'unknown');
+          const finalNum = matchedOfficial ? matchedOfficial.number : (parsedNum && parsedNum > 0 ? parsedNum : 0);
+          const finalTopicId = matchedOfficial ? matchedOfficial.id : (subId && finalNum ? `${finalSubId}-${finalNum}` : `unresolved-${Date.now()}-${resolvedTopics.length}`);
           const finalTitle = matchedOfficial
             ? `Tema ${matchedOfficial.number} - ${matchedOfficial.title}`
             : (rawTitleStr || (finalNum ? `Tema ${finalNum} (${finalSubId})` : 'Sesión pendiente de clasificar'));
@@ -2553,7 +1761,8 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
         Number(rawPayload.totalFlightEffectiveHours) ||
         Math.round((totalEffectiveMinutes / 60) * 100) / 100;
 
-      const record: WebhookSyncRecord = {
+      const record: WebhookSyncRecord & { userId: string } = {
+        userId: ownerId,
         id: `af_manual_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
         receivedAt: new Date().toISOString(),
         date: rawPayload.date || rawPayload.flightDate || getLocalDateString(),
@@ -2573,30 +1782,19 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
         },
       };
 
-      // 1. Guardar en Firestore si el usuario está autenticado
-      if (user) {
-        const qDocRef = doc(db, `users/${user.uid}/quarantine`, record.id);
-        await setDoc(qDocRef, cleanForFirestore(record)).catch((err) => {
-          console.warn("Aviso al guardar en Firestore (continuando con localStorage):", err);
-        });
-      }
+      // Confirm creation only after the durable write succeeds. On failure the
+      // caller keeps the original import input and can retry it explicitly.
+      const qDocRef = doc(db, `users/${ownerId}/quarantine`, record.id);
+      await setDoc(qDocRef, cleanForFirestore(record));
+      if (activeUserId.current !== ownerId) return true;
 
-      // 2. Guardar en LocalStorage para persistencia absoluta
+      // Keep the account-scoped cache in sync after persistence, not before it.
       setQuarantinedEvents(prev => {
+        if (activeUserId.current !== ownerId) return prev;
         const updated = [record, ...prev.filter(e => e.id !== record.id)];
         saveLocalQuarantinedEvents(updated);
         return updated;
       });
-
-      // 3. Replicar al servidor local en segundo plano
-      fetch("/api/webhook/aerofocus", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${webhookToken || "wp_qLXi6WFkFY_live"}`
-        },
-        body: JSON.stringify(record.rawPayload || record)
-      }).catch(() => {});
 
       toast.success("¡Transmisión de AeroFocus incorporada a la Bandeja de Cuarentena!");
       return true;
@@ -2608,155 +1806,50 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
   }, [user, webhookToken, saveLocalQuarantinedEvents]);
 
   // Incorpora un evento de AeroFocus de forma completa y oficial a las sesiones del usuario y actualiza progreso
-  const incorporateAeroFocusEvent = useCallback(
-    async (
-      event: WebhookSyncRecord,
-      source: "aerofocus_auto" | "aerofocus_approved" = "aerofocus_auto",
-      notifyToast: boolean = true
-    ): Promise<boolean> => {
-      if (!user) return false;
-      try {
-        const affectedTopicIds = new Set<string>();
-        const topicOccurrences = new Map<string, number>();
-        for (const t of (event.topics || [])) {
-          let tid = t.resolvedTopicId;
-          if (tid) {
-            if (tid === "5" || tid === (5 as any)) tid = "constitucional-5";
-            topicOccurrences.set(tid, (topicOccurrences.get(tid) || 0) + 1);
-          }
-        }
-
-        const topicSeenCount = new Map<string, number>();
-        const newSessionItems: any[] = [];
-        let totalAssignedHours = 0;
-        const topicTitles: string[] = [];
-
-        for (const topic of (event.topics || [])) {
-          let topicId = topic.resolvedTopicId;
-          if (!topicId) continue;
-          if (topicId === "5" || topicId === (5 as any)) topicId = "constitucional-5";
-
-          const countSoFar = (topicSeenCount.get(topicId) || 0) + 1;
-          topicSeenCount.set(topicId, countSoFar);
-          const totalCount = topicOccurrences.get(topicId) || 1;
-          const isLastForTopic = countSoFar === totalCount;
-
-          const durationMins = topic.effectiveMinutes || Math.round((topic.effectiveHours || 0) * 60) || 60;
-          if (durationMins <= 1 && !topic.cantoGrade && Number(topic.cantoGrade || 0) === 0) {
-            continue;
-          }
-
-          const modalityType = topic.modality === 'primer_estudio'
-            ? 'estudio_inicial'
-            : (topic.modality === 'refresco' ? 'refresco' : (topic.modality === 'canto' ? 'canto' : 'repaso'));
-
-          let completesVuelta = false;
-          if ((topic as any).completesVuelta !== undefined) {
-            completesVuelta = Boolean((topic as any).completesVuelta);
-          } else if (modalityType === 'repaso' || modalityType === 'canto') {
-            completesVuelta = isLastForTopic;
-          }
-
-          const effectiveHours = topic.effectiveHours || (durationMins / 60);
-          totalAssignedHours += effectiveHours;
-          if (topic.resolvedTopicTitle && !topicTitles.includes(topic.resolvedTopicTitle)) {
-            topicTitles.push(topic.resolvedTopicTitle);
-          }
-
-          const sessionRef = doc(collection(db, `users/${user.uid}/sessions`));
-          const sessionDoc = cleanForFirestore({
-            userId: user.uid,
-            topicId,
-            topicTitle: topic.resolvedTopicTitle,
-            date: event.date || getLocalDateString(),
-            durationMinutes: durationMins,
-            durationReal: durationMins,
-            difficulty: topic.difficulty !== undefined ? topic.difficulty : (topic.dificultadReal !== undefined ? topic.dificultadReal : 5),
-            dificultadReal: topic.difficulty !== undefined ? topic.difficulty : (topic.dificultadReal !== undefined ? topic.dificultadReal : 5),
-            type: modalityType,
-            modality: topic.modality,
-            notes: topic.notes || (source === 'aerofocus_auto' ? `Aterrizaje sincronizado AeroFocus Pro (Vuelo #${event.flightId || 'N/A'})` : `Aprobado desde Cuarentena AeroFocus (Vuelo #${event.flightId || 'N/A'})`),
-            source,
-            flightId: String(event.flightId || ''),
-            effectiveHours,
-            cantoGrade: topic.cantoGrade,
-            cantoSeconds: topic.cantoSeconds,
-            cantoType: topic.cantoType,
-            mistakes: topic.mistakes,
-            completesVuelta,
-            startPage: topic.startPage !== undefined ? topic.startPage : topic.pageInfo?.startPage,
-            endPage: topic.endPage !== undefined ? topic.endPage : topic.pageInfo?.endPage,
-            pagesCount: topic.pagesCount !== undefined ? topic.pagesCount : topic.pageInfo?.pagesRead,
-            pagesText: topic.pagesText || (topic.startPage && topic.endPage ? `Págs. ${topic.startPage}-${topic.endPage}` : undefined),
-            distractionSeconds: topic.distractionSeconds,
-            summaryLine: topic.summaryLine,
-            createdAt: serverTimestamp(),
-          });
-          await setDoc(sessionRef, sessionDoc);
-          newSessionItems.push({
-            id: sessionRef.id,
-            ...sessionDoc,
-            createdAt: new Date().toISOString()
-          });
-          affectedTopicIds.add(topicId);
-        }
-
-        if (newSessionItems.length > 0) {
-          setRecentSessions(prev => [...newSessionItems, ...(prev || [])]);
-        }
-
-        for (const tid of affectedTopicIds) {
-          await recalculateTopicFromSessions(tid);
-        }
-
-        // ACK al servidor para que no siga como pending
-        fetch("/api/webhook/ack", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ eventId: event.id }),
-        }).catch(() => {});
-
-        // Actualizar en Firestore para que figure como processed (ya incorporado)
-        const updatedRecord = { ...event, status: "processed" as const };
-        await setDoc(doc(db, `users/${user.uid}/quarantine`, event.id), cleanForFirestore(updatedRecord), { merge: true }).catch(() => {});
-
-        // Quitar de la lista de eventos en espera
-        setQuarantinedEvents(prev => prev.filter(e => e.id !== event.id));
-
-        // Emitir confirmación en BroadcastChannel para AeroFocus
-        try {
-          if (typeof window !== "undefined" && "BroadcastChannel" in window) {
-            const bc = new BroadcastChannel("wellsprep_sync_bus");
-            const ackMsg = {
-              type: "AEROFOCUS_SYNC_CONFIRMED",
-              status: "ok",
-              synced: true,
-              quarantined: false,
-              isQuarantined: false,
-              flightId: event.flightId,
-              message: "Aterrizaje sincronizado e incorporado al expediente con éxito"
-            };
-            bc.postMessage(ackMsg);
-            bc.postMessage({ ...ackMsg, type: "WELLSPREP_SYNC_ACK" });
-            bc.close();
-          }
-        } catch {}
-
-        if (notifyToast) {
-          playSound.success();
-          const summaryStr = topicTitles.length > 0 ? topicTitles.slice(0, 2).join(", ") : "Temario";
-          toast.success(`🛬 Aterrizaje incorporado (${totalAssignedHours.toFixed(1)}h)`, {
-            description: `${summaryStr}. Registrado en tus estadísticas oficiales.`,
-          });
-        }
-        return true;
-      } catch (err: any) {
-        console.error("Error al incorporar evento de AeroFocus:", err);
-        return false;
-      }
-    },
-    [user, recalculateTopicFromSessions]
-  );
+  const incorporateAeroFocusEvent = useCallback(async (
+    event: WebhookSyncRecord,
+    source: 'aerofocus_auto' | 'aerofocus_approved' = 'aerofocus_auto',
+    notifyToast = true,
+  ): Promise<boolean> => {
+    if (!user) return false;
+    try {
+      if ((event as WebhookSyncRecord & { userId?: string }).userId !== user.uid) throw new Error('El evento no tiene un propietario verificado para esta cuenta. Se conserva en cuarentena.');
+      const eventIdentity = String(event.flightId || event.transactionId || event.id);
+      if (!eventIdentity || !event.topics?.length) throw new Error('Evento sin identidad o sin sesiones.');
+      const entries = event.topics.map((topic, index) => {
+        if (!topicData.topicState.has(topic.resolvedTopicId) || !topic.resolvedSubjectId || topic.resolvedSubjectId === 'unknown') throw new Error('Hay temas pendientes de identificar con materia e identificador estable. Se conserva el evento en cuarentena.');
+        const duration = extractMinutesFromAeroItem(topic, 0);
+        const record = normalizeSessionRecord({
+          ...extractSessionTelemetry(topic), topicId: topic.resolvedTopicId,
+          topicTitle: topic.resolvedTopicTitle, date: event.date || getLocalDateString(),
+          durationMinutes: duration, difficulty: topic.difficulty ?? topic.dificultadReal,
+          type: topic.modality, cantoGrade: topic.cantoGrade, cantoSeconds: topic.cantoSeconds,
+          cantoType: topic.cantoType, mistakes: topic.mistakes, notes: topic.notes || '',
+          completesVuelta: topic.completesVuelta === true,
+          source, flightId: event.flightId, sourceEventId: eventIdentity,
+          sourceSegmentId: `${topic.resolvedTopicId}:${topic.modality}:${(topic.original as any)?.sessionId || (topic.original as any)?.taskId || index}`,
+        }, user.uid);
+        return { record, ref: doc(db, `users/${user.uid}/sessions`, stableSessionId(record, '')) };
+      });
+      const topicIds = [...new Set(entries.map(entry => entry.record.topicId))];
+      if (entries.length + topicIds.length + 1 > 450) throw new Error('El evento es demasiado grande para una incorporación atómica; debe dividirse en entregas con identidad estable.');
+      await runTransaction(db, async transaction => {
+        const existing = await Promise.all(entries.map(entry => transaction.get(entry.ref)));
+        entries.forEach((entry, index) => {
+          if (!existing[index].exists()) transaction.set(entry.ref, cleanForFirestore({ ...entry.record, createdAt: serverTimestamp() }));
+        });
+        topicIds.forEach(topicId => transaction.set(doc(db, `users/${user.uid}/progress`, topicId), { userId: user.uid, topicId, historyVersion: 3 }, { merge: true }));
+        transaction.set(doc(db, `users/${user.uid}/quarantine`, event.id), cleanForFirestore({ ...event, status: 'processed', userId: user.uid }), { merge: true });
+      });
+      await refreshSessionHistory();
+      setQuarantinedEvents(previous => previous.filter(item => item.id !== event.id));
+      if (notifyToast) toast.success('Evento incorporado con identidades estables. No se han duplicado sesiones.');
+      return true;
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'No se pudo incorporar el evento.');
+      return false;
+    }
+  }, [user, topicData.topicState]);
 
   // Auto-incorporación transparente: SOLO si el usuario ha habilitado explícitamente autoIncorporateAeroFocus en sus ajustes
   const isAutoIncorporating = useRef(false);
@@ -2764,6 +1857,7 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
     if (!user || !userSettings?.autoIncorporateAeroFocus || isAutoIncorporating.current) return;
     const pendingToIncorporate = quarantinedEvents.filter(
       (e: any) =>
+        e.userId === user.uid &&
         (e.status === "pending" || e.status === "quarantined") &&
         !isTestArtifact(e) &&
         Array.isArray(e.topics) &&
@@ -2815,109 +1909,20 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
 
   // Aprobar todas las sesiones retenidas en cuarentena en un solo clic
   const approveAllQuarantineEvents = useCallback(async (): Promise<{ approvedCount: number }> => {
-    if (quarantinedEvents.length === 0) return { approvedCount: 0 };
-    if (!user) {
-      toast.error("Debes iniciar sesión para incorporar eventos.");
-      return { approvedCount: 0 };
+    if (!user) return { approvedCount: 0 };
+    let approvedCount = 0;
+    for (const event of quarantinedEvents) {
+      if (await incorporateAeroFocusEvent(event, 'aerofocus_approved', false)) approvedCount++;
     }
+    await fetchQuarantinedEvents();
+    return { approvedCount };
+  }, [user, quarantinedEvents, incorporateAeroFocusEvent, fetchQuarantinedEvents]);
 
-    const toastId = toast.loading(`Aprobando e integrando ${quarantinedEvents.length} sesiones en lote...`);
-    try {
-      const affectedTopicIds = new Set<string>();
-      const ackIds: string[] = [];
-      const newSessionItems: any[] = [];
-
-      for (const event of quarantinedEvents) {
-        ackIds.push(event.id);
-        const topics = event.topics || [];
-        for (const topic of topics) {
-          const topicId = topic.resolvedTopicId;
-          if (!topicId) continue;
-
-          const durationMins = topic.effectiveMinutes || Math.round((topic.effectiveHours || 0) * 60) || 45;
-          const modalityType = topic.modality || "repaso";
-          const completesVuelta = topic.completesVuelta !== undefined ? topic.completesVuelta : (topic.modality === 'repaso' || topic.modality === 'canto');
-
-          const sessionRef = doc(collection(db, `users/${user.uid}/sessions`));
-          const sessionDoc = cleanForFirestore({
-            userId: user.uid,
-            topicId,
-            topicTitle: topic.resolvedTopicTitle,
-            date: event.date || getLocalDateString(),
-            durationMinutes: durationMins,
-            durationReal: durationMins,
-            difficulty: topic.difficulty !== undefined ? topic.difficulty : (topic.dificultadReal !== undefined ? topic.dificultadReal : 5),
-            dificultadReal: topic.difficulty !== undefined ? topic.difficulty : (topic.dificultadReal !== undefined ? topic.dificultadReal : 5),
-            type: modalityType,
-            modality: topic.modality,
-            notes: topic.notes || `Aprobado en lote desde Cuarentena AeroFocus (Vuelo #${event.flightId || 'N/A'})`,
-            source: 'aerofocus_approved',
-            flightId: String(event.flightId || ''),
-            effectiveHours: topic.effectiveHours || (durationMins / 60),
-            cantoGrade: topic.cantoGrade,
-            cantoSeconds: topic.cantoSeconds,
-            cantoType: topic.cantoType,
-            mistakes: topic.mistakes,
-            completesVuelta,
-            startPage: topic.startPage !== undefined ? topic.startPage : topic.pageInfo?.startPage,
-            endPage: topic.endPage !== undefined ? topic.endPage : topic.pageInfo?.endPage,
-            pagesCount: topic.pagesCount !== undefined ? topic.pagesCount : topic.pageInfo?.pagesRead,
-            pagesText: topic.pagesText || (topic.startPage && topic.endPage ? `Págs. ${topic.startPage}-${topic.endPage}` : undefined),
-            distractionSeconds: topic.distractionSeconds,
-            summaryLine: topic.summaryLine,
-            createdAt: serverTimestamp(),
-          });
-          await setDoc(sessionRef, sessionDoc);
-          newSessionItems.push({
-            id: sessionRef.id,
-            ...sessionDoc,
-            createdAt: new Date().toISOString()
-          });
-          affectedTopicIds.add(topicId);
-        }
-
-        deleteDoc(doc(db, `users/${user.uid}/quarantine`, event.id)).catch(() => {});
-      }
-
-      if (newSessionItems.length > 0) {
-        setRecentSessions(prev => [...newSessionItems, ...(prev || [])]);
-      }
-
-      for (const tid of affectedTopicIds) {
-        await recalculateTopicFromSessions(tid);
-      }
-
-      await fetch("/api/webhook/ack", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ eventIds: ackIds }),
-      }).catch(() => {});
-
-      const totalCount = quarantinedEvents.length;
-      saveLocalQuarantinedEvents([]);
-      setQuarantinedEvents([]);
-      toast.dismiss(toastId);
-      toast.success(`✅ ${totalCount} sesiones integradas en el expediente con éxito.`);
-      return { approvedCount: totalCount };
-    } catch (err: any) {
-      toast.dismiss(toastId);
-      toast.error("Error en aprobación masiva: " + (err?.message || err));
-      return { approvedCount: 0 };
-    }
-  }, [user, quarantinedEvents, saveLocalQuarantinedEvents]);
-
-  // Descartar evento en cuarentena (no altera expediente)
   const discardQuarantineEvent = useCallback(async (eventId: string): Promise<boolean> => {
     try {
-      await fetch("/api/webhook/discard", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ eventId }),
-      }).catch(() => {});
-
-      if (user) {
-        deleteDoc(doc(db, `users/${user.uid}/quarantine`, eventId)).catch(() => {});
-      }
+      const event = quarantinedEvents.find(record => record.id === eventId);
+      if (!user || (event as (WebhookSyncRecord & { userId?: string }) | undefined)?.userId !== user.uid) throw new Error('El evento no tiene un propietario verificado. Se conserva en cuarentena.');
+      await deleteDoc(doc(db, `users/${user.uid}/quarantine`, eventId));
 
       setQuarantinedEvents(prev => {
         const remaining = prev.filter(e => e.id !== eventId);
@@ -2930,15 +1935,18 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
       toast.error("Error al descartar evento: " + err.message);
       return false;
     }
-  }, [user, saveLocalQuarantinedEvents]);
+  }, [user, quarantinedEvents, saveLocalQuarantinedEvents]);
 
   // Vaciar toda la bandeja de cuarentena
   const clearAllQuarantine = useCallback(async (): Promise<boolean> => {
     try {
-      await fetch("/api/webhook/clear", { method: "POST" }).catch(() => {});
+      if (!user || quarantinedEvents.some(event => (event as WebhookSyncRecord & { userId?: string }).userId !== user.uid)) throw new Error('Hay eventos sin propietario verificado. Se conservan en cuarentena.');
       if (user) {
         const qSnap = await getDocs(collection(db, `users/${user.uid}/quarantine`));
-        qSnap.forEach(d => deleteDoc(d.ref).catch(() => {}));
+        if (qSnap.docs.some(record => record.data().userId !== user.uid)) throw new Error('Hay registros sin propietario verificado. No se ha vaciado la cuarentena.');
+        const batch = writeBatch(db);
+        qSnap.forEach(record => batch.delete(record.ref));
+        await batch.commit();
       }
       saveLocalQuarantinedEvents([]);
       setQuarantinedEvents([]);
@@ -2948,33 +1956,31 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
       toast.error("Error al vaciar cuarentena: " + err.message);
       return false;
     }
-  }, [user, saveLocalQuarantinedEvents]);
+  }, [user, quarantinedEvents, saveLocalQuarantinedEvents]);
 
-  // Actualizar un evento completo en cuarentena (persistir en memoria, Firestore y servidor)
+  // Firestore is the durable record. A rejected write must not look saved in the UI.
   const updateQuarantineEvent = useCallback(async (eventId: string, updatedRecord: Partial<WebhookSyncRecord>) => {
+    const existing = quarantinedEvents.find(event => event.id === eventId);
+    if (!user || (existing as (WebhookSyncRecord & { userId?: string }) | undefined)?.userId !== user.uid) throw new Error('El evento no tiene un propietario verificado. No se ha modificado.');
+    if ('userId' in updatedRecord && (updatedRecord as any).userId !== user.uid) throw new Error('La edición no puede cambiar el propietario del evento.');
+    if ('id' in updatedRecord && updatedRecord.id !== eventId) throw new Error('La edición no puede cambiar el identificador del evento.');
+    const ownerId = user.uid;
+    await setDoc(doc(db, `users/${ownerId}/quarantine`, eventId), cleanForFirestore(updatedRecord), { merge: true });
+    // An account switch during the write never brings the previous owner's record
+    // into the next account's state or local cache.
+    if (activeUserId.current !== ownerId) return;
     setQuarantinedEvents(prev => {
+      if (activeUserId.current !== ownerId) return prev;
       const updated = prev.map(e => e.id === eventId ? { ...e, ...updatedRecord } : e);
       saveLocalQuarantinedEvents(updated);
       return updated;
     });
-    if (user) {
-      try {
-        await setDoc(doc(db, `users/${user.uid}/quarantine`, eventId), cleanForFirestore(updatedRecord), { merge: true });
-      } catch (e) {
-        console.error("Error actualizando cuarentena en Firestore:", e);
-      }
-    }
-    fetch("/api/webhook/update-quarantine", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ eventId, updatedRecord })
-    }).catch(() => {});
-  }, [user, saveLocalQuarantinedEvents]);
+  }, [user, quarantinedEvents, saveLocalQuarantinedEvents]);
 
   // Actualizar un tema concreto dentro de una transmisión en cuarentena (ej. dificultad, modalidad, horas, completesVuelta)
   const updateQuarantineTopic = useCallback(async (eventId: string, topicIndex: number, updatedFields: Partial<WebhookResolvedTopic>) => {
     const event = quarantinedEvents.find(e => e.id === eventId);
-    if (!event || !event.topics || !event.topics[topicIndex]) return;
+    if (!event || !event.topics || !event.topics[topicIndex]) throw new Error('No se ha encontrado el tema en cuarentena. No se ha modificado.');
 
     const newTopics = [...event.topics];
     newTopics[topicIndex] = {
@@ -3061,11 +2067,7 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
 
     await updateQuarantineEvent(eventId, updatedRecord);
 
-    fetch("/api/webhook/delete-topic", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ eventId, topicIndex })
-    }).catch(() => {});
+
 
     toast.success("Tema retirado de la sesión.");
     return true;
@@ -3076,17 +2078,18 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
     const event = quarantinedEvents.find(e => e.id === eventId);
     if (!event) return false;
 
+    const observedMinutes = extractMinutesFromAeroItem(topicToAdd || {}, 0);
     const defaultNewTopic: WebhookResolvedTopic = {
-      resolvedTopicId: topicToAdd?.resolvedTopicId || "constitucional-1",
-      resolvedSubjectId: topicToAdd?.resolvedSubjectId || "constitucional",
-      resolvedTopicNumber: topicToAdd?.resolvedTopicNumber || 1,
-      resolvedTopicTitle: topicToAdd?.resolvedTopicTitle || "Tema 1: La Constitución Española de 1978",
-      effectiveMinutes: topicToAdd?.effectiveMinutes || 45,
-      effectiveHours: topicToAdd?.effectiveHours || 0.75,
+      resolvedTopicId: topicToAdd?.resolvedTopicId || `unresolved-${Date.now()}`,
+      resolvedSubjectId: topicToAdd?.resolvedSubjectId || "unknown",
+      resolvedTopicNumber: topicToAdd?.resolvedTopicNumber || 0,
+      resolvedTopicTitle: topicToAdd?.resolvedTopicTitle || "Tema pendiente de identificar",
+      effectiveMinutes: observedMinutes,
+      effectiveHours: observedMinutes / 60,
       modality: topicToAdd?.modality || "repaso",
-      completesVuelta: topicToAdd?.completesVuelta !== undefined ? topicToAdd.completesVuelta : true,
-      difficulty: topicToAdd?.difficulty !== undefined ? topicToAdd.difficulty : 5,
-      dificultadReal: topicToAdd?.dificultadReal !== undefined ? topicToAdd.dificultadReal : 5,
+      completesVuelta: topicToAdd?.completesVuelta === true,
+      difficulty: topicToAdd?.difficulty,
+      dificultadReal: topicToAdd?.dificultadReal,
       notes: topicToAdd?.notes || "Añadido manualmente al vuelo",
       startPage: topicToAdd?.startPage,
       endPage: topicToAdd?.endPage,
@@ -3109,13 +2112,10 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
 
     await updateQuarantineEvent(eventId, updatedRecord);
 
-    fetch("/api/webhook/add-topic", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ eventId, topic: defaultNewTopic })
-    }).catch(() => {});
 
-    toast.success("Tema añadido al vuelo.");
+
+    if (observedMinutes <= 0 || defaultNewTopic.resolvedSubjectId === 'unknown') toast.info('Tema pendiente: indica su materia, tema y minutos reales antes de incorporarlo.');
+    else toast.success("Tema añadido al vuelo.");
     return true;
   }, [quarantinedEvents, updateQuarantineEvent]);
 
@@ -3138,7 +2138,7 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
       } catch {}
     }
 
-    fetch("/api/webhook/clean-tests", { method: "POST" }).catch(() => {});
+    authenticatedFetch("/api/webhook/clean-tests", { method: "POST" }).catch(() => {});
     if (count > 0) {
       toast.success(`Se eliminaron ${count} vuelos de prueba/test.`);
     } else {
@@ -3146,58 +2146,6 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
     }
     return count;
   }, [quarantinedEvents, user, isTestArtifact]);
-
-  // Conexión reactiva en tiempo real (SSE + BroadcastChannel + Polling adaptativo)
-  useEffect(() => {
-    let sse: EventSource | null = null;
-    let channel: BroadcastChannel | null = null;
-
-    // 1. Canal entre pestañas / ventanas locales
-    try {
-      if (typeof window !== "undefined" && "BroadcastChannel" in window) {
-        channel = new BroadcastChannel("wellsprep_sync_bus");
-        channel.onmessage = async (event) => {
-          if (event.data?.type === "AEROFOCUS_TOUCHDOWN_SYNC" && event.data?.payload) {
-            toast.info("✈️ Vuelo de AeroFocus recibido por canal en vivo.");
-            await addQuarantineEventManually(event.data.payload);
-            await fetchQuarantinedEvents();
-          }
-        };
-      }
-    } catch {}
-
-    // 2. Conexión reactiva Server-Sent Events (SSE)
-    try {
-      if (typeof window !== "undefined" && typeof EventSource !== "undefined") {
-        sse = new EventSource("/api/webhook/stream");
-        sse.onmessage = (msg) => {
-          try {
-            const data = JSON.parse(msg.data);
-            if (data?.type === "ping") return;
-            if (data && (data.id || data.type === "quarantine_updated" || data.status === "quarantined")) {
-              fetchQuarantinedEvents();
-              if (data.id && data.status === "quarantined") {
-                toast.info("⚡ Nueva sesión de AeroFocus recibida en Cuarentena.");
-              }
-            }
-          } catch {}
-        };
-      }
-    } catch (err) {
-      console.warn("SSE no disponible en este entorno, operando con polling reactivo:", err);
-    }
-
-    // 3. Polling de respaldo cada 6 segundos
-    const pollTimer = setInterval(() => {
-      fetchQuarantinedEvents();
-    }, 6000);
-
-    return () => {
-      if (sse) sse.close();
-      if (channel) channel.close();
-      clearInterval(pollTimer);
-    };
-  }, [fetchQuarantinedEvents, addQuarantineEventManually]);
 
   // Mantener syncPendingWebhookEvents para compatibilidad sin auto-forzado
   const syncPendingWebhookEvents = useCallback(async (force: boolean = false) => {
@@ -3210,7 +2158,12 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
       value={{
         user,
         loading,
-        userProgress,
+        userProgress: topicData.progressView,
+        rawTopicProgress,
+        topics: topicData.topics,
+        topicState: topicData.topicState,
+        estimateDuration,
+        estimateRetentionForTopic,
         recentSessions,
         userSettings,
         webhookToken,
@@ -3231,14 +2184,13 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
         importProgress,
         exportData,
         importData,
-        migrateMercantilToConstitucional,
-        auditAndRestoreTopicIntegrity,
-        purgeAllAeroFocusData,
-        purgePhantomTema5Cante,
-        migratePenalSessionsToConstitucional5,
-        migrateAndPurgeNonConstitucionalData,
-        deduplicateUserSessions,
-        recoverHistoricalUserData,
+        migrateMercantilToConstitucional: rejectHeuristicMaintenance,
+        auditAndRestoreTopicIntegrity: rejectHeuristicMaintenance,
+        purgeAllAeroFocusData: rejectHeuristicMaintenance,
+        purgePhantomTema5Cante: rejectHeuristicMaintenance,
+        migratePenalSessionsToConstitucional5: rejectHeuristicMaintenance,
+        deduplicateUserSessions: rejectHeuristicMaintenance,
+        recoverHistoricalUserData: rejectHeuristicMaintenance,
         quarantinedEvents,
         isLoadingQuarantine,
         fetchQuarantinedEvents,
@@ -3252,7 +2204,7 @@ export function FirebaseProvider({ children }: { children: ReactNode }) {
         deleteQuarantineTopic,
         addQuarantineTopic,
         mergeQuarantineTopics,
-        cleanTestArtifacts,
+        cleanTestArtifacts: rejectHeuristicMaintenance,
       }}
     >
       {children}

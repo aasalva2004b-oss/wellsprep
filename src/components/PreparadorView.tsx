@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from "react";
+import React, { useState, useMemo, useEffect, useRef } from "react";
 import { 
   Calendar, Clock, CheckCircle2, AlertTriangle, 
   XCircle, Plus, Trash2, BookOpen, Star, ChevronRight, ChevronDown, ChevronUp, X, Search,
@@ -6,9 +6,12 @@ import {
   TrendingDown, History, Zap
 } from "lucide-react";
 import { useFirebase } from "../lib/FirebaseProvider";
-import { initialSubjects, initialTopics } from "../data/initialData";
+import { initialSubjects } from "../data/initialData";
 import { Topic } from "../types";
 import { calculateTopicCycle } from "../lib/oposicionCycle";
+import { calculateCanonicalRetention } from "../lib/ebbinghaus";
+import { getUpcomingCanteAssignments, type CantePlannerState } from "../lib/canteCommitments";
+import type { PlannerTask } from "../lib/plannerEngine";
 import { getLocalDateString, safeParseDate, cn, formatTime, formatMinutesToHours } from "../lib/utils";
 import { getLatestCantoForTopic, isCantoSession, sessionMatchesTopic, getCantoDuration } from "../lib/cantoUtils";
 import { 
@@ -20,23 +23,22 @@ import {
   WINDOW_MAX_SECS,
   TopicPreparationEvaluation
 } from "../lib/preparationScore";
-import { motion, AnimatePresence } from "motion/react";
 import { toast } from "sonner";
-import { doc, getDoc, setDoc, serverTimestamp } from "firebase/firestore";
+import { doc, onSnapshot, runTransaction, setDoc, serverTimestamp } from "firebase/firestore";
 import { db } from "../lib/firebase";
 import { playSound } from "../lib/sound";
+import { DS } from "../lib/designSystem";
 import { PreparadorTopicCard } from "./preparador/PreparadorTopicCard";
 import { PreparadorQuickFeedbackModal } from "./preparador/PreparadorQuickFeedbackModal";
 import { WeeklyPlannerStrip, ActivePlannerView } from "./preparador/WeeklyPlannerStrip";
 import { PreparadorEbbinghausQueue } from "./preparador/PreparadorEbbinghausQueue";
 import { CanteGoalCockpit } from "./preparador/CanteGoalCockpit";
-import { DailyActionPlanView } from "./preparador/DailyActionPlanView";
 import { WeeklyPlannerView } from "./planner/WeeklyPlannerView";
+import { StudySessionDialog, StudySessionTarget } from "./StudySessionDialog";
+import type { PredictionSnapshot } from "../lib/observedSession";
 import { 
   buildOrRebalanceWeeklyCantePlan, 
-  getNextCanteTarget, 
-  WeeklyCantePlan,
-  CANTE_PLAN_STORAGE_KEY
+  getNextCanteTarget
 } from "../lib/weeklyCanteEngine";
 
 type SortOption = "menor_nota" | "mayor_nota" | "orden_numero";
@@ -47,14 +49,16 @@ interface PreparadorSchedule {
 }
 
 const DEFAULT_SCHEDULE: PreparadorSchedule = {
-  lunes: ["constitucional-1", "constitucional-2"],
-  jueves: ["constitucional-3", "constitucional-4", "constitucional-5"]
+  lunes: [],
+  jueves: []
 };
 
-const LOCAL_STORAGE_KEY = "wellsprep_preparador_schedule_v2";
-const STORAGE_CUSTOM_PAGES = "wellsprep_custom_topic_pages_v2";
-const STORAGE_MANUAL_COMPLETIONS = "wellsprep_manual_completions_v2";
-const STORAGE_PROGRESS_OVERRIDES = "wellsprep_progress_overrides_v2";
+const normalizeSchedule = (data: unknown): PreparadorSchedule => {
+  const record = data && typeof data === "object" ? data as Record<string, unknown> : {};
+  const ids = (value: unknown): string[] => Array.isArray(value) ? [...new Set(value.filter((id): id is string => typeof id === "string" && id.length > 0))] : [];
+  return { lunes: ids(record.lunes), jueves: ids(record.jueves) };
+};
+
 
 export interface PreparadorViewProps {
   initialView?: ActivePlannerView;
@@ -65,24 +69,27 @@ export function PreparadorView({
   initialView = "semana_completa",
   onSubViewChange
 }: PreparadorViewProps = {}) {
-  const { user, userProgress, recentSessions, addStudySession, updateTopicProgress } = useFirebase();
+  const { user, topics: allTopics, topicState, userProgress, recentSessions, addStudySession, updateTopicProgress, estimateDuration, estimateRetentionForTopic } = useFirebase();
+  const activeOwner = useRef(user?.uid);
+  activeOwner.current = user?.uid;
+  const [observedSessionTarget, setObservedSessionTarget] = useState<StudySessionTarget | null>(null);
 
   // Active view in the planner cockpit (defaults to semana_completa for 7-day master view)
   const [activeView, setActiveView] = useState<ActivePlannerView>(() => {
-    return initialView || "semana_completa";
+    return initialView === "dia_estudio" ? "semana_completa" : initialView || "semana_completa";
   });
 
   useEffect(() => {
     if (initialView) {
-      setActiveView(initialView);
+      setActiveView(initialView === "dia_estudio" ? "semana_completa" : initialView);
     }
   }, [initialView]);
 
   const handleSelectView = (view: ActivePlannerView, selectedDate?: string) => {
-    setActiveView(view);
-    if (onSubViewChange) {
-      onSubViewChange(view);
-    }
+    const nextView = view === "dia_estudio" ? "semana_completa" : view;
+    setActiveView(nextView);
+    if (view === "lunes" || view === "jueves") setSelectedCanteReference(selectedDate || null);
+    if (onSubViewChange) onSubViewChange(nextView);
     if (selectedDate) setSelectedDayDate(selectedDate);
   };
 
@@ -95,227 +102,61 @@ export function PreparadorView({
     return getPreparadorScheduleStatus();
   }, []);
 
-  const [schedule, setSchedule] = useState<PreparadorSchedule>(() => {
-    try {
-      const saved = localStorage.getItem(LOCAL_STORAGE_KEY);
-      if (saved) return JSON.parse(saved);
-    } catch (e) {
-      console.error(e);
-    }
-    return DEFAULT_SCHEDULE;
-  });
-
-  // Dynamic Weekly Cante Plan States
-  const [customTopicPages, setCustomTopicPages] = useState<Record<string, number>>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_CUSTOM_PAGES);
-      if (saved) return JSON.parse(saved);
-    } catch (e) {
-      console.error(e);
-    }
-    return {};
-  });
-
-  const [manualDayCompletions, setManualDayCompletions] = useState<Record<string, Record<string, boolean>>>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_MANUAL_COMPLETIONS);
-      if (saved) return JSON.parse(saved);
-    } catch (e) {
-      console.error(e);
-    }
-    return {};
-  });
-
-  const [progressOverrides, setProgressOverrides] = useState<Record<string, { completedPages: number }>>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_PROGRESS_OVERRIDES);
-      if (saved) return JSON.parse(saved);
-    } catch (e) {
-      console.error(e);
-    }
-    return {};
-  });
+  const [schedule, setSchedule] = useState<PreparadorSchedule>(DEFAULT_SCHEDULE);
+  const [datedPlannerState, setDatedPlannerState] = useState<CantePlannerState | null>(null);
+  const [datedPlannerLoaded, setDatedPlannerLoaded] = useState(false);
+  const [selectedCanteReference, setSelectedCanteReference] = useState<string | null>(null);
+  const [canteProposalRequested, setCanteProposalRequested] = useState(false);
+  const [draftCanteGoal, setDraftCanteGoal] = useState<{ date: string; topicIds: string[] } | undefined>();
 
   // Sorting state for topic cards
   const [sortOption, setSortOption] = useState<SortOption>("menor_nota");
   const [showMobileKpiDetails, setShowMobileKpiDetails] = useState(false);
 
-  // Sync schedule and cante plan settings with Firestore when user is loaded
+  // Dated planner tasks are commitments. The old weekly preferences only prefill proposals.
   useEffect(() => {
+    let active = true;
+    setSchedule(DEFAULT_SCHEDULE); setDatedPlannerState(null); setDatedPlannerLoaded(false);
+    setSelectedCanteReference(null);
     if (!user) return;
-    const loadScheduleAndPlan = async () => {
-      try {
-        const ref = doc(db, `users/${user.uid}/settings/preparador`);
-        const snap = await getDoc(ref);
-        if (snap.exists()) {
-          const data = snap.data() as PreparadorSchedule;
-          if (data && (Array.isArray(data.lunes) || Array.isArray(data.jueves))) {
-            const merged = {
-              lunes: data.lunes || [],
-              jueves: data.jueves || []
-            };
-            setSchedule(merged);
-            localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(merged));
-          }
-        }
-
-        // Load weekly cante plan overrides
-        const planRef = doc(db, `users/${user.uid}/settings/weeklyCantePlan`);
-        const planSnap = await getDoc(planRef);
-        if (planSnap.exists()) {
-          const planData = planSnap.data();
-          if (planData.customTopicPages) {
-            setCustomTopicPages(planData.customTopicPages);
-            localStorage.setItem(STORAGE_CUSTOM_PAGES, JSON.stringify(planData.customTopicPages));
-          }
-          if (planData.manualDayCompletions) {
-            setManualDayCompletions(planData.manualDayCompletions);
-            localStorage.setItem(STORAGE_MANUAL_COMPLETIONS, JSON.stringify(planData.manualDayCompletions));
-          }
-          if (planData.progressOverrides) {
-            setProgressOverrides(planData.progressOverrides);
-            localStorage.setItem(STORAGE_PROGRESS_OVERRIDES, JSON.stringify(planData.progressOverrides));
-          }
-        }
-      } catch (e) {
-        console.error("Error loading preparador schedule and plan:", e);
-      }
-    };
-    loadScheduleAndPlan();
-  }, [user]);
-
-  const saveSchedule = async (newSchedule: PreparadorSchedule) => {
-    setSchedule(newSchedule);
-    try {
-      localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(newSchedule));
-      if (user) {
-        const ref = doc(db, `users/${user.uid}/settings/preparador`);
-        await setDoc(ref, {
-          userId: user.uid,
-          lunes: newSchedule.lunes || [],
-          jueves: newSchedule.jueves || [],
-          updatedAt: serverTimestamp()
-        }, { merge: true });
-      }
-    } catch (e) {
-      console.error("Error saving preparador schedule:", e);
-    }
+    const stopRecurring = onSnapshot(doc(db, `users/${user.uid}/settings/preparador`), snapshot => {
+      if (!active) return;
+      setSchedule(normalizeSchedule(snapshot.exists() ? snapshot.data() : {}));
+    }, error => console.error("No se pudieron cargar las preferencias de cante:", error));
+    const stopDated = onSnapshot(doc(db, `users/${user.uid}/settings/weeklyPlannerState`), snapshot => {
+      if (!active) return;
+      const data = snapshot.exists() ? snapshot.data() : {};
+      setDatedPlannerState({ tasks: Array.isArray(data.tasks) ? data.tasks : [], cantePlanning: data.cantePlanning });
+      setDatedPlannerLoaded(true);
+    }, error => { if (!active) return; setDatedPlannerLoaded(false); console.error("No se pudieron cargar los cantes fechados:", error); });
+    return () => { active = false; stopRecurring(); stopDated(); };
+  }, [user?.uid]);
+  const datedAssignments = useMemo(() => getUpcomingCanteAssignments(datedPlannerState, schedule, selectedCanteReference || getLocalDateString()), [datedPlannerState, schedule, selectedCanteReference]);
+  const openCantePlanning = (draft?: { date: string; topicIds: string[] }) => {
+    setDraftCanteGoal(draft); setCanteProposalRequested(true); handleSelectView("semana_completa");
   };
 
   const handleUpdateTopicPages = async (topicId: string, newTotalPages: number) => {
-    const updated = {
-      ...customTopicPages,
-      [topicId]: newTotalPages
-    };
-    setCustomTopicPages(updated);
-    try {
-      localStorage.setItem(STORAGE_CUSTOM_PAGES, JSON.stringify(updated));
-      if (user) {
-        const ref = doc(db, `users/${user.uid}/settings/weeklyCantePlan`);
-        setDoc(ref, {
-          userId: user.uid,
-          customTopicPages: updated,
-          updatedAt: serverTimestamp()
-        }, { merge: true });
-      }
-      // Sincronización con la fuente de verdad canónica (userProgress)
-      if (updateTopicProgress) {
-        await updateTopicProgress(topicId, { pages: newTotalPages });
-      }
-    } catch (e) {
-      console.error(e);
+    if (!Number.isFinite(newTotalPages) || newTotalPages <= 0) {
+      toast.error("Introduce una extensión válida del tema.");
+      return;
     }
-    toast.success(`Tema configurado con ${newTotalPages} páginas. Plan y temario unificados en tiempo real.`);
-  };
-
-  const handleUpdateTopicProgress = (topicId: string, newCompletedPages: number) => {
-    const updated = {
-      ...progressOverrides,
-      [topicId]: { completedPages: newCompletedPages }
-    };
-    setProgressOverrides(updated);
     try {
-      localStorage.setItem(STORAGE_PROGRESS_OVERRIDES, JSON.stringify(updated));
-      if (user) {
-        const ref = doc(db, `users/${user.uid}/settings/weeklyCantePlan`);
-        setDoc(ref, {
-          userId: user.uid,
-          progressOverrides: updated,
-          updatedAt: serverTimestamp()
-        }, { merge: true });
-      }
-    } catch (e) {
-      console.error(e);
-    }
-  };
-
-  const handleToggleTaskComplete = (dateStr: string, topicId: string, isCompleted: boolean, pagesCount: number) => {
-    const dayMap = manualDayCompletions[dateStr] || {};
-    const updatedCompletions = {
-      ...manualDayCompletions,
-      [dateStr]: {
-        ...dayMap,
-        [topicId]: isCompleted
-      }
-    };
-    setManualDayCompletions(updatedCompletions);
-
-    // Dynamic adjustment of topic progress
-    const prevDone = progressOverrides[topicId]?.completedPages ?? 0;
-    const nextDone = isCompleted ? prevDone + pagesCount : Math.max(0, prevDone - pagesCount);
-    const updatedOverrides = {
-      ...progressOverrides,
-      [topicId]: { completedPages: nextDone }
-    };
-    setProgressOverrides(updatedOverrides);
-
-    try {
-      localStorage.setItem(STORAGE_MANUAL_COMPLETIONS, JSON.stringify(updatedCompletions));
-      localStorage.setItem(STORAGE_PROGRESS_OVERRIDES, JSON.stringify(updatedOverrides));
-      if (user) {
-        const ref = doc(db, `users/${user.uid}/settings/weeklyCantePlan`);
-        setDoc(ref, {
-          userId: user.uid,
-          manualDayCompletions: updatedCompletions,
-          progressOverrides: updatedOverrides,
-          updatedAt: serverTimestamp()
-        }, { merge: true });
-      }
-    } catch (e) {
-      console.error(e);
+      await updateTopicProgress(topicId, { pages: newTotalPages });
+      toast.success(`Extensión del tema actualizada: ${newTotalPages} páginas.`);
+    } catch (error) {
+      toast.error("No se ha podido guardar la extensión del tema.");
     }
   };
 
   // State for Topic Picker modal
-  const [isPickerOpen, setIsPickerOpen] = useState(false);
-  const [pickerSearch, setPickerSearch] = useState("");
-  const [pickerSubjectId, setPickerSubjectId] = useState<string>("constitucional");
 
   // State for recording feedback / cante directly
   const [feedbackTopic, setFeedbackTopic] = useState<Topic | null>(null);
-  const [prepGrade, setPrepGrade] = useState<number>(7.5);
-  const [prepMinutes, setPrepMinutes] = useState<number>(12);
-  const [prepSeconds, setPrepSeconds] = useState<number>(30);
+  const [feedbackPrediction, setFeedbackPrediction] = useState<PredictionSnapshot | undefined>();
+  const [feedbackRetentionPrediction, setFeedbackRetentionPrediction] = useState<Record<string, any> | undefined>();
   const [prepNotes, setPrepNotes] = useState("");
   const [isSavingFeedback, setIsSavingFeedback] = useState(false);
-
-  // Merge static topics with user custom topics
-  const allTopics = useMemo(() => {
-    const customList = Object.entries(userProgress || {})
-      .filter(([id, data]: [string, any]) => data.isCustom && !data.isDeleted)
-      .map(([id, data]: [string, any]) => ({
-        id,
-        subjectId: data.subjectId || "custom",
-        number: data.number || 999,
-        title: data.customTitle || "Tema Personalizado",
-        pages: data.pages || 0,
-        difficulty: data.difficulty || 5,
-        tiempoEstudioHoras: data.studyTimeHours || 0,
-        fechasRepasos: [],
-        notas: data.notas || "",
-      } as unknown as Topic));
-    return [...initialTopics, ...customList];
-  }, [userProgress]);
 
   // Topic lookup map with full coverage
   const topicMap = useMemo(() => {
@@ -333,38 +174,34 @@ export function PreparadorView({
     : upcomingCanteInfo.targetDay;
 
   const currentCanteDayKey = activeView === "jueves" ? "jueves" : "lunes";
-  const assignedTopicIds = (activeView === "lunes" || activeView === "jueves")
-    ? (schedule[currentCanteDayKey] || [])
-    : (schedule[targetCanteDay] || []);
-
   const weeklyPlan = useMemo(() => {
     return buildOrRebalanceWeeklyCantePlan({
-      assignedTopicIds: schedule[targetCanteDay] || [],
+      assignedTopicIds: datedAssignments[targetCanteDay].topicIds,
+      targetDate: datedAssignments[targetCanteDay].date,
       targetDay: targetCanteDay,
       allTopics,
       sessions: recentSessions,
-      customTopicPages,
+      topicState,
       userProgress,
-      progressOverrides,
-      manualDayCompletions
     });
-  }, [schedule, targetCanteDay, allTopics, recentSessions, customTopicPages, userProgress, progressOverrides, manualDayCompletions]);
+  }, [datedAssignments, targetCanteDay, allTopics, topicState, recentSessions, userProgress]);
 
   const assignedTopics = useMemo(() => {
     const listToRender = (activeView === "lunes" || activeView === "jueves")
-      ? (schedule[currentCanteDayKey] || [])
+      ? datedAssignments[currentCanteDayKey].topicIds
       : [];
     return listToRender
       .map((id) => topicMap.get(id))
       .filter((t): t is Topic => Boolean(t));
-  }, [activeView, currentCanteDayKey, schedule, topicMap]);
+  }, [activeView, currentCanteDayKey, datedAssignments, topicMap]);
 
   // Master Scientific Preparation Analysis for each assigned topic
   const topicsAnalysis = useMemo(() => {
     return assignedTopics.map((topic) => {
       const prog = userProgress[topic.id];
-      const sessions = recentSessions.filter((s) => sessionMatchesTopic(s, topic));
-      const cycle = calculateTopicCycle(topic.id, prog, sessions);
+      const canonicalTopic = topicState.get(topic.id);
+      const sessions = canonicalTopic?.sessions ?? [];
+      const cycle = calculateTopicCycle(topic.id, prog, sessions, canonicalTopic);
 
       // Extract cante metrics
       const cantoData = getLatestCantoForTopic(recentSessions, topic, prog);
@@ -401,7 +238,7 @@ export function PreparadorView({
 
       const subject = initialSubjects.find((s) => s.id === topic.subjectId);
       const vueltas = prog?.vueltas || 0;
-      const reviewsCount = sessions.length;
+      const reviewsCount = canonicalTopic?.reviewCount ?? 0;
 
       // Complete master scientific evaluation with continuous Ebbinghaus decay
       const evaluation: TopicPreparationEvaluation = evaluateTopicPreparation({
@@ -414,7 +251,8 @@ export function PreparadorView({
         daysSinceTouch,
         vueltas,
         reviewsCount,
-        difficulty: topic.difficulty || 5
+        difficulty: topic.difficulty,
+        canonicalTopic,
       });
 
       return {
@@ -437,16 +275,16 @@ export function PreparadorView({
         evaluation
       };
     });
-  }, [assignedTopics, userProgress, recentSessions]);
+  }, [assignedTopics, userProgress, recentSessions, topicState]);
 
   // Sorted list of topics according to user preference
   const sortedTopicsAnalysis = useMemo(() => {
     const list = [...topicsAnalysis];
     if (sortOption === "menor_nota") {
-      return list.sort((a, b) => a.evaluation.overallScore - b.evaluation.overallScore);
+      return list.sort((a, b) => Number(b.evaluation.scoreAvailable) - Number(a.evaluation.scoreAvailable) || a.evaluation.overallScore - b.evaluation.overallScore);
     }
     if (sortOption === "mayor_nota") {
-      return list.sort((a, b) => b.evaluation.overallScore - a.evaluation.overallScore);
+      return list.sort((a, b) => Number(b.evaluation.scoreAvailable) - Number(a.evaluation.scoreAvailable) || b.evaluation.overallScore - a.evaluation.overallScore);
     }
     return list.sort((a, b) => a.topic.number - b.topic.number);
   }, [topicsAnalysis, sortOption]);
@@ -458,139 +296,87 @@ export function PreparadorView({
       return {
         total: 0,
         avgScore: null,
-        avgPeakScore: null,
-        avgDecay: null,
-        listosTribunal: 0,
-        enAjuste: 0,
-        enRiesgo: 0,
-        totalMinutes: 0,
-        avgRetention: null
+        scoreEvidenceCount: 0,
+        passingGrades: 0,
+        failingGrades: 0,
+        unknownGrades: 0,
+        totalMinutes: null,
+        durationEvidenceCount: 0,
+        avgRetention: null,
+        retentionEvidenceCount: 0,
       };
     }
 
-    const scores = topicsAnalysis.map((t) => t.evaluation.overallScore);
-    const avgScore = scores.reduce((a, b) => a + b, 0) / total;
+    const knownScores = topicsAnalysis.filter(t => t.evaluation.scoreAvailable);
+    const avgScore = knownScores.length ? knownScores.reduce((sum, t) => sum + t.evaluation.overallScore, 0) / knownScores.length : null;
+    const passingGrades = knownScores.filter(t => t.evaluation.overallScore >= 5).length;
+    const failingGrades = knownScores.filter(t => t.evaluation.overallScore < 5).length;
+    const unknownGrades = total - knownScores.length;
+    const recordedDurations = topicsAnalysis.filter(t => t.hasCanto);
+    const totalMinutes = recordedDurations.length ? Math.round(recordedDurations.reduce((sum, t) => sum + t.lastCantoTotalSecs, 0) / 60) : null;
 
-    const peakScores = topicsAnalysis.map((t) => t.evaluation.peakScore);
-    const avgPeakScore = peakScores.reduce((a, b) => a + b, 0) / total;
-    const avgDecay = Math.max(0, avgPeakScore - avgScore);
-
-    const listosTribunal = topicsAnalysis.filter((t) => t.evaluation.overallScore >= 7.2).length;
-    const enAjuste = topicsAnalysis.filter((t) => t.evaluation.overallScore >= 4.5 && t.evaluation.overallScore < 7.2).length;
-    const enRiesgo = topicsAnalysis.filter((t) => t.evaluation.overallScore < 4.5).length;
-
-    const totalSecs = topicsAnalysis.reduce((acc, t) => {
-      return acc + (t.hasCanto ? t.lastCantoTotalSecs : OPTIMAL_CANTO_SECS);
-    }, 0);
-    const totalMinutes = Math.round(totalSecs / 60);
-
-    const retentions = topicsAnalysis.map((t) => t.evaluation.retentionPct);
-    const avgRetention = Math.round(retentions.reduce((a, b) => a + b, 0) / total);
+    const retentions = topicsAnalysis.filter(t => t.evaluation.retentionAvailable).map(t => t.evaluation.retentionPct);
+    const avgRetention = retentions.length ? Math.round(retentions.reduce((a, b) => a + b, 0) / retentions.length) : null;
 
     return {
       total,
       avgScore,
-      avgPeakScore,
-      avgDecay,
-      listosTribunal,
-      enAjuste,
-      enRiesgo,
+      scoreEvidenceCount: knownScores.length,
+      passingGrades,
+      failingGrades,
+      unknownGrades,
+      durationEvidenceCount: recordedDurations.length,
       totalMinutes,
-      avgRetention
+      avgRetention,
+      retentionEvidenceCount: retentions.length,
     };
   }, [topicsAnalysis]);
 
-  // Count of topics with high decay or overdue review
+  // Alerts follow the shared adaptive recommendation, never a fixed inactivity threshold.
   const ebbinghausAlertCount = useMemo(() => {
-    let count = 0;
-    for (const topic of allTopics) {
-      const prog = userProgress[topic.id];
-      const sessions = recentSessions.filter((s) => sessionMatchesTopic(s, topic));
-      if (!prog && sessions.length === 0) continue;
-      const sorted = [...sessions].sort(
-        (a, b) => safeParseDate(b.date).getTime() - safeParseDate(a.date).getTime()
-      );
-      const lastDate = sorted[0]?.date || prog?.lastReviewDate || prog?.firstStudyDate;
-      if (!lastDate) continue;
-      const daysSince = Math.max(0, Math.floor((new Date().getTime() - safeParseDate(lastDate).getTime()) / (1000 * 3600 * 24)));
-      if (daysSince >= 28) {
-        count++;
-      }
-    }
-    return count;
-  }, [allTopics, userProgress, recentSessions]);
+    return [...topicState.values()].filter(topic => {
+      const memory = calculateCanonicalRetention(topic);
+      return memory.hasData && (memory.actionUrgency === "alta" || memory.actionUrgency === "inmediata");
+    }).length;
+  }, [topicState]);
 
-  // Handlers for managing schedule
-  const handleAddTopic = (topicId: string) => {
-    const dayKey = (activeView === "jueves" ? "jueves" : "lunes") as "lunes" | "jueves";
-    const currentList = schedule[dayKey] || [];
-    if (!currentList.includes(topicId)) {
-      const updated = {
-        ...schedule,
-        [dayKey]: [...currentList, topicId]
-      };
-      saveSchedule(updated);
-      playSound.success();
-      toast.success(`Tema añadido a la sesión del ${dayKey === "lunes" ? "Lunes" : "Jueves"}`);
-    }
+  // Adding topics starts a reviewable proposal. Removing a dated cante is an explicit user edit.
+  const handleAddTopicToDay = (topicId: string, targetDay: "lunes" | "jueves") => {
+    openCantePlanning({ date: datedAssignments[targetDay].date, topicIds: [topicId] });
   };
-
-  const handleAddTopicToDay = async (topicId: string, targetDay: "lunes" | "jueves") => {
-    const currentList = schedule[targetDay] || [];
-    if (!currentList.includes(topicId)) {
-      const updated = {
-        ...schedule,
-        [targetDay]: [...currentList, topicId]
-      };
-      await saveSchedule(updated);
-      playSound.success();
-      toast.success(`Tema añadido a la sesión del ${targetDay === "lunes" ? "Lunes" : "Jueves"}`);
-    } else {
-      toast.info(`El tema ya estaba asignado al ${targetDay === "lunes" ? "Lunes" : "Jueves"}`);
-    }
-  };
-
-  const handleRemoveTopic = (topicId: string) => {
-    const dayKey = (activeView === "jueves" ? "jueves" : "lunes") as "lunes" | "jueves";
-    const currentList = schedule[dayKey] || [];
-    const updated = {
-      ...schedule,
-      [dayKey]: currentList.filter((id) => id !== topicId)
-    };
-    saveSchedule(updated);
-    playSound.click();
-    toast.info("Tema quitado de la sesión");
-  };
-
-  const handleLoadUserExample = () => {
-    const dayKey = (activeView === "jueves" ? "jueves" : "lunes") as "lunes" | "jueves";
-    const updated = {
-      ...schedule,
-      [dayKey]: ["constitucional-3", "constitucional-16", "constitucional-17"]
-    };
-    saveSchedule(updated);
-    playSound.success();
-    toast.success("Ejemplo cargado: Temas 3, 16 y 17 de Constitucional");
-  };
-
-  // 1-Click Quick Review Handler
-  const handleQuickReview = async (topicId: string, durationMinutes: number) => {
+  const handleRemoveTopic = async (topicId: string) => {
+    if (!user || !datedPlannerLoaded) return;
+    const date = datedAssignments[activeView === "jueves" ? "jueves" : "lunes"].date;
+    const ownerUid = user.uid;
     try {
-      const topic = topicMap.get(topicId);
-      const difficulty = topic?.difficulty || 5;
-      await addStudySession(topicId, durationMinutes, difficulty, "repaso");
-      playSound.success();
-      toast.success(`⚡ Repaso de ${durationMinutes} min registrado`, {
-        description: `Curva de retención neuronal renovada para Tema ${topic?.number || ""}.`,
+      const ref = doc(db, `users/${ownerUid}/settings/weeklyPlannerState`);
+      const removed = await runTransaction(db, async transaction => {
+        const snapshot = await transaction.get(ref);
+        if (activeOwner.current !== ownerUid) throw new Error("La cuenta activa ha cambiado.");
+        const current = snapshot.exists() && Array.isArray(snapshot.data().tasks) ? snapshot.data().tasks as PlannerTask[] : [];
+        const updated = current.filter(task => !(task.activityType === "cante" && task.topicId === topicId && task.date === date));
+        transaction.set(ref, { tasks: JSON.parse(JSON.stringify(updated)), userId: ownerUid, updatedAt: serverTimestamp() }, { merge: true });
+        return current.length - updated.length;
       });
-    } catch (e: any) {
-      toast.error("Error al registrar repaso: " + (e?.message || e));
-    }
+      if (activeOwner.current !== ownerUid) return;
+      toast.success(removed ? `Tema retirado del cante del ${date}. Las sesiones y las otras tareas se conservan.` : "Ese tema ya no estaba asignado a esta fecha.");
+    } catch { toast.error("No se ha podido retirar el tema del cante."); }
+  };
+
+  // Opening the form captures the estimate before the observed duration is entered.
+  const handleQuickReview = (topicId: string, _durationMinutes?: number) => {
+    const canonical = topicState.get(topicId);
+    if (!canonical) return;
+    const predictionSnapshot = estimateDuration(topicId, "repaso");
+    setObservedSessionTarget({ topicId, title: canonical.title, type: "repaso", difficulty: canonical.difficulty,
+      predictionSnapshot, retentionPrediction: estimateRetentionForTopic(topicId), estimatedMinutes: predictionSnapshot.estimatedMinutes,
+      metadata: { totalPages: canonical.hasExplicitPages ? canonical.pages : undefined, totalWords: canonical.numeroPalabras },
+    });
   };
 
   // Save preparador feedback
   const handleSavePreparadorFeedback = async (data: {
-    grade: number;
+    grade?: number;
     durationMinutes: number;
     durationSeconds: number;
     notes: string;
@@ -598,7 +384,6 @@ export function PreparadorView({
     if (!feedbackTopic) return;
     setIsSavingFeedback(true);
     try {
-      const totalSecs = data.durationMinutes * 60 + data.durationSeconds;
       await addStudySession(
         feedbackTopic.id,
         data.durationMinutes,
@@ -606,15 +391,19 @@ export function PreparadorView({
         "canto",
         getLocalDateString(),
         {
-          cantoSeconds: totalSecs,
+          prediction: feedbackPrediction,
+          retentionPrediction: feedbackRetentionPrediction,
+          totalPagesAtSession: feedbackPrediction?.inputs?.totalPages,
+          wordsAtSession: feedbackPrediction?.inputs?.totalWords,
+          cantoSeconds: data.durationSeconds,
           cantoGrade: data.grade,
           cantoType: "preparador",
           mistakes: data.notes,
-          notes: `Sesión de cante ante preparador: ${data.durationMinutes}m ${data.durationSeconds}s. Nota: ${data.grade}. Feedback: ${data.notes}`
+          notes: data.notes.trim()
         }
       );
       playSound.success();
-      toast.success(`Evaluación del preparador guardada (Nota ${data.grade.toFixed(1)})`);
+      toast.success(data.grade === undefined ? "Cante real guardado sin calificación." : `Evaluación del preparador guardada (Nota ${data.grade.toFixed(1)})`);
       setFeedbackTopic(null);
       setPrepNotes("");
     } catch (e: any) {
@@ -626,24 +415,13 @@ export function PreparadorView({
   };
 
   // Filter topics in the picker modal (including custom topics)
-  const pickerFilteredTopics = useMemo(() => {
-    const list = allTopics.filter((t) => t.subjectId === pickerSubjectId);
-    if (!pickerSearch.trim()) return list;
-    const q = pickerSearch.toLowerCase().trim();
-    return list.filter((t) => 
-      t.title.toLowerCase().includes(q) ||
-      (t.fullTitle && t.fullTitle.toLowerCase().includes(q)) ||
-      t.number.toString().includes(q)
-    );
-  }, [allTopics, pickerSubjectId, pickerSearch]);
-
   // All historical sessions with preparador / cantos (with deduplication safeguard)
   const preparadorSessions = useMemo(() => {
     const raw = recentSessions.filter(isCantoSession);
     const unique: any[] = [];
     const seen = new Set<string>();
     for (const s of raw) {
-      const key = `${s.topicId}-${s.date}-${s.durationMinutes || s.duration || 0}-${s.cantoSeconds || 0}-${s.cantoGrade ?? s.grade ?? ''}`;
+      const key = s.id;
       if (!seen.has(key)) {
         seen.add(key);
         unique.push(s);
@@ -652,203 +430,28 @@ export function PreparadorView({
     return unique;
   }, [recentSessions]);
 
-  // Sessions for selected study date
-  const selectedDaySessions = useMemo(() => {
-    if (activeView !== "dia_estudio" || !selectedDayDate) return [];
-    return recentSessions.filter((s) => (s.date || "").startsWith(selectedDayDate));
-  }, [activeView, selectedDayDate, recentSessions]);
-
-  const selectedDayTotalMinutes = useMemo(() => {
-    return selectedDaySessions.reduce(
-      (acc, s) => acc + (s.durationMinutes || s.duration || 0),
-      0
-    );
-  }, [selectedDaySessions]);
-
   return (
-    <div className="flex flex-col h-full bg-[#F5F5F7] overflow-hidden">
-      {/* SLIM STICKY HEADER */}
-      <div className="bg-white/95 backdrop-blur-2xl border-b border-slate-200/70 px-4 py-2.5 sm:px-6 sticky top-0 z-20 shrink-0 shadow-[0_2px_12px_rgba(0,0,0,0.03)]">
-        <div className="flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-3 max-w-[105rem] mx-auto">
-          {/* Title & Brand */}
-          <div className="flex items-center justify-between lg:justify-start gap-3">
-            <div className="flex items-center gap-2.5">
-              <div className="w-8 h-8 rounded-xl bg-slate-900 text-white flex items-center justify-center shrink-0 shadow-xs">
-                <Award size={16} strokeWidth={2.2} className="text-amber-400" />
-              </div>
-              <div>
-                <h1 className="text-base sm:text-lg font-black text-slate-900 tracking-tight font-serif truncate">
-                  Planificador & Cantes
-                </h1>
-                <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider hidden sm:block">
-                  Oposición Judicial y Fiscal · WellsPrep
-                </p>
-              </div>
-            </div>
-
-            {/* Mobile Add Topics Button (Lunes/Jueves) */}
-            {(activeView === "lunes" || activeView === "jueves") && (
-              <button
-                onClick={() => setIsPickerOpen(true)}
-                className="lg:hidden px-2.5 py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold transition-all shadow-xs flex items-center gap-1 shrink-0 active:scale-95"
-              >
-                <Plus size={13} strokeWidth={2.5} />
-                <span>Añadir</span>
-              </button>
-            )}
-          </div>
-
-          {/* Master View Switcher (Semana 7D, Cante L, Cante J, Ebbinghaus, Historial) */}
-          <div className="flex items-center gap-2 overflow-x-auto no-scrollbar py-0.5">
-            <div className="flex bg-slate-100/90 p-1 rounded-2xl border border-slate-200/70 gap-0.5 shrink-0 shadow-2xs">
-              {/* 1. Vista Semanal 7D */}
-              <button
-                type="button"
-                onClick={() => {
-                  playSound.click();
-                  handleSelectView("semana_completa");
-                }}
-                className={cn(
-                  "px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 shrink-0",
-                  activeView === "semana_completa"
-                    ? "bg-white text-slate-900 shadow-xs"
-                    : "text-slate-600 hover:text-slate-900"
-                )}
-              >
-                <Calendar size={13} className={activeView === "semana_completa" ? "text-amber-500" : "text-slate-400"} />
-                <span>Semana 7 Días</span>
-              </button>
-
-              {/* 2. Cante Lunes */}
-              <button
-                type="button"
-                onClick={() => {
-                  playSound.click();
-                  handleSelectView("lunes");
-                }}
-                className={cn(
-                  "px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 shrink-0",
-                  activeView === "lunes"
-                    ? "bg-white text-purple-950 shadow-xs"
-                    : "text-slate-600 hover:text-slate-900"
-                )}
-              >
-                <Award size={13} className={activeView === "lunes" ? "text-purple-600" : "text-slate-400"} />
-                <span>Cante Lunes</span>
-                <span className={cn(
-                  "text-[10px] font-mono font-bold px-1.5 py-0.2 rounded-md",
-                  activeView === "lunes" ? "bg-purple-100 text-purple-800" : "bg-slate-200/70 text-slate-600"
-                )}>
-                  {(schedule.lunes || []).length}
-                </span>
-              </button>
-
-              {/* 3. Cante Jueves */}
-              <button
-                type="button"
-                onClick={() => {
-                  playSound.click();
-                  handleSelectView("jueves");
-                }}
-                className={cn(
-                  "px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 shrink-0",
-                  activeView === "jueves"
-                    ? "bg-white text-purple-950 shadow-xs"
-                    : "text-slate-600 hover:text-slate-900"
-                )}
-              >
-                <Award size={13} className={activeView === "jueves" ? "text-purple-600" : "text-slate-400"} />
-                <span>Cante Jueves</span>
-                <span className={cn(
-                  "text-[10px] font-mono font-bold px-1.5 py-0.2 rounded-md",
-                  activeView === "jueves" ? "bg-purple-100 text-purple-800" : "bg-slate-200/70 text-slate-600"
-                )}>
-                  {(schedule.jueves || []).length}
-                </span>
-              </button>
-
-              {/* 4. Curva de Olvido Ebbinghaus */}
-              <button
-                type="button"
-                onClick={() => {
-                  playSound.click();
-                  handleSelectView("ebbinghaus");
-                }}
-                className={cn(
-                  "px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 shrink-0",
-                  activeView === "ebbinghaus"
-                    ? "bg-white text-amber-950 shadow-xs"
-                    : "text-slate-600 hover:text-slate-900"
-                )}
-              >
-                <Brain size={13} className={activeView === "ebbinghaus" ? "text-amber-600" : "text-slate-400"} />
-                <span>Ebbinghaus</span>
-                {ebbinghausAlertCount > 0 && (
-                  <span className="text-[10px] font-mono font-bold px-1.5 py-0.2 rounded-md bg-amber-100 text-amber-900">
-                    {ebbinghausAlertCount}
-                  </span>
-                )}
-              </button>
-
-              {/* 5. Historial */}
-              <button
-                type="button"
-                onClick={() => {
-                  playSound.click();
-                  handleSelectView("historial");
-                }}
-                className={cn(
-                  "px-3 py-1.5 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 shrink-0",
-                  activeView === "historial"
-                    ? "bg-white text-slate-900 shadow-xs"
-                    : "text-slate-600 hover:text-slate-900"
-                )}
-              >
-                <History size={13} className={activeView === "historial" ? "text-indigo-600" : "text-slate-400"} />
-                <span>Historial</span>
-                <span className={cn(
-                  "text-[10px] font-mono font-bold px-1.5 py-0.2 rounded-md",
-                  activeView === "historial" ? "bg-slate-200 text-slate-800" : "bg-slate-200/70 text-slate-600"
-                )}>
-                  {preparadorSessions.length}
-                </span>
-              </button>
-            </div>
-
-            {/* Desktop Add Topics Button (Lunes/Jueves) */}
-            {(activeView === "lunes" || activeView === "jueves") && (
-              <button
-                type="button"
-                onClick={() => {
-                  playSound.click();
-                  setIsPickerOpen(true);
-                }}
-                className="hidden lg:flex px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold transition-all shadow-xs items-center gap-1.5 shrink-0 active:scale-95"
-              >
-                <Plus size={14} strokeWidth={2.5} />
-                <span>Añadir Temas</span>
-              </button>
-            )}
-          </div>
+    <div className="flex h-full min-h-0 flex-col bg-slate-50 overflow-hidden">
+      <header className="shrink-0 border-b border-slate-200/70 bg-white px-4 py-3 sm:px-6 sm:py-4">
+        <div className="mx-auto max-w-[100rem]">
+          <h1 className={cn(DS.titlePage, "text-xl sm:text-2xl")}>Planificador y cantes</h1>
+          <p className="mt-1 hidden text-sm text-slate-600 sm:block">Tu estudio de hoy y la preparación de tus próximos cantes.</p>
         </div>
-      </div>
+      </header>
 
       {/* MAIN SCROLLABLE CONTENT */}
-      <div className="flex-1 min-h-0 overflow-y-auto overscroll-y-contain touch-pan-y -webkit-overflow-scrolling-touch p-3 sm:p-5 md:p-6 pb-44 sm:pb-36 max-w-[105rem] mx-auto w-full">
-        {/* INTERACTIVE WEEKLY PLANNER RIBBON STRIP: Shown only in Day Study / Cante modes */}
-        {activeView !== "semana_completa" && (
-          <WeeklyPlannerStrip
-            activeView={activeView}
-            onSelectView={handleSelectView}
-            lunesTopicsCount={(schedule.lunes || []).length}
-            juevesTopicsCount={(schedule.jueves || []).length}
-            ebbinghausAlertCount={ebbinghausAlertCount}
-            totalCantosCount={preparadorSessions.length}
-            selectedDateStr={selectedDayDate}
-            recentSessions={recentSessions}
-            dailyQuotas={weeklyPlan.dailyQuotas}
-          />
-        )}
+      <div className="flex-1 min-h-0 overflow-y-auto overscroll-y-contain touch-pan-y -webkit-overflow-scrolling-touch p-3 sm:p-6 pb-6 max-w-[100rem] mx-auto w-full">
+        {/* INTERACTIVE WEEKLY PLANNER RIBBON STRIP AT THE TOP */}
+        <WeeklyPlannerStrip
+          activeView={activeView}
+          onSelectView={handleSelectView}
+          lunesTopicsCount={datedAssignments.lunes.topicIds.length}
+          juevesTopicsCount={datedAssignments.jueves.topicIds.length}
+          ebbinghausAlertCount={ebbinghausAlertCount}
+          totalCantosCount={preparadorSessions.length}
+          selectedDateStr={selectedDayDate}
+          recentSessions={recentSessions}
+        />
 
         {/* VIEW 0: CUADRÍCULA SEMANAL 7 DÍAS INTELIGENTE */}
         {activeView === "semana_completa" && (
@@ -856,7 +459,11 @@ export function PreparadorView({
             allTopics={allTopics}
             scheduleLunes={schedule.lunes || []}
             scheduleJueves={schedule.jueves || []}
-            onOpenPreparadorSession={(day) => handleSelectView(day)}
+            onOpenPreparadorSession={(day, date) => handleSelectView(day, date)}
+            focusDate={selectedDayDate}
+            canteProposalRequested={canteProposalRequested}
+            draftCanteGoal={draftCanteGoal}
+            onCanteProposalRequestHandled={() => setCanteProposalRequested(false)}
           />
         )}
 
@@ -867,30 +474,8 @@ export function PreparadorView({
             recentSessions={recentSessions}
             onAssignToDay={handleAddTopicToDay}
             onQuickReview={handleQuickReview}
-            assignedLunesIds={schedule.lunes || []}
-            assignedJuevesIds={schedule.jueves || []}
-          />
-        )}
-
-        {/* VIEW 2: STUDY DAY DETAIL (Plan de Acción Diario con Reubicación Dinámica) */}
-        {activeView === "dia_estudio" && (
-          <DailyActionPlanView
-            quota={weeklyPlan.dailyQuotas[selectedDayDate]}
-            dateStr={selectedDayDate}
-            plan={weeklyPlan}
-            daySessions={selectedDaySessions}
-            topicMap={topicMap}
-            onToggleTaskComplete={handleToggleTaskComplete}
-            onRecordStudySession={async (topicId, durationMinutes) => {
-              try {
-                await addStudySession(topicId, durationMinutes, 5, "repaso");
-                playSound.success();
-                toast.success(`⚡ Sesión de ${durationMinutes} min registrada`);
-              } catch (e: any) {
-                toast.error("Error al registrar sesión: " + (e?.message || e));
-              }
-            }}
-            onSwitchToCanteView={(day) => setActiveView(day)}
+            assignedLunesIds={datedAssignments.lunes.topicIds}
+            assignedJuevesIds={datedAssignments.jueves.topicIds}
           />
         )}
 
@@ -909,7 +494,7 @@ export function PreparadorView({
             </div>
 
             {preparadorSessions.length === 0 ? (
-              <div className="bg-white rounded-3xl p-12 text-center border border-slate-200/70 shadow-sm">
+              <div className={cn(DS.card, "p-6 text-center sm:p-10")}>
                 <Award size={36} className="text-slate-300 mx-auto mb-3" />
                 <h3 className="text-base font-bold text-slate-800">No hay cantes registrados con el preparador todavía</h3>
                 <p className="text-xs text-slate-500 max-w-md mx-auto mt-1 mb-4">
@@ -926,7 +511,7 @@ export function PreparadorView({
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {preparadorSessions.map((session, idx) => {
                   const topic = topicMap.get(session.topicId) 
-                    || initialTopics.find((t) => String(t.number) === String(session.topicId) || sessionMatchesTopic(session, t));
+                    || allTopics.find((t) => sessionMatchesTopic(session, t));
                   const dur = getCantoDuration(session);
                   const grade = session.cantoGrade ?? session.grade ?? null;
 
@@ -988,33 +573,128 @@ export function PreparadorView({
         {/* VIEW 4 & 5: LUNES O JUEVES SESIÓN OFICIAL */}
         {(activeView === "lunes" || activeView === "jueves") && (
           <div className="space-y-4">
-            {/* Quick Breadcrumb Button to Weekly Plan */}
-            <div className="flex items-center justify-between gap-2">
-              <button
-                type="button"
-                onClick={() => handleSelectView("semana_completa")}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white hover:bg-slate-100 text-slate-700 text-xs font-bold border border-slate-200/80 shadow-2xs transition-all active:scale-95"
-              >
-                <Calendar size={13} className="text-slate-500" />
-                <span>← Volver a Vista Semanal (7 Días)</span>
-              </button>
-              <span className="text-xs font-mono font-bold text-slate-500 hidden sm:inline-block">
-                Cockpit de Cante · {activeView === "lunes" ? "Lunes" : "Jueves"}
-              </span>
-            </div>
-
             {/* Top Cante Goal Cockpit with dynamic page pacing & auto-rebalance */}
             <CanteGoalCockpit
               plan={weeklyPlan}
+              coverageOnly
               onUpdateTopicPages={handleUpdateTopicPages}
-              onUpdateTopicProgress={handleUpdateTopicProgress}
-              onForceRebalance={() => {
-                playSound.click();
-                toast.success("Plan recalculado con las últimas métricas.");
-              }}
-              onOpenTopicPicker={() => setIsPickerOpen(true)}
+              onForceRebalance={() => openCantePlanning()}
+              onOpenTopicPicker={() => openCantePlanning()}
             />
 
+            {/* ASSIGNED TOPICS HEADER & SORTING */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 sm:gap-3 pt-2">
+              <div>
+                <h2 className={cn(DS.titleSection, "flex flex-wrap items-center gap-2")}>
+                  <span>Temas Asignados · {datedAssignments[activeView === "jueves" ? "jueves" : "lunes"].date}</span>
+                  <span className="text-xs px-2 py-0.5 bg-slate-200/80 text-slate-700 rounded-lg font-sans font-bold">
+                    {assignedTopics.length}
+                  </span>
+                </h2>
+                <p className="text-xs text-slate-500 mt-0.5 hidden sm:block">
+                  Consulta la última nota registrada, los tiempos observados, la estimación de recuerdo y las vueltas de cada tema.
+                </p>
+              </div>
+
+              {/* Sorting Filter Selector */}
+              {assignedTopics.length > 0 && (
+                <div className="flex items-center gap-2 self-start sm:self-auto">
+                  <ArrowUpDown size={13} className="text-slate-400" />
+                  <div className="flex flex-wrap gap-1 rounded-xl bg-slate-100 p-1 text-sm font-semibold">
+                    <button
+                      onClick={() => setSortOption("menor_nota")}
+                      className={cn(
+                        "min-h-[44px] rounded-lg px-3 transition-colors",
+                        sortOption === "menor_nota" ? "bg-white text-slate-900 font-bold shadow-xs" : "text-slate-600 hover:text-slate-900"
+                      )}
+                    >
+                      Menor última nota
+                    </button>
+                    <button
+                      onClick={() => setSortOption("mayor_nota")}
+                      className={cn(
+                        "min-h-[44px] rounded-lg px-3 transition-colors",
+                        sortOption === "mayor_nota" ? "bg-white text-slate-900 font-bold shadow-xs" : "text-slate-600 hover:text-slate-900"
+                      )}
+                    >
+                      Mayor última nota
+                    </button>
+                    <button
+                      onClick={() => setSortOption("orden_numero")}
+                      className={cn(
+                        "min-h-[44px] rounded-lg px-3 transition-colors",
+                        sortOption === "orden_numero" ? "bg-white text-slate-900 font-bold shadow-xs" : "text-slate-600 hover:text-slate-900"
+                      )}
+                    >
+                      Por Número
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {assignedTopics.length === 0 && (
+                <button
+                  onClick={() => openCantePlanning()}
+                  className="text-xs text-indigo-600 hover:text-indigo-800 font-bold flex items-center gap-1.5 self-start sm:self-auto px-3 py-1.5 bg-indigo-50 rounded-xl border border-indigo-200/60"
+                >
+                  <Sparkles size={13} />
+                  <span>Planificar mis cantes con fechas</span>
+                </button>
+              )}
+            </div>
+
+            {/* TOPIC CARDS GRID */}
+            {assignedTopics.length === 0 ? (
+              <div className={cn(DS.card, "p-6 text-center sm:p-10")}>
+                <BookOpen size={36} className="text-slate-300 mx-auto mb-3" />
+                <h3 className="text-base font-bold text-slate-800">
+                  {datedPlannerLoaded ? `No hay temas confirmados para el ${datedAssignments[activeView === "jueves" ? "jueves" : "lunes"].date}` : "Cantes pendientes de cargar"}
+                </h3>
+                <p className="text-xs text-slate-500 max-w-md mx-auto mt-1 mb-5">
+                  Añade los temas que vas a cantar en tu próxima sesión para ver al instante sus notas y tiempos registrados y la estimación de recuerdo disponible.
+                </p>
+                <div className="flex items-center justify-center gap-3">
+                  <button
+                    onClick={() => openCantePlanning()}
+                    className="px-4 py-2.5 bg-slate-900 text-white rounded-xl text-xs font-bold hover:bg-slate-800 transition-all flex items-center gap-1.5 shadow-sm active:scale-95"
+                  >
+                    <Plus size={14} />
+                    <span>Seleccionar Temas del Temario</span>
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3.5 sm:gap-4">
+                {sortedTopicsAnalysis.map((item) => (
+                  <PreparadorTopicCard
+                    key={item.topic.id}
+                    topic={item.topic}
+                    subject={item.subject}
+                    evaluation={item.evaluation}
+                    hasCanto={item.hasCanto}
+                    lastCantoMins={item.lastCantoMins}
+                    lastCantoSecs={item.lastCantoSecs}
+                    lastGrade={item.lastGrade}
+                    daysSinceTouch={item.daysSinceTouch}
+                    vueltas={item.vueltas}
+                    reviewsCount={item.reviewsCount}
+                    onRemove={handleRemoveTopic}
+                    onQuickReview={handleQuickReview}
+                    onOpenFeedback={(topic) => {
+                      setFeedbackPrediction(estimateDuration(topic.id, "cante"));
+                      setFeedbackRetentionPrediction(estimateRetentionForTopic(topic.id));
+                      setFeedbackTopic(topic);
+                    }}
+                  />
+                ))}
+              </div>
+            )}
+            <details className={cn(DS.card, "p-4")}>
+              <summary className="flex min-h-[44px] cursor-pointer list-none items-center justify-between gap-2 text-sm font-bold text-slate-700">
+                Notas, retención y tiempos de los temas
+                <ChevronDown size={16} aria-hidden="true" />
+              </summary>
+              <div className="space-y-3 pt-3">
             {/* Status explanation & Meta banner */}
             <div className="flex flex-wrap items-center justify-between gap-1.5 p-2 sm:p-3 bg-white rounded-2xl border border-slate-200/80 shadow-2xs">
               <div className="flex items-center gap-1.5 text-[11px] sm:text-xs font-semibold text-slate-700">
@@ -1029,14 +709,14 @@ export function PreparadorView({
 
             {/* BENCHMARK KPI CARDS */}
             <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-3">
-              {/* 1. Nota Media de Preparación Proyectada */}
+              {/* 1. Media de últimas notas registradas */}
               <div className="bg-white rounded-2xl p-3 sm:p-3.5 border border-slate-200/70 shadow-2xs flex items-center gap-2.5 sm:gap-3">
                 <div className="w-8 h-8 sm:w-10 sm:h-10 rounded-xl bg-indigo-50 border border-indigo-100 flex items-center justify-center shrink-0 text-indigo-600">
                   <Award size={16} strokeWidth={2.2} />
                 </div>
                 <div className="min-w-0">
                   <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400 truncate">
-                    Nota Proyectada
+                    Última nota media
                   </div>
                   <div className="flex items-baseline gap-1">
                     <span className={cn(
@@ -1064,10 +744,10 @@ export function PreparadorView({
                 </div>
                 <div className="min-w-0">
                   <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400 truncate">
-                    Estado Tribunal
+                    Notas registradas
                   </div>
                   <div className="text-[11px] sm:text-xs font-bold text-slate-700 truncate">
-                    <span className="text-emerald-600 font-black">{kpis.listosTribunal}</span> L · <span className="text-amber-600 font-black">{kpis.enAjuste}</span> A · <span className="text-rose-600 font-black">{kpis.enRiesgo}</span> R
+                    <span className="text-emerald-700">{kpis.passingGrades} ≥5</span> · <span className="text-amber-700">{kpis.failingGrades} &lt;5</span> · {kpis.unknownGrades} sin nota
                   </div>
                 </div>
               </div>
@@ -1082,8 +762,9 @@ export function PreparadorView({
                     Curva Ebbinghaus
                   </div>
                   <div className="text-sm sm:text-lg font-black text-slate-900 font-mono tabular-nums">
-                    {kpis.avgRetention !== null ? `${kpis.avgRetention}%` : "—"}
-                    <span className="text-[10px] sm:text-xs font-normal text-slate-500 ml-1">retención</span>
+                    {kpis.avgRetention !== null ? `≈ ${kpis.avgRetention}%` : "Sin estimación"}
+                    <span className="text-[10px] sm:text-xs font-normal text-slate-500 ml-1">estimación</span>
+                    <p className="text-[10px] font-normal text-slate-500">{kpis.retentionEvidenceCount}/{kpis.total} temas con estimación; los desconocidos se excluyen</p>
                   </div>
                 </div>
               </div>
@@ -1095,271 +776,21 @@ export function PreparadorView({
                 </div>
                 <div className="min-w-0">
                   <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400 truncate">
-                    Cante Total Estimado
+                    Últimos tiempos de cante
                   </div>
                   <div className="text-sm sm:text-lg font-black text-slate-900 font-mono tabular-nums">
-                    ~{kpis.totalMinutes}m
-                    <span className="text-[10px] sm:text-xs font-normal text-slate-500 ml-1">({kpis.total} temas)</span>
+                    {kpis.totalMinutes === null ? "—" : `${kpis.totalMinutes}m`}
+                    <span className="text-[10px] sm:text-xs font-normal text-slate-500 ml-1">({kpis.durationEvidenceCount}/{kpis.total} temas)</span>
                   </div>
                 </div>
               </div>
             </div>
 
-            {/* ASSIGNED TOPICS HEADER & SORTING */}
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 sm:gap-3 pt-2">
-              <div>
-                <h2 className="text-base sm:text-lg font-black text-slate-900 font-serif flex items-center gap-2">
-                  <span>Temas Asignados ({activeView === "lunes" ? "Lunes" : "Jueves"})</span>
-                  <span className="text-xs px-2 py-0.5 bg-slate-200/80 text-slate-700 rounded-lg font-sans font-bold">
-                    {assignedTopics.length}
-                  </span>
-                </h2>
-                <p className="text-xs text-slate-500 mt-0.5 hidden sm:block">
-                  Visualiza la nota de preparación del 1 al 10, el cronómetro calibrado a 12:30, la curva del olvido y tus vueltas.
-                </p>
               </div>
-
-              {/* Sorting Filter Selector */}
-              {assignedTopics.length > 0 && (
-                <div className="flex items-center gap-2 self-start sm:self-auto">
-                  <ArrowUpDown size={13} className="text-slate-400" />
-                  <div className="flex bg-slate-200/70 p-1 rounded-xl text-xs font-semibold">
-                    <button
-                      onClick={() => setSortOption("menor_nota")}
-                      className={cn(
-                        "px-2.5 py-1 rounded-lg transition-all",
-                        sortOption === "menor_nota" ? "bg-white text-slate-900 font-bold shadow-xs" : "text-slate-600 hover:text-slate-900"
-                      )}
-                    >
-                      Prioritarios (Menor Nota)
-                    </button>
-                    <button
-                      onClick={() => setSortOption("mayor_nota")}
-                      className={cn(
-                        "px-2.5 py-1 rounded-lg transition-all",
-                        sortOption === "mayor_nota" ? "bg-white text-slate-900 font-bold shadow-xs" : "text-slate-600 hover:text-slate-900"
-                      )}
-                    >
-                      Mejor Preparados
-                    </button>
-                    <button
-                      onClick={() => setSortOption("orden_numero")}
-                      className={cn(
-                        "px-2.5 py-1 rounded-lg transition-all",
-                        sortOption === "orden_numero" ? "bg-white text-slate-900 font-bold shadow-xs" : "text-slate-600 hover:text-slate-900"
-                      )}
-                    >
-                      Por Número
-                    </button>
-                  </div>
-                </div>
-              )}
-
-              {assignedTopics.length === 0 && (
-                <button
-                  onClick={handleLoadUserExample}
-                  className="text-xs text-indigo-600 hover:text-indigo-800 font-bold flex items-center gap-1.5 self-start sm:self-auto px-3 py-1.5 bg-indigo-50 rounded-xl border border-indigo-200/60"
-                >
-                  <Sparkles size={13} />
-                  <span>Cargar ejemplo: Temas 3, 16 y 17 de Constitucional</span>
-                </button>
-              )}
-            </div>
-
-            {/* TOPIC CARDS GRID */}
-            {assignedTopics.length === 0 ? (
-              <div className="bg-white rounded-3xl p-12 text-center border border-slate-200/70 shadow-sm">
-                <BookOpen size={36} className="text-slate-300 mx-auto mb-3" />
-                <h3 className="text-base font-bold text-slate-800">
-                  No hay temas asignados para el {activeView === "lunes" ? "Lunes" : "Jueves"}
-                </h3>
-                <p className="text-xs text-slate-500 max-w-md mx-auto mt-1 mb-5">
-                  Añade los temas que vas a cantar en tu próxima sesión para ver al instante su nota objetiva (1-10), calibración de tiempo y retención.
-                </p>
-                <div className="flex items-center justify-center gap-3">
-                  <button
-                    onClick={() => setIsPickerOpen(true)}
-                    className="px-4 py-2.5 bg-slate-900 text-white rounded-xl text-xs font-bold hover:bg-slate-800 transition-all flex items-center gap-1.5 shadow-sm active:scale-95"
-                  >
-                    <Plus size={14} />
-                    <span>Seleccionar Temas del Temario</span>
-                  </button>
-                  <button
-                    onClick={handleLoadUserExample}
-                    className="px-4 py-2.5 bg-white text-slate-700 border border-slate-200 rounded-xl text-xs font-bold hover:bg-slate-50 transition-all"
-                  >
-                    Cargar Temas 3, 16 y 17
-                  </button>
-                </div>
-              </div>
-            ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3.5 sm:gap-4">
-                {sortedTopicsAnalysis.map((item) => (
-                  <PreparadorTopicCard
-                    key={item.topic.id}
-                    topic={item.topic}
-                    subject={item.subject}
-                    evaluation={item.evaluation}
-                    hasCanto={item.hasCanto}
-                    lastCantoMins={item.lastCantoMins}
-                    lastCantoSecs={item.lastCantoSecs}
-                    lastGrade={item.lastGrade}
-                    daysSinceTouch={item.daysSinceTouch}
-                    vueltas={item.vueltas}
-                    reviewsCount={item.reviewsCount}
-                    onRemove={handleRemoveTopic}
-                    onQuickReview={handleQuickReview}
-                    onOpenFeedback={(topic) => {
-                      setFeedbackTopic(topic);
-                      setPrepGrade(item.lastGrade ?? 7.5);
-                      setPrepMinutes(item.lastCantoMins > 0 ? item.lastCantoMins : 12);
-                      setPrepSeconds(item.lastCantoSecs >= 0 ? item.lastCantoSecs : 30);
-                    }}
-                  />
-                ))}
-              </div>
-            )}
+            </details>
           </div>
         )}
       </div>
-
-      {/* TOPIC PICKER MODAL */}
-      <AnimatePresence>
-        {isPickerOpen && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-md">
-            <motion.div
-              initial={{ opacity: 0, scale: 0.95, y: 15 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.95, y: 15 }}
-              className="bg-white rounded-3xl max-w-2xl w-full max-h-[85vh] flex flex-col shadow-2xl border border-slate-200/80 overflow-hidden"
-            >
-              {/* Header */}
-              <div className="p-5 border-b border-slate-100 flex items-center justify-between">
-                <div>
-                  <h3 className="text-lg font-black font-serif text-slate-900">
-                    Añadir Temas para el {activeView === "lunes" ? "Lunes" : "Jueves"}
-                  </h3>
-                  <p className="text-xs text-slate-500">
-                    Selecciona los temas oficiales del programa para llevar a tu próxima sesión.
-                  </p>
-                </div>
-                <button
-                  onClick={() => setIsPickerOpen(false)}
-                  className="p-1.5 text-slate-400 hover:text-slate-600 rounded-xl hover:bg-slate-100"
-                >
-                  <X size={18} />
-                </button>
-              </div>
-
-              {/* Subject Tabs */}
-              <div className="px-5 pt-3 pb-2 border-b border-slate-100 overflow-x-auto no-scrollbar flex gap-1.5">
-                {initialSubjects.map((s) => {
-                  const isSel = pickerSubjectId === s.id;
-                  return (
-                    <button
-                      key={s.id}
-                      onClick={() => setPickerSubjectId(s.id)}
-                      className={cn(
-                        "px-3 py-1.5 rounded-xl text-xs font-bold transition-all whitespace-nowrap shrink-0",
-                        isSel
-                          ? "bg-slate-900 text-white shadow-sm"
-                          : "bg-slate-100 text-slate-600 hover:bg-slate-200/70"
-                      )}
-                    >
-                      {s.name.split(" ")[0]} ({s.totalTopics})
-                    </button>
-                  );
-                })}
-              </div>
-
-              {/* Search Bar */}
-              <div className="p-4 border-b border-slate-100">
-                <div className="relative">
-                  <Search size={15} className="absolute left-3 top-3 text-slate-400" />
-                  <input
-                    type="text"
-                    value={pickerSearch}
-                    onChange={(e) => setPickerSearch(e.target.value)}
-                    placeholder="Buscar por número o texto (ej: 3, 16, Constitución, Tutela)..."
-                    className="w-full pl-9 pr-4 py-2 bg-slate-50 border border-slate-200/80 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-slate-900/10 text-slate-800"
-                  />
-                </div>
-              </div>
-
-              {/* Topics List */}
-              <div className="flex-1 overflow-y-auto p-4 space-y-2">
-                {pickerFilteredTopics.map((topic) => {
-                  const dayKey = (activeView === "jueves" ? "jueves" : "lunes") as "lunes" | "jueves";
-                  const isAssigned = (schedule[dayKey] || []).includes(topic.id);
-                  const prog = userProgress[topic.id];
-                  const vueltas = prog?.vueltas || 0;
-
-                  return (
-                    <div
-                      key={topic.id}
-                      onClick={() => {
-                        if (isAssigned) {
-                          handleRemoveTopic(topic.id);
-                        } else {
-                          handleAddTopic(topic.id);
-                        }
-                      }}
-                      className={cn(
-                        "p-3 rounded-2xl border transition-all cursor-pointer flex items-center justify-between gap-3 group",
-                        isAssigned
-                          ? "bg-indigo-50/70 border-indigo-200"
-                          : "bg-white border-slate-200/70 hover:border-slate-300 hover:bg-slate-50"
-                      )}
-                    >
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2 mb-1">
-                          <span className="text-[10px] font-black uppercase px-2 py-0.5 rounded-md bg-slate-100 text-slate-700">
-                            Tema {topic.number}
-                          </span>
-                          {vueltas > 0 && (
-                            <span className="text-[10px] font-bold text-emerald-600">
-                              Vuelta {vueltas}
-                            </span>
-                          )}
-                        </div>
-                        <h4 className="text-xs font-bold text-slate-900 truncate" title={topic.fullTitle || topic.title}>
-                          {topic.title}
-                        </h4>
-                      </div>
-
-                      <div className="shrink-0">
-                        {isAssigned ? (
-                          <span className="px-3 py-1 bg-indigo-600 text-white text-xs font-bold rounded-xl flex items-center gap-1 shadow-sm">
-                            <CheckCircle2 size={12} />
-                            <span>Asignado</span>
-                          </span>
-                        ) : (
-                          <span className="px-3 py-1 bg-slate-100 text-slate-700 group-hover:bg-slate-900 group-hover:text-white text-xs font-bold rounded-xl transition-all">
-                            Añadir
-                          </span>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-
-              {/* Footer */}
-              <div className="p-4 border-t border-slate-100 flex items-center justify-between bg-slate-50/50">
-                <span className="text-xs text-slate-500 font-medium">
-                  {(schedule[activeView === "jueves" ? "jueves" : "lunes"] || []).length} temas asignados para el {activeView === "jueves" ? "Jueves" : "Lunes"}
-                </span>
-                <button
-                  onClick={() => setIsPickerOpen(false)}
-                  className="px-5 py-2 bg-slate-900 text-white rounded-xl text-xs font-bold hover:bg-slate-800 transition-all shadow-sm"
-                >
-                  Listo
-                </button>
-              </div>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
 
       {/* RECORD PREPARADOR FEEDBACK MODAL */}
       <PreparadorQuickFeedbackModal
@@ -1367,11 +798,16 @@ export function PreparadorView({
         isOpen={Boolean(feedbackTopic)}
         onClose={() => setFeedbackTopic(null)}
         onSave={handleSavePreparadorFeedback}
-        initialGrade={prepGrade}
-        initialMinutes={prepMinutes}
-        initialSeconds={prepSeconds}
         isSaving={isSavingFeedback}
       />
+      {observedSessionTarget && <StudySessionDialog
+        target={observedSessionTarget}
+        onClose={() => setObservedSessionTarget(null)}
+        onSave={async (session) => {
+          await addStudySession(session.topicId, session.durationMinutes, session.difficulty, session.type, session.date, session);
+        }}
+      />}
+
     </div>
   );
 }

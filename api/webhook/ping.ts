@@ -1,18 +1,4 @@
-export default async function handler(req: any, res: any) {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', '*');
-
-  if (req.method === 'OPTIONS') {
-    return res.status(204).end();
-  }
-
-  return res.status(200).json({
-    status: 'ok',
-    success: true,
-    service: 'wellsprep_aerofocus_webhook',
-    message: 'Pong! Enlace operativo con WellsPrep',
-    timestamp: new Date().toISOString(),
-    ready: true
-  });
+/** Retired alternate entry point. The authenticated Express server owns this API. */
+export default function handler(_request: unknown, response: any) {
+  return response.status(410).json({ error: 'Este endpoint antiguo está deshabilitado. Utiliza el servicio autenticado de Wells Prep.' });
 }

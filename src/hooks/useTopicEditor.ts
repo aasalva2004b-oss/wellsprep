@@ -1,14 +1,13 @@
 import { useState, useMemo, useEffect } from "react";
 import { Topic } from "../types";
-import { TopicProgressData, calculateNextReviewDate } from "../lib/prediction";
+import { TopicProgressData } from "../lib/prediction";
 import { useFirebase } from "../lib/FirebaseProvider";
 import {
   isCantoSession,
   getCantoDuration,
-  sessionMatchesTopic,
   compareSessionsDesc,
 } from "../lib/cantoUtils";
-import { calculateEbbinghausCurve } from "../lib/ebbinghaus";
+import { calculateCanonicalRetention } from "../lib/ebbinghaus";
 import { getLocalDateString } from "../lib/utils";
 import { toast } from "sonner";
 
@@ -22,6 +21,7 @@ export interface UseTopicEditorProps {
 export function useTopicEditor({ topic, topicId, progress, onClose }: UseTopicEditorProps) {
   const {
     userProgress,
+    topicState,
     updateTopicProgress,
     addStudySession,
     deleteStudySession,
@@ -29,15 +29,17 @@ export function useTopicEditor({ topic, topicId, progress, onClose }: UseTopicEd
     recentSessions = [],
   } = useFirebase();
 
+  const canonicalTopic = topicState.get(topicId);
+
   // Tab State
   const [activeTab, setActiveTab] = useState<"general" | "ebbinghaus" | "canto" | "history">("general");
 
   // Topic field overrides
   const [pages, setPages] = useState<string>(
-    progress?.pages ? progress.pages.toString() : topic.pages ? topic.pages.toString() : ""
+    canonicalTopic?.hasExplicitPages ? String(canonicalTopic.pages) : ""
   );
   const [difficulty, setDifficulty] = useState<number>(
-    progress?.difficulty !== undefined ? progress.difficulty : topic.difficulty || 5
+    canonicalTopic?.difficulty ?? topic.difficulty
   );
   const [customTitle, setCustomTitle] = useState<string>(
     progress?.customTitle || topic.title || ""
@@ -70,7 +72,7 @@ export function useTopicEditor({ topic, topicId, progress, onClose }: UseTopicEd
   const [sessions, setSessions] = useState<any[]>([]);
 
   useEffect(() => {
-    const matched = recentSessions.filter((s) => sessionMatchesTopic(s, topic));
+    const matched = canonicalTopic?.sessions ?? [];
     const processed = matched.map((s) => {
       const isCante = isCantoSession(s);
       const dur = isCante
@@ -89,6 +91,7 @@ export function useTopicEditor({ topic, topicId, progress, onClose }: UseTopicEd
           : undefined;
 
       return {
+        ...s,
         id: s.id,
         topicId: s.topicId || topicId,
         date: s.date || getLocalDateString(),
@@ -111,14 +114,14 @@ export function useTopicEditor({ topic, topicId, progress, onClose }: UseTopicEd
     const deduped: any[] = [];
     const seen = new Set<string>();
     for (const s of processed) {
-      const key = `${s.date}-${s.type}-${s.durationMinutes}-${s.cantoSeconds || 0}-${s.cantoGrade ?? ""}`;
+      const key = s.id;
       if (!seen.has(key)) {
         seen.add(key);
         deduped.push(s);
       }
     }
     setSessions(deduped);
-  }, [topic.id, topic.number, recentSessions, topicId]);
+  }, [canonicalTopic?.sessions, topicId]);
 
   // Grouped sessions calculation
   const groupedSessions = useMemo(() => {
@@ -204,9 +207,8 @@ export function useTopicEditor({ topic, topicId, progress, onClose }: UseTopicEd
 
   // Ebbinghaus analysis
   const ebbinghausAnalysis = useMemo(() => {
-    const p = parseFloat(String(pages).replace(",", ".")) || topic.pages || 15;
-    return calculateEbbinghausCurve(topic.id, p, difficulty, progress, sessions);
-  }, [topic.id, pages, difficulty, progress, sessions, topic.pages]);
+    return calculateCanonicalRetention(canonicalTopic);
+  }, [canonicalTopic]);
 
   // Cante best calculation
   const bestCanto = useMemo(() => {
@@ -289,15 +291,8 @@ export function useTopicEditor({ topic, topicId, progress, onClose }: UseTopicEd
     }
   };
 
-  // Auto-calculated next review date preview
-  const previewNextDate = useMemo(() => {
-    if (logType === "repaso" || logType === "canto") {
-      const v = (progress?.vueltas || 0) + 1;
-      const d = logDifficulty !== "" ? (logDifficulty as number) : (progress?.difficulty || difficulty || 3);
-      return calculateNextReviewDate(logDate, v, d);
-    }
-    return null;
-  }, [logType, logDifficulty, logDate, progress?.vueltas, progress?.difficulty, difficulty]);
+  // La fecha de revisión se deriva del historial confirmado después de guardar.
+  const previewNextDate = null;
 
   return {
     user,

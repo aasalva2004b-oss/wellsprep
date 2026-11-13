@@ -1,115 +1,37 @@
 rules_version = '2';
-
 service cloud.firestore {
   match /databases/{database}/documents {
-    
-    function isSignedIn() {
-      return request.auth != null;
-    }
-    
-    function isOwner(userId) {
-      return isSignedIn() && (
-        request.auth.uid == userId ||
-        (request.auth.token.email != null && request.auth.token.email == userId)
+    function signedIn() { return request.auth != null; }
+    function pathOwner(uid) { return signedIn() && request.auth.uid == uid; }
+    function owned(data) {
+      return signedIn() && safeOwnerFields(data, request.auth.uid) && (
+        ('userId' in data && data.userId == request.auth.uid) ||
+        ('uid' in data && data.uid == request.auth.uid) ||
+        ('user_id' in data && data.user_id == request.auth.uid)
       );
     }
-
-    function isDocOwner() {
-      return isSignedIn() && (
-        resource == null ||
-        !('userId' in resource.data) ||
-        resource.data.userId == request.auth.uid ||
-        resource.data.userId == null ||
-        (resource.data.uid != null && resource.data.uid == request.auth.uid) ||
-        (resource.data.user_id != null && resource.data.user_id == request.auth.uid) ||
-        (request.auth.token.email != null && (
-          resource.data.userId == request.auth.token.email ||
-          resource.data.userEmail == request.auth.token.email ||
-          resource.data.email == request.auth.token.email
-        ))
-      );
+    function safeOwnerFields(data, uid) {
+      return (!('userId' in data) || data.userId == uid) &&
+        (!('uid' in data) || data.uid == uid) &&
+        (!('user_id' in data) || data.user_id == uid);
     }
-
-    match /test/{docId} {
-      allow get: if true;
-    }
-
-    // Main user partition for Wellsprep
-    match /users/{userId} {
-      allow read, write: if isOwner(userId);
-
-      match /{subcollection=**} {
-        allow read, write: if isOwner(userId);
+    match /users/{uid} {
+      allow read, delete: if pathOwner(uid);
+      allow create, update: if pathOwner(uid) && safeOwnerFields(request.resource.data, uid);
+      match /{document=**} {
+        allow read, delete: if pathOwner(uid);
+        allow create, update: if pathOwner(uid) && safeOwnerFields(request.resource.data, uid);
       }
     }
-
-    // Legacy collections support for older versions / cross-database recovery
-    match /progress/{progressId} {
-      allow read, write: if isSignedIn() && (
-        isDocOwner() ||
-        request.resource.data.userId == request.auth.uid ||
-        (request.auth.token.email != null && request.resource.data.userId == request.auth.token.email)
-      );
+    // Legacy UID-owned documents remain readable; ownership may never be claimed
+    // from a proposed update, an unverified email or an ownerless document.
+    match /{collection}/{id} {
+      allow read, delete: if collection in ['progress','sessions','study_sessions','cante_sessions','cantos','cantes','user_sessions','user_settings'] && owned(resource.data);
+      allow create: if collection in ['progress','sessions','study_sessions','cante_sessions','cantos','cantes','user_sessions','user_settings'] && owned(request.resource.data) && safeOwnerFields(request.resource.data, request.auth.uid);
+      allow update: if collection in ['progress','sessions','study_sessions','cante_sessions','cantos','cantes','user_sessions','user_settings'] && owned(resource.data) && safeOwnerFields(request.resource.data,request.auth.uid) && safeOwnerFields(resource.data,request.auth.uid);
     }
-    
-    match /sessions/{sessionId} {
-      allow read, write: if isSignedIn() && (
-        isDocOwner() ||
-        request.resource.data.userId == request.auth.uid ||
-        (request.auth.token.email != null && request.resource.data.userId == request.auth.token.email)
-      );
-    }
-    
-    match /study_sessions/{sessionId} {
-      allow read, write: if isSignedIn() && (
-        isDocOwner() ||
-        request.resource.data.userId == request.auth.uid ||
-        (request.auth.token.email != null && request.resource.data.userId == request.auth.token.email)
-      );
-    }
-
-    match /cante_sessions/{sessionId} {
-      allow read, write: if isSignedIn() && (
-        isDocOwner() ||
-        request.resource.data.userId == request.auth.uid ||
-        (request.auth.token.email != null && request.resource.data.userId == request.auth.token.email)
-      );
-    }
-
-    match /cantos/{sessionId} {
-      allow read, write: if isSignedIn() && (
-        isDocOwner() ||
-        request.resource.data.userId == request.auth.uid ||
-        (request.auth.token.email != null && request.resource.data.userId == request.auth.token.email)
-      );
-    }
-
-    match /cantes/{sessionId} {
-      allow read, write: if isSignedIn() && (
-        isDocOwner() ||
-        request.resource.data.userId == request.auth.uid ||
-        (request.auth.token.email != null && request.resource.data.userId == request.auth.token.email)
-      );
-    }
-
-    match /user_sessions/{sessionId} {
-      allow read, write: if isSignedIn() && (
-        isDocOwner() ||
-        request.resource.data.userId == request.auth.uid ||
-        (request.auth.token.email != null && request.resource.data.userId == request.auth.token.email)
-      );
-    }
-
-    match /user_settings/{docId} {
-      allow read, write: if isSignedIn() && (
-        isDocOwner() ||
-        docId == request.auth.uid ||
-        (request.auth.token.email != null && docId == request.auth.token.email)
-      );
-    }
-
-    match /{document=**} {
-      allow read, write: if false;
-    }
+    // Backend credentials and quotas are available only through the authenticated
+    // server. Admin SDK bypasses rules; server handlers must enforce UID too.
+    match /{document=**} { allow read, write: if false; }
   }
 }

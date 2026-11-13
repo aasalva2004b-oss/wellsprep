@@ -11,7 +11,10 @@
 
 import { Topic, Session } from "../types";
 import { getLocalDateString, safeParseDate } from "./utils";
-import { getCanonicalTopic } from "./canonicalTopicService";
+import { getCanonicalTopic, buildCanonicalTopicMap, type CanonicalTopic } from "./canonicalTopicService";
+import { isCantoSession, sessionMatchesTopic } from "./cantoUtils";
+import { deriveInitialStudyCoverage } from "./topicCoverage";
+import { estimatePersonalizedDuration } from "./personalizedEstimator";
 
 export interface TopicCanteGoal {
   topicId: string;
@@ -22,8 +25,17 @@ export interface TopicCanteGoal {
   completedPages: number;        // Páginas ya estudiadas para este cante
   currentStartPage: number;     // Página de partida
   isComplete: boolean;
-  minutesPerPage: number;       // Ritmo histórico personal (min/pág)
+  minutesPerPage: number | null; // Unknown until observed initial-study evidence exists
   difficulty: number;
+  /** Initial-study evidence only. Numeric legacy fields below are not exact when false. */
+  hasKnownProgress: boolean;
+  coverageStatus: 'known' | 'partial' | 'unknown' | 'conflict';
+  remainingPages: number | null;
+  studiedPageNumbers: number[];
+  canLocateRemainingPages: boolean;
+  progressIssues: string[];
+  paceIsEstimated: boolean;
+  paceSampleCount: number;
 }
 
 export interface DayTopicTask {
@@ -35,8 +47,12 @@ export interface DayTopicTask {
   fromPage: number;
   toPage: number;
   pagesCount: number;
-  estimatedMinutes: number;
-  minutesPerPage: number;
+  estimatedMinutes: number | null;
+  minutesPerPage: number | null;
+  estimateInterval?: { low: number; high: number } | null;
+  estimateEvidenceCount?: number;
+  estimateMethod?: string;
+  estimateFactors?: string[];
   isCanteMorningBuffer: boolean; // Si se permite en la mañana de cante para rematar
   isCompleted: boolean;
   actualPagesCompleted?: number;
@@ -53,6 +69,7 @@ export interface DayStudyQuota {
   isFuture: boolean;
   totalPlannedPages: number;
   totalPlannedMinutes: number;
+  unknownDurationTaskCount: number;
   totalActualPagesCompleted: number;
   totalActualMinutesStudied: number;
   tasks: DayTopicTask[];
@@ -70,12 +87,16 @@ export interface WeeklyCantePlan {
   assignedTopicIds: string[];
   topicGoals: Record<string, TopicCanteGoal>;
   dailyQuotas: Record<string, DayStudyQuota>; // Keyed by ISO date
-  historicalAverageMinPerPage: number;
+  historicalAverageMinPerPage: number | null;
+  unknownDurationTaskCount: number;
   totalTargetPages: number;
   totalCompletedPages: number;
   overallProgressPct: number;
   lastRebalancedAt: string;
-  status: "on_track" | "ahead" | "behind" | "urgent";
+  status: "on_track" | "ahead" | "behind" | "urgent" | "needs_evidence";
+  hasUnknownProgress: boolean;
+  overallProgressKnown: boolean;
+  evidenceWarnings: string[];
 }
 
 export const CANTE_PLAN_STORAGE_KEY = "wellsprep_weekly_cante_plan_v2";
@@ -99,53 +120,23 @@ export function calculateTopicHistoricalPace(
   topicId: string,
   topic: Topic | undefined,
   sessions: Session[],
-  defaultPace = DEFAULT_PACE_MINUTES_PER_PAGE.repaso,
+  _legacyDefaultPace?: number,
   userProgress?: Record<string, any>,
-  allTopics: Topic[] = []
-): { minutesPerPage: number; isEstimated: boolean; sampleCount: number } {
-  const topicSessions = sessions.filter(
-    (s) => s.topicId === topicId && (s.durationMinutes || 0) > 0 && s.type !== "canto"
-  );
-
-  const canonical = getCanonicalTopic(
-    topicId,
-    allTopics.length > 0 ? allTopics : (topic ? [topic] : []),
-    userProgress,
-    sessions
-  );
-  const topicPages = canonical.pages > 0 ? canonical.pages : (topic?.pages && topic.pages > 0 ? topic.pages : 14);
-
-  if (topicSessions.length > 0) {
-    const totalMinutes = topicSessions.reduce((acc, s) => acc + (s.durationMinutes || 0), 0);
-    // Si tenemos sesiones de estudio completas
-    const estimatedPace = Math.max(1.5, Math.min(10, totalMinutes / topicPages));
-    return {
-      minutesPerPage: Math.round(estimatedPace * 10) / 10,
-      isEstimated: false,
-      sampleCount: topicSessions.length
-    };
-  }
-
-  // Si no hay datos específicos de este tema, calcular la media global del opositor
-  const allStudySessions = sessions.filter(
-    (s) => (s.durationMinutes || 0) > 0 && s.type !== "canto"
-  );
-  if (allStudySessions.length >= 5) {
-    const totalMins = allStudySessions.reduce((acc, s) => acc + (s.durationMinutes || 0), 0);
-    const avgSessionMins = totalMins / allStudySessions.length;
-    // Estimación empírica: una sesión media de repaso cubre aproximadamente 12-15 páginas
-    const globalPace = Math.max(2.0, Math.min(7.0, avgSessionMins / 13));
-    return {
-      minutesPerPage: Math.round(globalPace * 10) / 10,
-      isEstimated: true,
-      sampleCount: allStudySessions.length
-    };
-  }
-
+  allTopics: Topic[] = [],
+  asOf: Date = new Date(),
+  topicState?: Map<string, CanonicalTopic>,
+): { minutesPerPage: number | null; isEstimated: boolean; sampleCount: number } {
+  const definitions = allTopics.length ? allTopics : topic ? [topic] : [];
+  const topics = topicState || buildCanonicalTopicMap(definitions, userProgress, sessions);
+  const canonical = topics.get(topicId) || getCanonicalTopic(topicId, definitions, userProgress, sessions);
+  const estimate = estimatePersonalizedDuration({
+    topic: canonical, activity: 'estudio_nuevo', history: sessions, topics, asOf,
+    work: { pages: 1 },
+  });
   return {
-    minutesPerPage: defaultPace,
-    isEstimated: true,
-    sampleCount: 0
+    minutesPerPage: estimate.estimatedMinutesPerPage ?? null,
+    isEstimated: estimate.estimatedMinutes === null || !sessions.some(session => session.topicId === topicId && ['primer_estudio', 'estudio_inicial', 'estudio'].includes(session.type)),
+    sampleCount: estimate.evidenceCount,
   };
 }
 
@@ -263,340 +254,205 @@ export function buildOrRebalanceWeeklyCantePlan(params: {
   targetDate?: string;
   allTopics: Topic[];
   sessions: Session[];
+  topicState?: Map<string, CanonicalTopic>;
   existingPlan?: WeeklyCantePlan | null;
   referenceDate?: Date;
+  /** Legacy copies are retained at the boundary but are not authoritative metadata. */
   customTopicPages?: Record<string, number>;
   userProgress?: Record<string, any>;
-  progressOverrides?: Record<string, { completedPages: number }>; // { [topicId]: { completedPages } }
-  manualDayCompletions?: Record<string, Record<string, boolean>>; // { [date]: { [topicId]: isDone } }
+  progressOverrides?: Record<string, { completedPages: number }>;
+  manualDayCompletions?: Record<string, Record<string, boolean>>;
 }): WeeklyCantePlan {
-  const refDate = params.referenceDate || new Date();
-  const todayStr = getLocalDateString(refDate);
-  const targetInfo = getNextCanteTarget(refDate);
-
+  const now = new Date(params.referenceDate || new Date());
+  const todayStr = getLocalDateString(now);
+  const today = safeParseDate(todayStr);
   const targetDay = params.targetDay;
-  const targetDate = params.targetDate || (targetDay === targetInfo.targetDay ? targetInfo.targetDate : targetInfo.targetDate);
-  const cycleStartDate = targetInfo.cycleStartDate;
-
-  const topicMap = new Map<string, Topic>();
-  params.allTopics.forEach((t) => topicMap.set(t.id, t));
-
-  // 1. Construir o actualizar los objetivos por tema
-  const topicGoals: Record<string, TopicCanteGoal> = {};
-  let totalTargetPages = 0;
-  let totalCompletedPages = 0;
-
-  for (const topicId of params.assignedTopicIds) {
-    const topic = topicMap.get(topicId);
-    const existingGoal = params.existingPlan?.topicGoals?.[topicId];
-    const canonical = getCanonicalTopic(topicId, params.allTopics, params.userProgress, params.sessions);
-    
-    // Páginas del tema: prioridad a override de usuario, luego canonical (de temario oficial), luego existing
-    let pages = params.userProgress?.[topicId]?.pages ||
-      params.customTopicPages?.[topicId] ||
-      (canonical.pages > 0 ? canonical.pages : 0) ||
-      existingGoal?.totalPages ||
-      (topic?.pages && topic.pages > 0 ? topic.pages : 0);
-
-    const pace = calculateTopicHistoricalPace(
-      topicId,
-      topic,
-      params.sessions,
-      DEFAULT_PACE_MINUTES_PER_PAGE.repaso,
-      params.userProgress,
-      params.allTopics
-    );
-
-    // Páginas completadas para este cante
-    let completed = 0;
-    if (params.progressOverrides?.[topicId] !== undefined) {
-      completed = params.progressOverrides[topicId].completedPages;
-    } else if (existingGoal) {
-      completed = existingGoal.completedPages;
-    } else {
-      // Calcular a partir de sesiones registradas en este ciclo (cycleStartDate a hoy)
-      const cycleSessions = params.sessions.filter((s) => {
-        if (s.topicId !== topicId || s.type === "canto") return false;
-        const sDate = (s.date || "").substring(0, 10);
-        return sDate >= cycleStartDate && sDate <= todayStr;
-      });
-
-      if (cycleSessions.length > 0) {
-        // Estimar páginas completadas según minutos estudiados y ritmo
-        const minsStudied = cycleSessions.reduce((acc, s) => acc + (s.durationMinutes || 0), 0);
-        completed = Math.min(pages, Math.round(minsStudied / pace.minutesPerPage));
-      }
-    }
-
-    completed = Math.max(0, Math.min(pages, completed));
-    const isComplete = completed >= pages;
-
-    topicGoals[topicId] = {
-      topicId,
-      topicNumber: topic?.number || 0,
-      topicTitle: topic?.title || `Tema ${topicId}`,
-      subjectId: topic?.subjectId || "general",
-      totalPages: pages,
-      completedPages: completed,
-      currentStartPage: Math.min(pages, completed + 1),
-      isComplete,
-      minutesPerPage: pace.minutesPerPage,
-      difficulty: topic?.difficulty || 5
-    };
-
-    totalTargetPages += pages;
-    totalCompletedPages += completed;
+  const requestedDay = targetDay === 'lunes' ? 1 : 4;
+  const target = params.targetDate ? safeParseDate(params.targetDate) : new Date(today);
+  if (!params.targetDate) {
+    let offset = (requestedDay - now.getDay() + 7) % 7;
+    if (offset === 0 && now.getHours() >= 21) offset = 7;
+    target.setDate(target.getDate() + offset);
   }
-
-  // 2. Determinar el rango de días del ciclo
+  const targetDate = getLocalDateString(target);
+  const cycleStart = new Date(target);
+  cycleStart.setDate(cycleStart.getDate() - (targetDay === 'lunes' ? 4 : 3));
+  const cycleStartDate = getLocalDateString(cycleStart);
+  const daysRemaining = Math.max(0, Math.round((target.getTime() - today.getTime()) / 86_400_000));
   const dateList = getDateRange(cycleStartDate, targetDate);
-
-  // Identificar días futuros o pendientes (incluyendo hoy)
-  const remainingStudyDays = dateList.filter((d) => d >= todayStr && d < targetDate);
-  const isCanteToday = todayStr === targetDate;
-
-  // 3. Distribuir páginas restantes
-  const dailyQuotas: Record<string, DayStudyQuota> = {};
-
-  // Copiar primero datos de días pasados si ya existían en el plan anterior
-  dateList.forEach((d) => {
-    const dateObj = safeParseDate(d);
-    const dayOfWeek = dateObj.getDay();
-    const isCante = d === targetDate;
-    const isPast = d < todayStr;
-    const isToday = d === todayStr;
-    const isFuture = d > todayStr;
-
-    // Sesiones reales en este día
-    const daySessions = params.sessions.filter((s) => (s.date || "").startsWith(d));
-    const dayMins = daySessions.reduce((acc, s) => acc + (s.durationMinutes || 0), 0);
-
-    dailyQuotas[d] = {
-      date: d,
-      dayName: SPANISH_DAY_NAMES[dayOfWeek],
-      shortName: SPANISH_SHORT_DAYS[dayOfWeek],
-      isCanteDay: isCante,
-      isCanteMorningReview: isCante,
-      isToday,
-      isPast,
-      isFuture,
-      totalPlannedPages: 0,
-      totalPlannedMinutes: 0,
-      totalActualPagesCompleted: 0,
-      totalActualMinutesStudied: dayMins,
-      tasks: [],
-      status: isPast ? (dayMins > 0 ? "completed" : "resting") : "pending"
-    };
+  const topicMap = new Map(params.allTopics.map(topic => [topic.id, topic]));
+  const assignedIds = [...new Set(params.assignedTopicIds)];
+  const evidenceWarnings: string[] = [];
+  const topicGoals: Record<string, TopicCanteGoal> = {};
+  const missingByTopic = new Map<string, number[]>();
+  const canonicalByTopic = params.topicState || buildCanonicalTopicMap(params.allTopics, params.userProgress, params.sessions);
+  const seenSessionIds = new Set<string>();
+  const sessions = params.sessions.filter(session => {
+    if (!session.id) return true;
+    if (seenSessionIds.has(session.id)) return false;
+    seenSessionIds.add(session.id);
+    return true;
   });
 
-  // Calcular páginas pendientes por tema a partir de hoy
-  interface PendingTopicWork {
-    topicId: string;
-    remainingPages: number;
-    startPage: number;
-    goal: TopicCanteGoal;
+  for (const topicId of assignedIds) {
+    const canonical = params.topicState?.get(topicId)
+      || getCanonicalTopic(topicId, params.allTopics, params.userProgress, sessions);
+    canonicalByTopic.set(topicId, canonical);
+    const coverage = canonical.initialStudyCoverage;
+    const hasKnownProgress = canonical.hasExplicitPages
+      && coverage.studiedPages !== null && coverage.remainingPages !== null
+      && coverage.status !== 'unknown' && coverage.status !== 'conflict';
+    const studied = hasKnownProgress ? coverage.studiedPages! : 0;
+    const remaining = hasKnownProgress ? coverage.remainingPages : null;
+    const complete = hasKnownProgress && remaining === 0;
+    const located = complete || (hasKnownProgress && Number.isInteger(canonical.pages)
+      && coverage.pageNumbers.length === studied && !coverage.unlocatedStudy);
+    const knownPages = new Set(coverage.pageNumbers);
+    const missing = located && !complete
+      ? Array.from({ length: canonical.pages }, (_, index) => index + 1).filter(page => !knownPages.has(page))
+      : [];
+    missingByTopic.set(topicId, missing);
+    const issues = [...coverage.issues];
+    if (params.customTopicPages?.[topicId] !== undefined && params.customTopicPages[topicId] !== canonical.pages) {
+      issues.push('Se ignora una copia antigua de extensión: prevalecen los parámetros del tema.');
+    }
+    if (params.progressOverrides?.[topicId] !== undefined) {
+      issues.push('El contador manual histórico no identifica páginas estudiadas y no sustituye las sesiones.');
+    }
+    if (!canonical.hasExplicitPages) issues.push('Falta medir la extensión del tema.');
+    if (hasKnownProgress && !located && !complete) issues.push('La cantidad pendiente es conocida, pero necesita bloques o rangos explícitos para distribuirse.');
+    evidenceWarnings.push(...issues);
+    const pace = calculateTopicHistoricalPace(topicId, topicMap.get(topicId), sessions,
+      undefined, params.userProgress, params.allTopics, now, canonicalByTopic);
+    topicGoals[topicId] = {
+      topicId, topicNumber: canonical.number, topicTitle: canonical.title, subjectId: canonical.subjectId,
+      totalPages: canonical.pages, completedPages: studied,
+      currentStartPage: complete ? canonical.pages + 1 : missing[0] || 0,
+      isComplete: complete, minutesPerPage: pace.minutesPerPage, difficulty: canonical.difficulty,
+      hasKnownProgress, coverageStatus: coverage.status, remainingPages: remaining,
+      studiedPageNumbers: [...coverage.pageNumbers], canLocateRemainingPages: located,
+      progressIssues: [...new Set(issues)], paceIsEstimated: pace.isEstimated, paceSampleCount: pace.sampleCount,
+    };
   }
 
-  const pendingList: PendingTopicWork[] = Object.values(topicGoals)
-    .filter((g) => !g.isComplete)
-    .map((g) => ({
-      topicId: g.topicId,
-      remainingPages: g.totalPages - g.completedPages,
-      startPage: g.completedPages + 1,
-      goal: g
-    }))
-    .sort((a, b) => b.remainingPages - a.remainingPages);
-
-  // Cuántos días hábiles de estudio intensivo quedan antes del día de cante
-  const availableStudyDays = remainingStudyDays.length;
-
-  // DÍA DE CANTE: Regla especial matutina
-  // "La mañana del día del cante para repasar únicamente (salvo una o dos horas si me falta poco para terminar un tema)"
-  let canteMorningBufferTopicId: string | null = null;
-  let canteMorningBufferPages = 0;
-
-  if (pendingList.length > 0) {
-    // Si algún tema está al >= 80% completado o le faltan <= 6 páginas, permitimos rematarlo en el cante
-    const finishCandidate = pendingList.find(
-      (p) => p.remainingPages <= 8 || (p.goal.completedPages / p.goal.totalPages) >= 0.75
-    );
-    if (finishCandidate) {
-      canteMorningBufferTopicId = finishCandidate.topicId;
-      // Buffer de 1-2h a su ritmo
-      const maxPagesInBuffer = Math.min(
-        finishCandidate.remainingPages,
-        Math.floor(90 / finishCandidate.goal.minutesPerPage) // máximo ~90 min
-      );
-      canteMorningBufferPages = Math.max(1, maxPagesInBuffer);
-    }
+  const matchesAssigned = (session: Session) => assignedIds.some(topicId => {
+    const canonical = canonicalByTopic.get(topicId)!;
+    return sessionMatchesTopic(session, canonical);
+  });
+  const assignedSessions = sessions.filter(matchesAssigned);
+  const dailyQuotas: Record<string, DayStudyQuota> = {};
+  for (const date of dateList) {
+    const value = safeParseDate(date);
+    const daySessions = assignedSessions.filter(session => session.date?.slice(0, 10) === date);
+    const minutes = daySessions.reduce((sum, session) => sum + Number(session.durationMinutes || 0)
+      + (isCantoSession(session) ? Number(session.cantoSeconds || 0) / 60 : 0), 0);
+    dailyQuotas[date] = {
+      date, dayName: SPANISH_DAY_NAMES[value.getDay()], shortName: SPANISH_SHORT_DAYS[value.getDay()],
+      isCanteDay: date === targetDate, isCanteMorningReview: date === targetDate,
+      isToday: date === todayStr, isPast: date < todayStr, isFuture: date > todayStr,
+      totalPlannedPages: 0, totalPlannedMinutes: 0, unknownDurationTaskCount: 0, totalActualPagesCompleted: 0,
+      totalActualMinutesStudied: minutes, tasks: [],
+      status: date < todayStr ? (minutes > 0 ? 'completed' : 'resting') : 'pending',
+    };
   }
 
-  // Si no hay días de estudio intermedios (ej. hoy es el mismo día del cante o víspera directa)
-  if (availableStudyDays === 0) {
-    // Hoy es el día de cante o no hay días antes
-    const canteDayQuota = dailyQuotas[targetDate];
-    if (canteDayQuota) {
-      if (canteMorningBufferTopicId && canteMorningBufferPages > 0) {
-        const goal = topicGoals[canteMorningBufferTopicId];
-        const estMins = Math.round(canteMorningBufferPages * goal.minutesPerPage);
-        canteDayQuota.tasks.push({
-          topicId: goal.topicId,
-          topicNumber: goal.topicNumber,
-          topicTitle: goal.topicTitle,
-          subjectId: goal.subjectId,
-          totalPages: goal.totalPages,
-          fromPage: goal.completedPages + 1,
-          toPage: Math.min(goal.totalPages, goal.completedPages + canteMorningBufferPages),
-          pagesCount: canteMorningBufferPages,
-          estimatedMinutes: estMins,
-          minutesPerPage: goal.minutesPerPage,
-          isCanteMorningBuffer: true,
-          isCompleted: false
-        });
-        canteDayQuota.totalPlannedPages += canteMorningBufferPages;
-        canteDayQuota.totalPlannedMinutes += estMins;
-        canteDayQuota.rebalanceNote = `Buffer matutino de ${estMins} min para rematar Tema ${goal.topicNumber} previo al repaso general.`;
-      } else {
-        canteDayQuota.rebalanceNote = "Mañana 100% reservada para repaso mental, esquema y cante oral ante tribunal.";
-      }
-    }
-  } else {
-    // DISTRIBUCIÓN EQUITATIVA Y PONDERADA EN LOS DÍAS DE ESTUDIO DISPONIBLES
-    // Restamos las páginas que se reserven para el buffer de cante
-    if (canteMorningBufferTopicId && canteMorningBufferPages > 0) {
-      const p = pendingList.find((item) => item.topicId === canteMorningBufferTopicId);
-      if (p) {
-        p.remainingPages = Math.max(0, p.remainingPages - canteMorningBufferPages);
-      }
-    }
-
-    // Distribuir cada tema a lo largo de los días disponibles
-    for (const pending of pendingList) {
-      if (pending.remainingPages <= 0) continue;
-
-      let currentFrom = pending.startPage;
-      let pagesLeftToDistribute = pending.remainingPages;
-
-      // Asignar en bloques diarios razonables
-      for (let dayIdx = 0; dayIdx < availableStudyDays; dayIdx++) {
-        const dayDate = remainingStudyDays[dayIdx];
-        const daysLeftCount = availableStudyDays - dayIdx;
-        
-        // Cuántas páginas de este tema tocan en este día
-        const pagesForDay = Math.ceil(pagesLeftToDistribute / daysLeftCount);
-        if (pagesForDay <= 0) break;
-
-        const actualPages = Math.min(pagesForDay, pagesLeftToDistribute);
-        const toPage = currentFrom + actualPages - 1;
-        const estMins = Math.round(actualPages * pending.goal.minutesPerPage);
-
-        const dayQuota = dailyQuotas[dayDate];
-        if (dayQuota) {
-          const isDone = params.manualDayCompletions?.[dayDate]?.[pending.topicId] ?? false;
-
-          dayQuota.tasks.push({
-            topicId: pending.topicId,
-            topicNumber: pending.goal.topicNumber,
-            topicTitle: pending.goal.topicTitle,
-            subjectId: pending.goal.subjectId,
-            totalPages: pending.goal.totalPages,
-            fromPage: currentFrom,
-            toPage,
-            pagesCount: actualPages,
-            estimatedMinutes: estMins,
-            minutesPerPage: pending.goal.minutesPerPage,
-            isCanteMorningBuffer: false,
-            isCompleted: isDone
-          });
-
-          dayQuota.totalPlannedPages += actualPages;
-          dayQuota.totalPlannedMinutes += estMins;
-          if (isDone) {
-            dayQuota.totalActualPagesCompleted += actualPages;
-          }
-        }
-
-        currentFrom = toPage + 1;
-        pagesLeftToDistribute -= actualPages;
-      }
-    }
-
-    // Configurar la mañana del día de cante
-    const canteDayQuota = dailyQuotas[targetDate];
-    if (canteDayQuota) {
-      if (canteMorningBufferTopicId && canteMorningBufferPages > 0) {
-        const goal = topicGoals[canteMorningBufferTopicId];
-        const estMins = Math.round(canteMorningBufferPages * goal.minutesPerPage);
-        const fromP = goal.totalPages - canteMorningBufferPages + 1;
-        canteDayQuota.tasks.push({
-          topicId: goal.topicId,
-          topicNumber: goal.topicNumber,
-          topicTitle: goal.topicTitle,
-          subjectId: goal.subjectId,
-          totalPages: goal.totalPages,
-          fromPage: fromP,
-          toPage: goal.totalPages,
-          pagesCount: canteMorningBufferPages,
-          estimatedMinutes: estMins,
-          minutesPerPage: goal.minutesPerPage,
-          isCanteMorningBuffer: true,
-          isCompleted: false
-        });
-        canteDayQuota.totalPlannedPages += canteMorningBufferPages;
-        canteDayQuota.totalPlannedMinutes += estMins;
-        canteDayQuota.rebalanceNote = `Buffer matutino de ${estMins}m para cerrar Tema ${goal.topicNumber}. Resto de mañana: Repaso de Cante.`;
-      } else {
-        canteDayQuota.rebalanceNote = "Mañana 100% reservada para repaso mental, esquema y cante oral.";
-      }
+  // Reuse the domain projection to credit a page only on its first recorded initial-study day.
+  // Review/refresco/cante sessions never contribute new initial pages.
+  for (const topicId of assignedIds) {
+    const canonical = canonicalByTopic.get(topicId)!;
+    const topicSessions = assignedSessions.filter(session => sessionMatchesTopic(session, canonical));
+    let credited = new Set(deriveInitialStudyCoverage(canonical.pages,
+      topicSessions.filter(session => session.date < cycleStartDate)).pageNumbers);
+    for (const date of dateList) {
+      const through = deriveInitialStudyCoverage(canonical.pages,
+        topicSessions.filter(session => session.date <= date && session.date <= todayStr)).pageNumbers;
+      const newlyKnown = through.filter(page => !credited.has(page));
+      dailyQuotas[date].totalActualPagesCompleted += newlyKnown.length;
+      newlyKnown.forEach(page => credited.add(page));
     }
   }
 
-  // 4. Calcular estado y progreso general
-  const overallProgressPct = totalTargetPages > 0 
-    ? Math.round((totalCompletedPages / totalTargetPages) * 100) 
-    : 100;
-
-  let planStatus: "on_track" | "ahead" | "behind" | "urgent" = "on_track";
-  const daysRemaining = targetInfo.daysRemaining;
-
-  if (overallProgressPct >= 100) {
-    planStatus = "ahead";
-  } else if (daysRemaining === 0) {
-    planStatus = overallProgressPct >= 80 ? "on_track" : "urgent";
-  } else if (daysRemaining === 1 && overallProgressPct < 60) {
-    planStatus = "urgent";
-  } else if (overallProgressPct < 30 && daysRemaining <= 2) {
-    planStatus = "behind";
+  const studyDays = dateList.filter(date => date >= todayStr && date < targetDate);
+  const appendPages = (date: string, goal: TopicCanteGoal, pages: number[], buffer: boolean) => {
+    if (!pages.length || !dailyQuotas[date]) return;
+    const runs: number[][] = [];
+    for (const page of pages) {
+      const run = runs.at(-1);
+      if (run && page === run.at(-1)! + 1) run.push(page); else runs.push([page]);
+    }
+    for (const run of runs) {
+      const estimate = estimatePersonalizedDuration({
+        topic: canonicalByTopic.get(goal.topicId)!, activity: 'estudio_nuevo',
+        history: sessions, topics: canonicalByTopic, asOf: now,
+        work: { pageNumbers: run, pages: run.length, fromPage: run[0], toPage: run.at(-1)! },
+      });
+      const estimatedMinutes = estimate.estimatedMinutes;
+      dailyQuotas[date].tasks.push({
+        topicId: goal.topicId, topicNumber: goal.topicNumber, topicTitle: goal.topicTitle,
+        subjectId: goal.subjectId, totalPages: goal.totalPages,
+        fromPage: run[0], toPage: run.at(-1)!, pagesCount: run.length,
+        estimatedMinutes, minutesPerPage: estimatedMinutes !== null ? estimatedMinutes / run.length : null,
+        estimateInterval: estimate.interval, estimateEvidenceCount: estimate.evidenceCount,
+        estimateMethod: estimate.method, estimateFactors: estimate.factors,
+        isCanteMorningBuffer: buffer, isCompleted: false,
+      });
+      dailyQuotas[date].totalPlannedPages += run.length;
+      if (estimatedMinutes !== null) dailyQuotas[date].totalPlannedMinutes += estimatedMinutes;
+      else dailyQuotas[date].unknownDurationTaskCount++;
+    }
+  };
+  let bufferUsed = false;
+  for (const goal of Object.values(topicGoals).sort((a, b) => (b.remainingPages || 0) - (a.remainingPages || 0))) {
+    let pages = [...(missingByTopic.get(goal.topicId) || [])];
+    if (!goal.hasKnownProgress || !goal.canLocateRemainingPages || !pages.length) continue;
+    let bufferPages: number[] = [];
+    if (!bufferUsed && goal.minutesPerPage !== null && goal.minutesPerPage > 0 && (pages.length <= 6 || goal.completedPages / goal.totalPages >= .8)) {
+      const count = Math.min(pages.length, Math.max(0, Math.floor(90 / goal.minutesPerPage)));
+      if (count > 0) { bufferPages = pages.splice(pages.length - count); bufferUsed = true; }
+    }
+    for (let index = 0; index < studyDays.length && pages.length; index++) {
+      const count = Math.ceil(pages.length / (studyDays.length - index));
+      appendPages(studyDays[index], goal, pages.splice(0, count), false);
+    }
+    appendPages(targetDate, goal, bufferPages, true);
+    if (pages.length) evidenceWarnings.push('Hay páginas iniciales conocidas sin jornada disponible antes del cante.');
   }
+  const canteQuota = dailyQuotas[targetDate];
+  if (canteQuota) canteQuota.rebalanceNote = canteQuota.tasks.length
+    ? 'Sólo los bloques iniciales pendientes conocidos usan el buffer; el resto de la mañana se reserva al repaso.'
+    : 'Mañana reservada al repaso y cante; el progreso no medido requiere registrar cobertura explícita.';
 
-  // Ritmo medio del opositor
-  const paceValues = Object.values(topicGoals).map((g) => g.minutesPerPage);
-  const avgPace = paceValues.length > 0 
-    ? Math.round((paceValues.reduce((a, b) => a + b, 0) / paceValues.length) * 10) / 10 
-    : DEFAULT_PACE_MINUTES_PER_PAGE.repaso;
-
+  const goals = Object.values(topicGoals);
+  const overallProgressKnown = goals.every(goal => goal.hasKnownProgress);
+  const totalTargetPages = goals.reduce((sum, goal) => sum + goal.totalPages, 0);
+  const totalCompletedPages = goals.reduce((sum, goal) => sum + goal.completedPages, 0);
+  const overallProgressPct = overallProgressKnown && totalTargetPages > 0
+    ? Math.round(totalCompletedPages / totalTargetPages * 100) : 0;
+  let status: WeeklyCantePlan['status'] = 'on_track';
+  if (!overallProgressKnown) status = 'needs_evidence';
+  else if (goals.length && goals.every(goal => goal.isComplete)) status = 'ahead';
+  else if ((daysRemaining === 0 && overallProgressPct < 80) || (daysRemaining === 1 && overallProgressPct < 60)) status = 'urgent';
+  else if (overallProgressPct < 30 && daysRemaining <= 2) status = 'behind';
+  const measuredPaces = goals.flatMap(goal => goal.minutesPerPage !== null ? [goal.minutesPerPage] : []);
+  const averagePace = measuredPaces.length ? measuredPaces.reduce((sum, pace) => sum + pace, 0) / measuredPaces.length : null;
+  const unknownDurationTaskCount = Object.values(dailyQuotas).reduce((sum, quota) => sum + quota.unknownDurationTaskCount, 0);
+  if (unknownDurationTaskCount) evidenceWarnings.push('Hay tareas sin duración estimable: faltan sesiones comparables de estudio inicial. Los totales de tiempo sólo incluyen estimaciones disponibles.');
+  if (unknownDurationTaskCount && status !== 'ahead') status = 'needs_evidence';
   return {
-    id: `plan-${targetDay}-${targetDate}`,
-    targetCanteDay: targetDay,
-    targetCanteDate: targetDate,
-    daysRemaining,
-    cycleStartDate,
-    cycleEndDate: targetDate,
-    assignedTopicIds: params.assignedTopicIds,
-    topicGoals,
-    dailyQuotas,
-    historicalAverageMinPerPage: avgPace,
-    totalTargetPages,
-    totalCompletedPages,
-    overallProgressPct,
-    lastRebalancedAt: new Date().toISOString(),
-    status: planStatus
+    id: `plan-${targetDay}-${targetDate}`, targetCanteDay: targetDay, targetCanteDate: targetDate,
+    daysRemaining, cycleStartDate, cycleEndDate: targetDate, assignedTopicIds: assignedIds,
+    topicGoals, dailyQuotas, historicalAverageMinPerPage: averagePace, unknownDurationTaskCount,
+    totalTargetPages, totalCompletedPages, overallProgressPct,
+    lastRebalancedAt: new Date(now).toISOString(), status,
+    hasUnknownProgress: !overallProgressKnown, overallProgressKnown,
+    evidenceWarnings: [...new Set(evidenceWarnings)],
   };
 }
 
 /**
- * Registra avance de páginas leídas en un tema y fecha específica,
- * provocando un recálculo automático instantáneo.
+ * @deprecated A numeric counter cannot establish which initial pages were studied.
+ * Retained for older callers: recalculates from sessions and reports that the
+ * anonymous manual counter was not incorporated as historical evidence.
  */
 export function recordPageProgressAndRebalance(
   currentPlan: WeeklyCantePlan,
@@ -604,28 +460,16 @@ export function recordPageProgressAndRebalance(
   newCompletedPages: number,
   allTopics: Topic[],
   sessions: Session[],
-  manualCompletions?: Record<string, Record<string, boolean>>
+  manualCompletions?: Record<string, Record<string, boolean>>,
+  userProgress?: Record<string, any>,
+  topicState?: Map<string, CanonicalTopic>,
 ): WeeklyCantePlan {
-  const overrides = {
-    ...(currentPlan.topicGoals ? Object.fromEntries(
-      Object.entries(currentPlan.topicGoals).map(([id, g]) => [id, { completedPages: g.completedPages }])
-    ) : {}),
-    [topicId]: { completedPages: newCompletedPages }
-  };
-
-  const customPages = Object.fromEntries(
-    Object.entries(currentPlan.topicGoals || {}).map(([id, g]) => [id, g.totalPages])
-  );
-
-  return buildOrRebalanceWeeklyCantePlan({
+  const plan = buildOrRebalanceWeeklyCantePlan({
     assignedTopicIds: currentPlan.assignedTopicIds,
-    targetDay: currentPlan.targetCanteDay,
-    targetDate: currentPlan.targetCanteDate,
-    allTopics,
-    sessions,
-    existingPlan: currentPlan,
-    customTopicPages: customPages,
-    progressOverrides: overrides,
-    manualDayCompletions: manualCompletions
+    targetDay: currentPlan.targetCanteDay, targetDate: currentPlan.targetCanteDate,
+    allTopics, sessions, userProgress, topicState,
+    referenceDate: safeParseDate(currentPlan.lastRebalancedAt),
   });
+  plan.evidenceWarnings.push('El contador manual no identifica páginas: registra una sesión con rangos o bloques para incorporar el avance.');
+  return plan;
 }

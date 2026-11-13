@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { cn, safeParseDate } from "../../lib/utils";
 import { playSound } from "../../lib/sound";
+import { DS } from "../../lib/designSystem";
 
 import { DayStudyQuota } from "../../lib/weeklyCanteEngine";
 
@@ -107,15 +108,15 @@ export const WeeklyPlannerStrip: React.FC<WeeklyPlannerStripProps> = ({
 
     if (dayOfWeek === 1) { // Monday
       if (hour < 22) {
-        return { message: "¡Hoy es Lunes de Cante! Sesión abierta hasta las 22:00h", urgent: true };
+        return { message: "Hoy es lunes de cante", urgent: true };
       }
-      return { message: "Cante de Lunes completado · Próximo cante: Jueves", urgent: false };
+      return { message: "Próxima jornada de cante: jueves", urgent: false };
     }
     if (dayOfWeek === 4) { // Thursday
       if (hour < 22) {
-        return { message: "¡Hoy es Jueves de Cante! Sesión abierta hasta las 22:00h", urgent: true };
+        return { message: "Hoy es jueves de cante", urgent: true };
       }
-      return { message: "Cante de Jueves completado · Próximo cante: Lunes", urgent: false };
+      return { message: "Próxima jornada de cante: lunes", urgent: false };
     }
     if (dayOfWeek === 2 || dayOfWeek === 3) {
       const daysLeft = 4 - dayOfWeek;
@@ -127,191 +128,74 @@ export const WeeklyPlannerStrip: React.FC<WeeklyPlannerStripProps> = ({
   }, []);
 
   return (
-    <div className="bg-white/95 backdrop-blur-xl border border-slate-200/80 rounded-2xl shadow-xs overflow-hidden mb-4">
-      {/* Header Bar with Week Controls and Countdown */}
-      <div className="px-4 py-3 border-b border-slate-100 flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-3">
-          <div className="flex items-center bg-slate-100 p-0.5 rounded-xl border border-slate-200/70">
-            <button
-              type="button"
-              onClick={() => { playSound.click(); setWeekOffset(w => w - 1); }}
-              className="p-1 hover:bg-white rounded-lg text-slate-500 hover:text-slate-900 transition-colors"
-              title="Semana anterior"
-            >
-              <ChevronLeft size={16} />
-            </button>
-            <button
-              type="button"
-              onClick={() => { playSound.click(); setWeekOffset(0); }}
-              className="px-2 py-0.5 text-xs font-bold text-slate-700 hover:text-slate-900"
-              title="Ir a semana actual"
-            >
-              {weekOffset === 0 ? "Semana Actual" : weekOffset > 0 ? `+${weekOffset} sem` : `${weekOffset} sem`}
-            </button>
-            <button
-              type="button"
-              onClick={() => { playSound.click(); setWeekOffset(w => w + 1); }}
-              className="p-1 hover:bg-white rounded-lg text-slate-500 hover:text-slate-900 transition-colors"
-              title="Semana siguiente"
-            >
-              <ChevronRight size={16} />
-            </button>
-          </div>
-
-          <div className="flex items-center gap-2">
-            <span className="text-xs font-bold text-slate-700">
-              {weekDays[0]?.dateNum} {weekDays[0]?.monthName} — {weekDays[6]?.dateNum} {weekDays[6]?.monthName}
-            </span>
-            <span className="inline-flex items-center gap-1.5 text-[11px] text-slate-500 font-medium">
-              <Clock size={11} className={cn(nextCanteInfo.urgent ? "text-amber-600 animate-pulse" : "text-slate-400")} />
-              <span className={cn(nextCanteInfo.urgent && "font-bold text-amber-900")}>
-                {nextCanteInfo.message}
-              </span>
-            </span>
-          </div>
-        </div>
-
-        {/* Action to switch to full 7-day grid */}
-        <button
-          type="button"
-          onClick={() => {
-            playSound.click();
-            onSelectView("semana_completa");
-          }}
-          className="px-3 py-1.5 rounded-xl text-xs font-bold bg-slate-900 hover:bg-slate-800 text-white transition-all flex items-center gap-1.5 active:scale-95 shadow-2xs"
-        >
-          <CalendarIcon size={13} className="text-amber-400" />
-          <span>Abrir Planificador 7 Días</span>
-        </button>
-      </div>
-
-      {/* 7-Day Ribbon Grid: ONLY shown when in Cante Cockpit or Day Study to avoid duplicate 7-day grid in Weekly Planner */}
-      {activeView !== "semana_completa" && (
-        <div className="grid grid-cols-7 divide-x divide-slate-100 bg-slate-50/50">
-        {weekDays.map((day) => {
-          const isLunesActive = activeView === "lunes" && day.preparadorKey === "lunes";
-          const isJuevesActive = activeView === "jueves" && day.preparadorKey === "jueves";
-          const isSelectedDate = activeView === "dia_estudio" && selectedDateStr === day.iso;
-          const isSelected = isLunesActive || isJuevesActive || isSelectedDate;
-
-          const topicsCount = day.preparadorKey === "lunes" 
-            ? lunesTopicsCount 
-            : day.preparadorKey === "jueves" 
-            ? juevesTopicsCount 
-            : 0;
-
-          return (
-            <button
-              key={day.iso}
-              type="button"
-              onClick={() => {
-                playSound.click();
-                if (day.preparadorKey === "lunes") {
-                  onSelectView("lunes");
-                } else if (day.preparadorKey === "jueves") {
-                  onSelectView("jueves");
-                } else {
-                  onSelectView("dia_estudio", day.iso);
-                }
-              }}
-              className={cn(
-                "p-2.5 sm:p-3 text-left transition-all relative flex flex-col justify-between min-h-[92px] group focus:outline-none cursor-pointer",
-                isSelected
-                  ? "bg-white shadow-sm ring-2 ring-slate-900 z-10"
-                  : "hover:bg-white/80",
-                day.isToday && !isSelected && "bg-indigo-50/30"
-              )}
-            >
-              {/* Day Name & Date Number */}
-              <div>
-                <div className="flex items-center justify-between">
-                  <span className={cn(
-                    "text-[10px] font-black uppercase tracking-wider font-mono",
-                    isSelected 
-                      ? "text-slate-900" 
-                      : day.isPreparadorDay 
-                      ? "text-indigo-600" 
-                      : "text-slate-400"
-                  )}>
-                    {day.shortName}
-                  </span>
-
-                  {day.isToday && (
-                    <span className="w-1.5 h-1.5 rounded-full bg-indigo-600 ring-2 ring-indigo-200" title="Hoy" />
-                  )}
-                </div>
-
-                <div className="flex items-baseline gap-1 mt-0.5">
-                  <span className={cn(
-                    "text-base sm:text-lg font-black font-serif tabular-nums tracking-tight leading-none",
-                    isSelected ? "text-slate-900" : "text-slate-700 group-hover:text-slate-900"
-                  )}>
-                    {day.dateNum}
-                  </span>
-                  <span className="text-[10px] text-slate-400 font-medium lowercase">
-                    {day.monthName}
-                  </span>
-                </div>
-              </div>
-
-              {/* Status or Counter Bottom Marker */}
-              <div className="mt-2 pt-1 border-t border-slate-100 flex flex-col gap-0.5">
-                {day.isPreparadorDay ? (
-                  <div className="flex items-center justify-between">
-                    <span className={cn(
-                      "text-[9px] font-black uppercase tracking-wider flex items-center gap-1",
-                      isSelected ? "text-indigo-700" : "text-indigo-600"
-                    )}>
-                      <Award size={10} className="shrink-0" />
-                      <span className="hidden sm:inline">Cante</span>
-                    </span>
-                    <span className={cn(
-                      "text-[10px] font-mono font-black tabular-nums px-1.5 py-0.2 rounded-md",
-                      topicsCount > 0 
-                        ? (isSelected ? "bg-slate-900 text-white" : "bg-indigo-100 text-indigo-800")
-                        : "bg-slate-100 text-slate-400"
-                    )}>
-                      {topicsCount} {topicsCount === 1 ? "t" : "t"}
-                    </span>
-                  </div>
-                ) : (
-                  <div className="flex items-center justify-between text-[10px]">
-                    {dailyQuotas?.[day.iso] && dailyQuotas[day.iso].totalPlannedPages > 0 ? (
-                      <span className={cn(
-                        "text-[9px] font-mono font-bold px-1 py-0.2 rounded-md",
-                        dailyQuotas[day.iso].tasks.every(t => t.isCompleted)
-                          ? "bg-emerald-100 text-emerald-800"
-                          : "bg-indigo-50 text-indigo-700"
-                      )}>
-                        {dailyQuotas[day.iso].tasks.filter(t => t.isCompleted).reduce((acc, t) => acc + t.pagesCount, 0)}/{dailyQuotas[day.iso].totalPlannedPages}p
-                      </span>
-                    ) : (
-                      <span className="text-[9px] font-mono text-slate-400">
-                        {day.hoursFormatted ? (
-                          <span className="text-emerald-700 font-black">{day.hoursFormatted}</span>
-                        ) : (
-                          <span>Estudio</span>
-                        )}
-                      </span>
-                    )}
-
-                    {day.sessionsCount > 0 ? (
-                      <span className="text-[9px] font-mono text-slate-500 font-bold">
-                        {day.sessionsCount}s
-                      </span>
-                    ) : day.hoursFormatted ? (
-                      <span className="text-[9px] font-mono text-emerald-700 font-bold">
-                        {day.hoursFormatted}
-                      </span>
-                    ) : null}
-                  </div>
-                )}
-              </div>
-            </button>
-          );
+    <div className="mb-3 space-y-2">
+      <nav aria-label="Vistas del planificador" className="flex items-center gap-1.5 rounded-2xl border border-slate-200 bg-white p-1.5">
+        {([
+          { view: "semana_completa", label: "Semana", accessible: "Vista Semanal (7 Días)", icon: CalendarIcon, count: null },
+          { view: "lunes", label: "Lunes", accessible: "Cante Lunes", icon: Award, count: lunesTopicsCount },
+          { view: "jueves", label: "Jueves", accessible: "Cante Jueves", icon: Award, count: juevesTopicsCount },
+        ] as const).map(item => {
+          const selected = activeView === item.view;
+          const Icon = item.icon;
+          return <button
+            key={item.view}
+            type="button"
+            aria-label={`${item.accessible}${item.count === null ? "" : `, ${item.count} temas`}`}
+            aria-current={selected ? "page" : undefined}
+            onClick={() => { playSound.click(); onSelectView(item.view); }}
+            className={cn("flex min-h-[44px] min-w-0 flex-1 items-center justify-center gap-1.5 rounded-xl px-2 text-sm font-bold transition-colors", selected ? "bg-slate-900 text-white" : "text-slate-600 hover:bg-slate-100 hover:text-slate-900")}
+            title={item.accessible}
+          >
+            <Icon size={16} aria-hidden="true" className="hidden sm:block" />
+            <span>{item.label}</span>
+            {item.count !== null && <span className={cn("rounded-full px-1.5 font-mono text-xs", selected ? "bg-white/15" : "bg-slate-100 text-slate-600")}>{item.count}</span>}
+          </button>;
         })}
-      </div>
-      )}
+        <details className="relative shrink-0">
+          <summary className={cn("flex min-h-[44px] cursor-pointer list-none items-center gap-1 rounded-xl px-3 text-sm font-bold", activeView === "ebbinghaus" || activeView === "historial" ? "bg-slate-100 text-slate-900" : "text-slate-600 hover:bg-slate-100")}>
+            <span>{activeView === "ebbinghaus" ? "Retención" : activeView === "historial" ? "Historial" : "Más"}</span>
+            <ChevronRight size={14} aria-hidden="true" className="rotate-90" />
+          </summary>
+          <div className="absolute right-0 top-full z-30 mt-2 w-64 space-y-1 rounded-2xl border border-slate-200 bg-white p-2 shadow-lg">
+            <button type="button" aria-current={activeView === "ebbinghaus" ? "page" : undefined}
+              onClick={event => { playSound.click(); onSelectView("ebbinghaus"); event.currentTarget.closest("details")?.removeAttribute("open"); }}
+              className={cn(DS.btnGhost, "min-h-[44px] w-full justify-between text-left")} title="Temas en riesgo según la curva de retención Ebbinghaus">
+              <span className="flex items-center gap-2"><Brain size={16} aria-hidden="true" />Curva de Olvido</span>
+              <span className="rounded-full bg-amber-50 px-2 font-mono text-xs text-amber-900">{ebbinghausAlertCount}</span>
+            </button>
+            <button type="button" aria-current={activeView === "historial" ? "page" : undefined}
+              onClick={event => { playSound.click(); onSelectView("historial"); event.currentTarget.closest("details")?.removeAttribute("open"); }}
+              className={cn(DS.btnGhost, "min-h-[44px] w-full justify-between text-left")}>
+              <span className="flex items-center gap-2"><Award size={16} aria-hidden="true" />Historial de cantes</span>
+              <span className="font-mono text-xs">{totalCantosCount}</span>
+            </button>
+          </div>
+        </details>
+      </nav>
+
+      {activeView !== "semana_completa" && <details className="rounded-2xl border border-slate-200 bg-white">
+        <summary className="flex min-h-[44px] cursor-pointer list-none items-center justify-between gap-2 px-4 text-sm font-semibold text-slate-700">
+          <span className="flex items-center gap-2"><CalendarIcon size={16} aria-hidden="true" />Elegir día de estudio</span>
+          <ChevronRight size={16} aria-hidden="true" className="rotate-90" />
+        </summary>
+        <p className="px-4 pb-3 text-sm text-slate-600">{nextCanteInfo.message}</p>
+        <div className="grid grid-cols-7 gap-1 border-t border-slate-100 p-1.5" aria-label="Días de esta semana">
+          {weekDays.map(day => {
+            const selected = (activeView === "lunes" && day.preparadorKey === "lunes")
+              || (activeView === "jueves" && day.preparadorKey === "jueves")
+              || (activeView === "dia_estudio" && selectedDateStr === day.iso);
+            const count = day.preparadorKey === "lunes" ? lunesTopicsCount : day.preparadorKey === "jueves" ? juevesTopicsCount : 0;
+            return <button key={day.iso} type="button" aria-pressed={selected}
+              aria-label={`${day.dayName} ${day.dateNum} ${day.monthName}${day.isToday ? ", hoy" : ""}${day.isPreparadorDay ? `, cante, ${count} temas` : `, ${day.sessionsCount} sesiones`}`}
+              onClick={() => { playSound.click(); onSelectView(day.preparadorKey || "dia_estudio", day.iso); }}
+              className={cn("flex min-h-[72px] min-w-[36px] flex-col items-center justify-center gap-1 rounded-xl px-1 text-center transition-colors", selected ? "bg-slate-900 text-white" : "text-slate-600 hover:bg-slate-100", day.isToday && !selected && "bg-amber-50 text-slate-900")}>
+              <span className="text-[11px] font-semibold">{day.shortName}</span>
+              <span className="font-serif text-lg font-bold tabular-nums">{day.dateNum}</span>
+              <span className="text-[11px]">{day.isPreparadorDay ? `${count} t.` : day.hoursFormatted || "—"}</span>
+            </button>;
+          })}
+        </div>
+      </details>}
     </div>
   );
 };

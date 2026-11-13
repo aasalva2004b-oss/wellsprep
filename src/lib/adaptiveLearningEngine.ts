@@ -1,18 +1,27 @@
 import { Session } from "../types";
-import { CanonicalTopic } from "./canonicalTopicService";
+import { CanonicalTopic, sessionDurationMinutes, getSessionCategory } from "./canonicalTopicService";
 import { safeParseDate, getLocalDateString } from "./utils";
-import { isCantoSession, getCantoDuration } from "./cantoUtils";
+import { isCantoSession, getCantoDuration, compareSessionsAsc } from "./cantoUtils";
+import { calculateCanonicalRetention, getCanonicalReviewDate } from "./ebbinghaus";
+import { estimatePersonalizedDuration, getMeasuredSessionPages } from "./personalizedEstimator";
+import { extractSessionTelemetry } from './sessionTelemetry';
+import { selectSessionVersions } from './sessionVersions';
 
 export interface LearnerProfile {
   // Ritmos empíricos globales (calculados a partir de sesiones reales)
   hasSufficientData: boolean;
   totalRecordedSessionsCount: number;
   totalStudiedHours: number;
+  paceSampleCounts?: { study: number; review: number; refresh: number };
+
+  // Explicit user settings override empirical rates, never the measured history.
+  manualPaces?: { study?: number; review?: number; refresh?: number };
+  manualDurations?: { cante?: number; refresh1?: number; refresh2?: number; refresh3?: number };
 
   // Velocidades de lectura y estudio (minutos por página real)
-  studyPaceMinPerPage: number;       // Ritmo de Primer Estudio (ej: 6.2 min/pág)
-  reviewPaceMinPerPage: number;      // Ritmo de Repaso general (ej: 3.2 min/pág)
-  refreshPaceMinPerPage: number;     // Ritmo de Refresco (ej: 2.1 min/pág)
+  studyPaceMinPerPage: number | null;       // Ritmo de Primer Estudio (ej: 6.2 min/pág)
+  reviewPaceMinPerPage: number | null;      // Ritmo de Repaso general (ej: 3.2 min/pág)
+  refreshPaceMinPerPage: number | null;     // Ritmo de Refresco (ej: 2.1 min/pág)
   refresh1DurationMin: number;       // Duración típica primer refresco (D+1)
   refresh2DurationMin: number;       // Duración típica segundo refresco (D+2)
   refresh3DurationMin: number;       // Duración típica tercer refresco (D+3)
@@ -33,6 +42,8 @@ export interface LearnerProfile {
       studyMinPerPage: number;
       reviewMinPerPage: number;
       samplesCount: number;
+      studySamplesCount?: number;
+      reviewSamplesCount?: number;
     }
   >;
 
@@ -47,13 +58,24 @@ export interface LearnerProfile {
   predictionAccuracy?: {
     totalEvaluatedSessions: number;
     meanAbsoluteErrorMinutes: number; // Error medio absoluto
-    accuracyPct: number; // % de precisión (100 - error relativo)
+    accuracyPct: number; // 100 menos error absoluto relativo medio a la duración observada, limitado a 0-100
     sampleConfidence: "alta" | "media" | "provisional";
   };
 }
 
 export interface AdaptiveDurationEstimate {
-  estimatedMinutes: number;
+  estimatedMinutes: number | null;
+  available: boolean;
+  interval: { low: number; high: number } | null;
+  evidenceCount: number;
+  effectiveSampleSize: number;
+  method: string;
+  modelVersion: string;
+  factors: string[];
+  featuresUsed: string[];
+  excludedCount: number;
+  personalizedPrediction: Record<string, any>;
+  phaseEstimates?: Partial<Record<string, { estimatedMinutes: number; evidenceCount: number }>>;
   confidence: "alta" | "media" | "provisional";
   explanation: string;
   paceMinPerPage: number;
@@ -86,423 +108,165 @@ export interface AdaptiveRetentionResult {
   evidenceLevel: "canto_evaluado" | "repaso_activo" | "estudio_reciente" | "sin_evidencia";
   ebbinghausFactors: string[];       // Factores reales que justifican la predicción
   recommendedAction: string;         // Recomendación pedagógica justificada
-  suggestedReviewDate: string;       // Fecha recomendada para el próximo repaso (YYYY-MM-DD)
+  suggestedReviewDate: string | null;       // Fecha recomendada para el próximo repaso (YYYY-MM-DD)
   isUrgent: boolean;
 }
 
-// Valores empíricos por defecto para opositores a judicatura (prior prudente)
-const PRIOR_STUDY_PACE_MIN_PER_PAGE = 5.5;
-const PRIOR_REVIEW_PACE_MIN_PER_PAGE = 3.5;
-const PRIOR_REFRESH_PACE_MIN_PER_PAGE = 2.0;
-const PRIOR_READING_WPM = 220;
-const PRIOR_SPEAKING_WPM = 135;
+const profileContexts = new WeakMap<LearnerProfile, { history: Session[]; topics: Map<string, CanonicalTopic> }>();
 
-/**
- * Entrena el perfil de aprendizaje adaptativo del opositor analizando su historial completo de sesiones.
- * Utiliza filtrado de atípicos (outliers) y aprendizaje ponderado.
- */
-export function buildLearnerProfile(
-  sessions: Session[],
-  canonicalTopicMap: Map<string, CanonicalTopic>
-): LearnerProfile {
-  const validSessions = (sessions || []).filter((s) => {
-    const mins = Number(s.durationMinutes || (s as any).duration || 0);
-    return mins > 2 && mins < 600; // Descartar sesiones fantasmas o corruptas
-  });
+const median = (values: number[]): number | null => {
+  if (!values.length) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const center = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[center] : (sorted[center - 1] + sorted[center]) / 2;
+};
 
-  if (validSessions.length === 0) {
-    return {
-      hasSufficientData: false,
-      totalRecordedSessionsCount: 0,
-      totalStudiedHours: 0,
-      studyPaceMinPerPage: PRIOR_STUDY_PACE_MIN_PER_PAGE,
-      reviewPaceMinPerPage: PRIOR_REVIEW_PACE_MIN_PER_PAGE,
-      refreshPaceMinPerPage: PRIOR_REFRESH_PACE_MIN_PER_PAGE,
-      refresh1DurationMin: 45,
-      refresh2DurationMin: 35,
-      refresh3DurationMin: 25,
-      readingWpm: PRIOR_READING_WPM,
-      speakingWpm: PRIOR_SPEAKING_WPM,
-      difficultySensitivity: 0.08,
-      vueltaSpeedupFactor: 0.88,
-      decayDelayPenaltyPerDay: 0.25,
-      subjectPaces: {}
-    };
-  }
-
-  let totalMinutesAll = 0;
-  const studyPaces: number[] = [];
-  const reviewPaces: number[] = [];
-  const refreshPaces: number[] = [];
-  const refreshDurations: number[] = [];
-  const speakingWpms: number[] = [];
-
-  const subjectStudyMap: Record<string, number[]> = {};
-  const subjectReviewMap: Record<string, number[]> = {};
-
-  // 1. Análisis de sesiones PLSEMA registradas
-  const plsemaPhasesTotals: Record<string, { totalMinutes: number; count: number }> = {
-    prelectura: { totalMinutes: 0, count: 0 },
-    lectura: { totalMinutes: 0, count: 0 },
-    subrayado: { totalMinutes: 0, count: 0 },
-    esquema: { totalMinutes: 0, count: 0 },
-    memorizar: { totalMinutes: 0, count: 0 },
-    cantar: { totalMinutes: 0, count: 0 }
-  };
-  let activeRecallMinutesSum = 0;
-  let plsemaMinutesSum = 0;
-
-  // 2. Rastreo de calibración y error de estimación (MAE)
-  let sumPredictionErrors = 0;
-  let evaluatedPredictionCount = 0;
-
-  validSessions.forEach((s) => {
-    const mins = Number(s.durationMinutes || (s as any).duration || 0);
-    totalMinutesAll += mins;
-
-    // Procesar datos PLSEMA si existen
-    const plsema = (s as any).plsema || (s as any).fasesPlsema;
-    if (plsema && typeof plsema === "object") {
-      const pm = plsema.minutes || plsema;
-      if (pm) {
-        Object.keys(plsemaPhasesTotals).forEach((ph) => {
-          const phMins = Number(pm[ph] || pm[`minutos${ph.charAt(0).toUpperCase() + ph.slice(1)}`] || 0);
-          if (phMins > 0) {
-            plsemaPhasesTotals[ph].totalMinutes += phMins;
-            plsemaPhasesTotals[ph].count++;
-            plsemaMinutesSum += phMins;
-            if (ph === "memorizar" || ph === "cantar") {
-              activeRecallMinutesSum += phMins;
-            }
-          }
-        });
-      }
-    }
-
-    const topic = canonicalTopicMap.get(s.topicId);
-    const pages = topic?.pages && topic.pages > 0 ? topic.pages : null;
-    const words = topic?.numeroPalabras && topic.numeroPalabras > 0 ? topic.numeroPalabras : null;
-
-    const isStudy = s.type === "primer_estudio" || s.modality === "primer_estudio" || (s.type as string) === "estudio_inicial";
-    const isRefresh = s.type === "refresco" || s.modality === "refresco";
-    const isCanto = isCantoSession(s);
-    const isReview = !isStudy && !isRefresh && !isCanto;
-
-    if (pages && pages > 0) {
-      const minPerPage = mins / pages;
-      // Filtrar atípicos (> 30 min/pág o < 0.5 min/pág)
-      if (minPerPage >= 0.5 && minPerPage <= 30) {
-        if (isStudy) {
-          studyPaces.push(minPerPage);
-          if (topic?.subjectId) {
-            subjectStudyMap[topic.subjectId] = subjectStudyMap[topic.subjectId] || [];
-            subjectStudyMap[topic.subjectId].push(minPerPage);
-          }
-        } else if (isRefresh) {
-          refreshPaces.push(minPerPage);
-          refreshDurations.push(mins);
-        } else if (isReview) {
-          reviewPaces.push(minPerPage);
-          if (topic?.subjectId) {
-            subjectReviewMap[topic.subjectId] = subjectReviewMap[topic.subjectId] || [];
-            subjectReviewMap[topic.subjectId].push(minPerPage);
-          }
-        }
-      }
-    }
-
-    // Comprobar si la sesión tenía tiempo previsto para calcular MAE
-    const estMins = Number((s as any).estimatedMinutes || (s as any).tiempoEstimado || 0);
-    if (estMins > 0 && mins > 0) {
-      sumPredictionErrors += Math.abs(mins - estMins);
-      evaluatedPredictionCount++;
-    }
-
-    if (isCanto && words && words > 0) {
-      const dur = getCantoDuration(s);
-      if (dur.totalSecs >= 300 && dur.totalSecs <= 1200) {
-        const wpm = words / (dur.totalSecs / 60);
-        if (wpm >= 60 && wpm <= 220) {
-          speakingWpms.push(wpm);
-        }
-      }
-    }
-  });
-
-  // Cálculo de medianas recortadas robustas (trimmed median)
-  const computeRobustMean = (arr: number[], fallback: number): number => {
-    if (arr.length === 0) return fallback;
-    const sorted = [...arr].sort((a, b) => a - b);
-    // Descartar 10% superior e inferior si hay suficiente muestra
-    const cut = Math.floor(sorted.length * 0.1);
-    const slice = sorted.slice(cut, sorted.length - cut);
-    const sum = slice.reduce((acc, v) => acc + v, 0);
-    return Math.round((sum / slice.length) * 10) / 10;
-  };
-
-  const studyPace = computeRobustMean(studyPaces, PRIOR_STUDY_PACE_MIN_PER_PAGE);
-  const reviewPace = computeRobustMean(reviewPaces, PRIOR_REVIEW_PACE_MIN_PER_PAGE);
-  const refreshPace = computeRobustMean(refreshPaces, PRIOR_REFRESH_PACE_MIN_PER_PAGE);
-  const avgRefreshDuration = computeRobustMean(refreshDurations, 35);
-  const speakingWpm = computeRobustMean(speakingWpms, PRIOR_SPEAKING_WPM);
-
-  // Desglose por materia
-  const subjectPaces: Record<string, { studyMinPerPage: number; reviewMinPerPage: number; samplesCount: number }> = {};
-  const allSubjectIds = new Set([...Object.keys(subjectStudyMap), ...Object.keys(subjectReviewMap)]);
-  
-  allSubjectIds.forEach((subId) => {
-    const sSamples = subjectStudyMap[subId] || [];
-    const rSamples = subjectReviewMap[subId] || [];
-    subjectPaces[subId] = {
-      studyMinPerPage: computeRobustMean(sSamples, studyPace),
-      reviewMinPerPage: computeRobustMean(rSamples, reviewPace),
-      samplesCount: sSamples.length + rSamples.length
-    };
-  });
-
-  // Perfil PLSEMA consolidado
-  let dominantPhase = "lectura";
-  let maxPhaseMins = 0;
-  const phaseAverages: Record<string, number> = {};
-  Object.entries(plsemaPhasesTotals).forEach(([phase, val]) => {
-    const avg = val.count > 0 ? Math.round(val.totalMinutes / val.count) : 0;
-    phaseAverages[phase] = avg;
-    if (val.totalMinutes > maxPhaseMins) {
-      maxPhaseMins = val.totalMinutes;
-      dominantPhase = phase;
-    }
-  });
-  const activeRecallRatio = plsemaMinutesSum > 0 
-    ? Math.round((activeRecallMinutesSum / plsemaMinutesSum) * 100) 
-    : 35;
-
-  // Calibración y Error medio absoluto de predicción
-  const meanAbsoluteErrorMinutes = evaluatedPredictionCount > 0 
-    ? Math.round((sumPredictionErrors / evaluatedPredictionCount) * 10) / 10 
-    : 12.0;
-  const accuracyPct = Math.max(60, Math.min(98, Math.round(100 - (meanAbsoluteErrorMinutes / 45) * 100)));
-
-  return {
-    hasSufficientData: validSessions.length >= 5,
-    totalRecordedSessionsCount: validSessions.length,
-    totalStudiedHours: Math.round((totalMinutesAll / 60) * 10) / 10,
-    studyPaceMinPerPage: studyPace,
-    reviewPaceMinPerPage: reviewPace,
-    refreshPaceMinPerPage: refreshPace,
-    refresh1DurationMin: Math.max(25, Math.round(avgRefreshDuration * 1.25)),
-    refresh2DurationMin: Math.max(20, Math.round(avgRefreshDuration)),
-    refresh3DurationMin: Math.max(15, Math.round(avgRefreshDuration * 0.75)),
-    readingWpm: PRIOR_READING_WPM,
-    speakingWpm,
-    difficultySensitivity: 0.08, // +8% por cada punto sobre dificultad 5
-    vueltaSpeedupFactor: 0.88,   // -12% tiempo por vuelta
-    decayDelayPenaltyPerDay: 0.25,
-    subjectPaces,
-    plsemaProfile: {
-      dominantPhase,
-      activeRecallRatio,
-      phaseAverages
-    },
-    predictionAccuracy: {
-      totalEvaluatedSessions: evaluatedPredictionCount,
-      meanAbsoluteErrorMinutes,
-      accuracyPct,
-      sampleConfidence: evaluatedPredictionCount >= 10 ? "alta" : evaluatedPredictionCount >= 3 ? "media" : "provisional"
-    }
-  };
+function recordedInstant(value: any): number | null {
+  const time = value instanceof Date ? value.getTime() : typeof value?.toMillis === 'function' ? value.toMillis()
+    : typeof value?.seconds === 'number' ? value.seconds * 1000 + Number(value.nanoseconds || 0) / 1e6
+      : typeof value === 'number' ? value : typeof value === 'string' && value ? Date.parse(value) : NaN;
+  return Number.isFinite(time) ? time : null;
 }
 
-/**
- * Calcula la estimación de duración adaptativa y justificada para una tarea específica.
- * NUNCA inventa 20 páginas arbitrarias: utiliza los datos reales del tema y soporta
- * páginas parciales exactas (ej: de pág 4 a 6 en vez del tema entero de 6).
- */
+/** A stored estimate alone is not proof that it preceded the observed result. */
+function prospectiveDurationPrediction(session: Session): number | null {
+  const raw = session as Session & Record<string, any>;
+  const prediction = raw.prediction;
+  if (!prediction || typeof prediction !== 'object') return null;
+  const stages = [prediction.captureStage, prediction.predictionStage, raw.predictionStage, raw.predictionCaptureStage];
+  if (stages.some(stage => ['before_persistence', 'posthoc', 'post_hoc', 'after_outcome', 'after_observation'].includes(String(stage).toLowerCase()))
+    || prediction.modelVersion === 'manual' || String(prediction.method || '').startsWith('manual')) return null;
+  const generated = recordedInstant(prediction.generatedAt);
+  const explicitOutcome = recordedInstant(raw.startedAt) ?? recordedInstant(raw.endedAt) ?? recordedInstant(raw.completedAt);
+  const dayStart = /^\d{4}-\d{2}-\d{2}$/.test(session.date || '') ? recordedInstant(`${session.date}T00:00:00.000Z`) : null;
+  // A persistence timestamp is not the time at which the real outcome became
+  // known. With no observed clock, require a forecast from an earlier civil day.
+  const outcome = explicitOutcome ?? dayStart;
+  const minutes = prediction.estimatedMinutes;
+  return generated !== null && outcome !== null && generated < outcome && typeof minutes === 'number'
+    && Number.isFinite(minutes) && minutes > 0 ? minutes : null;
+}
+
+/** Diagnostics and context only. All forecasts are delegated to personalizedEstimator. */
+export function buildLearnerProfile(sessions: Session[], canonicalTopicMap: Map<string, CanonicalTopic>): LearnerProfile {
+  const valid = selectSessionVersions(sessions, new Date()).filter(session => {
+    if (!session || typeof session !== 'object' || (session as Session & Record<string, any>).mergedIntoSessionId) return false;
+    const minutes = sessionDurationMinutes(session);
+    // A single-session elapsed time cannot exceed a whole day; retain slower
+    // measured page rates within that limit rather than imposing a speed floor.
+    if (!Number.isFinite(minutes) || minutes <= 0 || minutes > 24 * 60) return false;
+    return true;
+  });
+  const paces = { study: [] as number[], review: [] as number[], refresh: [] as number[] };
+  const refreshDurations: number[] = [];
+  const phaseTotals: Record<string, { minutes: number; count: number }> = {};
+  let phaseMinutes = 0, activeMinutes = 0;
+  let absoluteError = 0, relativeError = 0, evaluated = 0;
+  const subjectSamples: Record<string, { study: number[]; review: number[] }> = {};
+  for (const session of valid) {
+    const category = getSessionCategory(session);
+    const activity = category === 'initial_study' ? 'study' : category === 'review' ? 'review' : category === 'refresh' ? 'refresh' : undefined;
+    const topic = canonicalTopicMap.get(session.topicId);
+    // An unlocated legacy session cannot establish minutes per page.
+    const pages = getMeasuredSessionPages(session);
+    const minutes = sessionDurationMinutes(session);
+    if (activity && pages !== null && pages > 0) {
+      paces[activity].push(minutes / pages);
+      if (topic && activity !== 'refresh') {
+        const bucket = subjectSamples[topic.subjectId] ||= { study: [], review: [] };
+        bucket[activity].push(minutes / pages);
+      }
+    }
+    if (category === 'refresh') refreshDurations.push(minutes);
+    const plsema = extractSessionTelemetry(session).plsema;
+    if (plsema) {
+      for (const phase of plsema.observedPhases) {
+        const value = plsema.minutes[phase];
+        const bucket = phaseTotals[phase] ||= { minutes: 0, count: 0 };
+        bucket.minutes += value; bucket.count++;
+        phaseMinutes += value;
+        if (phase === 'memorizar' || phase === 'cantar') activeMinutes += value;
+      }
+    }
+    const expected = prospectiveDurationPrediction(session);
+    if (expected !== null) {
+      absoluteError += Math.abs(minutes - expected);
+      relativeError += Math.abs(minutes - expected) / minutes;
+      evaluated++;
+    }
+  }
+  const phaseAverages = Object.fromEntries(Object.entries(phaseTotals).map(([phase, value]) => [phase, value.minutes / value.count]));
+  const dominant = Object.entries(phaseTotals).sort((a, b) => b[1].minutes - a[1].minutes)[0]?.[0];
+  const profile: LearnerProfile = {
+    hasSufficientData: paces.study.length + paces.review.length + paces.refresh.length >= 5,
+    totalRecordedSessionsCount: valid.length,
+    totalStudiedHours: valid.reduce((sum, session) => sum + sessionDurationMinutes(session), 0) / 60,
+    paceSampleCounts: { study: paces.study.length, review: paces.review.length, refresh: paces.refresh.length },
+    studyPaceMinPerPage: median(paces.study), reviewPaceMinPerPage: median(paces.review), refreshPaceMinPerPage: median(paces.refresh),
+    // Legacy display fields are unknown without observations, never population priors.
+    refresh1DurationMin: median(refreshDurations), refresh2DurationMin: median(refreshDurations), refresh3DurationMin: median(refreshDurations),
+    readingWpm: null, speakingWpm: null,
+    difficultySensitivity: 0, vueltaSpeedupFactor: 1, decayDelayPenaltyPerDay: 0,
+    subjectPaces: Object.fromEntries(Object.entries(subjectSamples).map(([subject, values]) => [subject, {
+      studyMinPerPage: median(values.study), reviewMinPerPage: median(values.review),
+      samplesCount: values.study.length + values.review.length,
+      studySamplesCount: values.study.length, reviewSamplesCount: values.review.length,
+    }])),
+    plsemaProfile: dominant && phaseMinutes > 0 ? { dominantPhase: dominant, activeRecallRatio: activeMinutes / phaseMinutes * 100, phaseAverages } : undefined,
+    predictionAccuracy: evaluated ? {
+      totalEvaluatedSessions: evaluated,
+      meanAbsoluteErrorMinutes: absoluteError / evaluated,
+      accuracyPct: Math.max(0, 100 * (1 - relativeError / evaluated)),
+      sampleConfidence: evaluated >= 10 ? 'alta' : evaluated >= 3 ? 'media' : 'provisional',
+    } : undefined,
+  };
+  profileContexts.set(profile, { history: valid, topics: canonicalTopicMap });
+  return profile;
+}
+
+/** A single differentiated, evidence-based model serves every duration consumer. */
 export function estimateAdaptiveDuration(
   topic: CanonicalTopic | undefined,
-  activityType: "estudio_nuevo" | "refresco" | "repaso" | "cante",
+  activityType: 'estudio_nuevo' | 'refresco' | 'repaso' | 'cante',
   profile: LearnerProfile,
   refrescoIndex?: 1 | 2 | 3,
-  partialWork?: { fromPage?: number; toPage?: number; targetPages?: number }
+  partialWork?: { fromPage?: number; toPage?: number; targetPages?: number; pageNumbers?: number[] },
 ): AdaptiveDurationEstimate {
-  // Caso de cante oral: tiempo reglamentario + lectura previa
-  if (activityType === "cante") {
-    return {
-      estimatedMinutes: 30,
-      confidence: "alta",
-      explanation: "30 min reglamentarios (12:30 cante cronometrado + 17:30 preparación y lectura previa)",
-      paceMinPerPage: 0,
-      pagesUsed: topic?.pages || 0,
-      totalPages: topic?.pages || 0,
-      isPartialStudy: false,
-      hasExplicitPages: Boolean(topic?.hasExplicitPages),
-      isCustomSpeed: false,
-      details: {
-        baseVolumeMinutes: 30,
-        difficultyAdjustmentMinutes: 0,
-        vueltaAdjustmentMinutes: 0,
-        decayAdjustmentMinutes: 0
-      }
-    };
-  }
-
-  // Si no hay tema seleccionado, devolver un valor seguro provisional
-  if (!topic) {
-    return {
-      estimatedMinutes: 45,
-      confidence: "provisional",
-      explanation: "Estimación base provisional sin tema asignado",
-      paceMinPerPage: profile.reviewPaceMinPerPage,
-      pagesUsed: 0,
-      totalPages: 0,
-      isPartialStudy: false,
-      hasExplicitPages: false,
-      isCustomSpeed: false,
-      details: {
-        baseVolumeMinutes: 45,
-        difficultyAdjustmentMinutes: 0,
-        vueltaAdjustmentMinutes: 0,
-        decayAdjustmentMinutes: 0
-      }
-    };
-  }
-
-  const totalPages = topic.pages > 0 ? topic.pages : 0;
-  const hasPages = topic.hasExplicitPages;
-  const difficulty = topic.difficulty || 5;
-  const vueltas = topic.vueltas || 0;
-
-  // Determinar páginas efectivas (trabajo parcial vs tema completo)
-  let pagesToStudy = totalPages;
-  let isPartial = false;
-  let fromP = partialWork?.fromPage;
-  let toP = partialWork?.toPage;
-
-  if (partialWork?.targetPages !== undefined && partialWork.targetPages > 0) {
-    pagesToStudy = Math.min(totalPages > 0 ? totalPages : 999, partialWork.targetPages);
-    isPartial = totalPages > 0 && pagesToStudy < totalPages;
-  } else if (fromP !== undefined && toP !== undefined && toP >= fromP) {
-    pagesToStudy = toP - fromP + 1;
-    isPartial = totalPages > 0 && pagesToStudy < totalPages;
-  }
-
-  // Modulador de dificultad empírico
-  const difficultyMultiplier = 1 + (difficulty - 5) * profile.difficultySensitivity;
-
-  // Modulador de vueltas para repaso (cada vuelta reduce el tiempo requerido hasta un tope de -35%)
-  const vueltaMultiplier = vueltas > 0 ? Math.max(0.65, Math.pow(profile.vueltaSpeedupFactor, Math.min(3, vueltas))) : 1.0;
-
-  // 1. Caso Refrescos (D+1, D+2, D+3 tras estudio nuevo)
-  if (activityType === "refresco") {
-    let baseMins = profile.refresh2DurationMin;
-    if (refrescoIndex === 1) baseMins = profile.refresh1DurationMin;
-    if (refrescoIndex === 3) baseMins = profile.refresh3DurationMin;
-
-    if (hasPages && pagesToStudy > 0) {
-      // Ajustar por volumen real si el tema es especialmente extenso o breve
-      const volumeAdjusted = pagesToStudy * profile.refreshPaceMinPerPage * difficultyMultiplier;
-      baseMins = Math.round((baseMins + volumeAdjusted) / 2);
-    }
-
-    const finalMins = Math.max(15, Math.round(baseMins * difficultyMultiplier));
-    return {
-      estimatedMinutes: finalMins,
-      confidence: profile.hasSufficientData ? "alta" : "media",
-      explanation: hasPages 
-        ? `Refresco ${refrescoIndex || 1}/3 adaptado a ${pagesToStudy} págs reales (dificultad ${difficulty})`
-        : `Refresco ${refrescoIndex || 1}/3 con duración estándar personalizada (~${finalMins} min)`,
-      paceMinPerPage: profile.refreshPaceMinPerPage,
-      pagesUsed: pagesToStudy,
-      totalPages,
-      fromPage: fromP,
-      toPage: toP,
-      isPartialStudy: isPartial,
-      hasExplicitPages: hasPages,
-      isCustomSpeed: profile.hasSufficientData,
-      details: {
-        baseVolumeMinutes: baseMins,
-        difficultyAdjustmentMinutes: Math.round(baseMins * (difficultyMultiplier - 1)),
-        vueltaAdjustmentMinutes: 0,
-        decayAdjustmentMinutes: 0
-      }
-    };
-  }
-
-  // 2. Estudio Nuevo o Repaso
-  let paceMinPerPage = activityType === "estudio_nuevo" ? profile.studyPaceMinPerPage : profile.reviewPaceMinPerPage;
-  let isCustom = profile.hasSufficientData;
-
-  // Consultar si hay ritmo empírico específico de la materia del tema
-  if (topic.subjectId && profile.subjectPaces[topic.subjectId]) {
-    const subPace = profile.subjectPaces[topic.subjectId];
-    if (subPace.samplesCount >= 2) {
-      paceMinPerPage = activityType === "estudio_nuevo" ? subPace.studyMinPerPage : subPace.reviewMinPerPage;
-      isCustom = true;
-    }
-  }
-
-  let finalMinutes: number;
-  let explanation: string;
-  let confidence: "alta" | "media" | "provisional" = "media";
-
-  if (hasPages && pagesToStudy > 0) {
-    // Cálculo basado en la volumetría exacta del trabajo a realizar
-    const rawVolumeMins = pagesToStudy * paceMinPerPage;
-    const diffMins = rawVolumeMins * (difficultyMultiplier - 1);
-    const vueltaMins = activityType === "repaso" ? rawVolumeMins * (vueltaMultiplier - 1) : 0;
-    
-    finalMinutes = Math.max(15, Math.round((rawVolumeMins + diffMins + vueltaMins)));
-    confidence = isCustom ? "alta" : "media";
-
-    const partialText = isPartial 
-      ? ` (${pagesToStudy} de ${totalPages} págs${fromP ? `, págs ${fromP}-${toP}` : ""})` 
-      : ` (${pagesToStudy} págs completas)`;
-    const vueltaText = vueltas > 0 && activityType === "repaso" 
-      ? ` · Vuelta ${vueltas} (${Math.round((1 - vueltaMultiplier) * 100)}% aceleración)` 
-      : "";
-    explanation = `Basado en ${pagesToStudy} págs a tu ritmo histórico de ${paceMinPerPage} min/pág (dif. ${difficulty})${partialText}${vueltaText}`;
-
-    return {
-      estimatedMinutes: finalMinutes,
-      confidence,
-      explanation,
-      paceMinPerPage,
-      pagesUsed: pagesToStudy,
-      totalPages,
-      fromPage: fromP,
-      toPage: toP,
-      isPartialStudy: isPartial,
-      hasExplicitPages: true,
-      isCustomSpeed: isCustom,
-      details: {
-        baseVolumeMinutes: Math.round(rawVolumeMins),
-        difficultyAdjustmentMinutes: Math.round(diffMins),
-        vueltaAdjustmentMinutes: Math.round(vueltaMins),
-        decayAdjustmentMinutes: 0
-      }
-    };
-  } else {
-    // El tema no tiene páginas medidas todavía en el temario
-    finalMinutes = activityType === "estudio_nuevo" ? 90 : 45;
-    finalMinutes = Math.round(finalMinutes * difficultyMultiplier);
-    
-    return {
-      estimatedMinutes: finalMinutes,
-      confidence: "provisional",
-      explanation: `Tema sin páginas medidas registradas. Estimación provisional prudente (${finalMinutes}m). Puedes registrar sus páginas en la ficha del tema.`,
-      paceMinPerPage,
-      pagesUsed: 0,
-      totalPages: 0,
-      isPartialStudy: false,
-      hasExplicitPages: false,
-      isCustomSpeed: false,
-      details: {
-        baseVolumeMinutes: finalMinutes,
-        difficultyAdjustmentMinutes: 0,
-        vueltaAdjustmentMinutes: 0,
-        decayAdjustmentMinutes: 0
-      }
-    };
-  }
+  const context = profileContexts.get(profile) || { history: topic?.sessions || [], topics: new Map(topic ? [[topic.id, topic]] : []) };
+  const work = partialWork ? { fromPage: partialWork.fromPage, toPage: partialWork.toPage, pages: partialWork.targetPages, pageNumbers: partialWork.pageNumbers } : undefined;
+  const result = topic ? estimatePersonalizedDuration({ topic, activity: activityType, history: context.history, topics: context.topics, asOf: new Date(), work, refreshOrdinal: refrescoIndex }) : undefined;
+  const fullPages = topic?.pages || 0;
+  const selectedPages = partialWork?.targetPages ?? (partialWork?.pageNumbers?.length || (partialWork?.fromPage !== undefined && partialWork?.toPage !== undefined ? partialWork.toPage - partialWork.fromPage + 1 : undefined));
+  const pagesUsed = selectedPages ?? (activityType === 'estudio_nuevo' ? topic?.initialStudyCoverage.remainingPages : fullPages) ?? 0;
+  const manualPace = activityType === 'estudio_nuevo' ? profile.manualPaces?.study : activityType === 'repaso' ? profile.manualPaces?.review : activityType === 'refresco' ? profile.manualPaces?.refresh : undefined;
+  const suppliedDuration = activityType === 'cante' ? profile.manualDurations?.cante : activityType === 'refresco' && refrescoIndex ? profile.manualDurations?.[`refresh${refrescoIndex}`] : undefined;
+  const hasManualDuration = Number.isFinite(suppliedDuration) && suppliedDuration > 0;
+  const manual = hasManualDuration || Number.isFinite(manualPace) && manualPace > 0 && pagesUsed > 0;
+  const method = hasManualDuration ? 'manual_duration' : manual ? 'manual_rate' : result?.method || 'unavailable';
+  const manualFeatures = hasManualDuration ? ['manual_duration'] : ['manual_rate', 'requested_pages'];
+  const minutes = hasManualDuration ? suppliedDuration : manual ? Math.max(1, Math.round(pagesUsed * manualPace)) : result?.estimatedMinutes ?? null;
+  const factors = manual ? [hasManualDuration ? 'Duración introducida por el usuario; no es una predicción estadística.' : 'Ritmo introducido por el usuario; no es una predicción estadística.'] : result?.factors || ['Falta un tema para estimar.'];
+  return {
+    estimatedMinutes: minutes, available: minutes !== null,
+    interval: manual ? null : result?.interval || null,
+    evidenceCount: manual ? 0 : result?.evidenceCount || 0, effectiveSampleSize: manual ? 0 : result?.effectiveSampleSize || 0,
+    method, modelVersion: manual ? 'manual' : result?.modelVersion || 'unavailable',
+    factors, featuresUsed: manual ? manualFeatures : result?.featuresUsed || [], excludedCount: result?.excludedCount || 0,
+    phaseEstimates: manual ? undefined : result?.phaseEstimates,
+    personalizedPrediction: {
+      modelVersion: manual ? 'manual' : result?.modelVersion || 'unavailable', generatedAt: new Date().toISOString(),
+      activity: activityType, estimatedMinutes: minutes, interval: manual ? null : result?.interval || null,
+      evidenceCount: manual ? 0 : result?.evidenceCount || 0, method,
+      featuresUsed: manual ? manualFeatures : result?.featuresUsed || [], factors, workPages: pagesUsed || null,
+    },
+    confidence: manual ? 'provisional' : result?.confidence === 'alta' ? 'alta' : result?.confidence === 'media' ? 'media' : 'provisional',
+    explanation: factors.join(' '),
+    paceMinPerPage: minutes !== null && pagesUsed > 0 ? minutes / pagesUsed : null,
+    pagesUsed, totalPages: fullPages, fromPage: partialWork?.fromPage, toPage: partialWork?.toPage,
+    isPartialStudy: fullPages > 0 && pagesUsed < fullPages,
+    hasExplicitPages: topic?.hasExplicitPages || false, isCustomSpeed: manual || (result?.evidenceCount || 0) > 0,
+    details: { baseVolumeMinutes: minutes, difficultyAdjustmentMinutes: 0, vueltaAdjustmentMinutes: 0, decayAdjustmentMinutes: 0 },
+  };
 }
 
 /**
@@ -512,198 +276,29 @@ export function estimateAdaptiveDuration(
  */
 export function calculateAdaptiveRetention(
   topic: CanonicalTopic,
-  sessions: Session[],
-  profile: LearnerProfile
+  _sessions: Session[],
+  _profile: LearnerProfile
 ): AdaptiveRetentionResult {
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-
-  // 1. Extraer fechas del último contacto
-  let lastTouchDateStr = topic.lastReviewDate || topic.firstStudyDate;
-  let lastCantoDateStr = topic.lastCantoDate;
-  let lastCantoGrade = topic.lastCantoGrade || null;
-
-  // Filtrar sesiones de este tema para verificar notas y fechas
-  const topicSessions = sessions.filter((s) => s.topicId === topic.id);
-  topicSessions.forEach((s) => {
-    if (s.date && (!lastTouchDateStr || s.date > lastTouchDateStr)) {
-      lastTouchDateStr = s.date;
-    }
-    if (isCantoSession(s)) {
-      if (!lastCantoDateStr || s.date > lastCantoDateStr) {
-        lastCantoDateStr = s.date;
-        const g = typeof s.cantoGrade === "number" ? s.cantoGrade : typeof (s as any).grade === "number" ? (s as any).grade : null;
-        if (g !== null) lastCantoGrade = g;
-      }
-    }
-  });
-
-  // Si nunca ha tenido contacto
-  if (!lastTouchDateStr) {
-    return {
-      retentionPct: 0,
-      confidence: "alta",
-      status: "critico",
-      statusLabel: "Sin Iniciar",
-      statusBadgeClass: "bg-slate-100 text-slate-700 border-slate-200",
-      stabilityDays: 3.5,
-      daysSinceLastTouch: 999,
-      daysSinceLastCanto: null,
-      lastCantoGrade: null,
-      evidenceLevel: "sin_evidencia",
-      ebbinghausFactors: [
-        "Tema aún no iniciado en tu preparación",
-        "Sin sesiones de estudio ni cante registradas"
-      ],
-      recommendedAction: "Programar primer estudio en un día sin cante",
-      suggestedReviewDate: getLocalDateString(today),
-      isUrgent: false
-    };
-  }
-
-  const diffMs = today.getTime() - safeParseDate(lastTouchDateStr).getTime();
-  const daysSinceLastTouch = Math.max(0, Math.floor(diffMs / (1000 * 3600 * 24)));
-
-  let daysSinceLastCanto: number | null = null;
-  if (lastCantoDateStr) {
-    const cantoDiffMs = today.getTime() - safeParseDate(lastCantoDateStr).getTime();
-    daysSinceLastCanto = Math.max(0, Math.floor(cantoDiffMs / (1000 * 3600 * 24)));
-  }
-
-  // 2. Cálculo adaptativo de Estabilidad de Memoria (S en días)
-  // Vida media base: 3.5 días tras primer estudio
-  let baseStability = 3.5;
-  const vueltas = topic.vueltas || 0;
-  const reviewCount = topic.reviewCount || topicSessions.length;
-  const difficulty = topic.difficulty || 5;
-
-  // Factor vueltas (reforzamiento de huella sináptica)
-  let vueltasFactor = 1.0;
-  if (vueltas === 1) vueltasFactor = 1.85;
-  else if (vueltas === 2) vueltasFactor = 3.10;
-  else if (vueltas === 3) vueltasFactor = 4.60;
-  else if (vueltas >= 4) vueltasFactor = Math.min(6.5, 4.60 + (vueltas - 3) * 0.75);
-
-  // Factor Evidencia de Cante (Retrieval Practice activa)
-  // Un cante con nota alta (>7.5) demuestra consolidación activa profunda
-  let cantoRetrievalFactor = 1.0;
-  let evidenceLevel: "canto_evaluado" | "repaso_activo" | "estudio_reciente" | "sin_evidencia" = "repaso_activo";
-
-  if (lastCantoGrade !== null && lastCantoGrade >= 7.0) {
-    cantoRetrievalFactor = 2.4;
-    evidenceLevel = "canto_evaluado";
-  } else if (lastCantoGrade !== null && lastCantoGrade >= 5.0) {
-    cantoRetrievalFactor = 1.8;
-    evidenceLevel = "canto_evaluado";
-  } else if (daysSinceLastCanto !== null && daysSinceLastCanto < 30) {
-    cantoRetrievalFactor = 1.5;
-    evidenceLevel = "canto_evaluado";
-  } else if (reviewCount >= 2) {
-    cantoRetrievalFactor = 1.25;
-    evidenceLevel = "repaso_activo";
-  } else {
-    evidenceLevel = "estudio_reciente";
-  }
-
-  // Factor repasos acumulados
-  const reviewsFactor = 1 + 0.12 * Math.min(6, reviewCount);
-
-  // Factor dificultad (los temas más difíciles sufren mayor desgaste)
-  const diffFactor = Math.max(0.65, Math.min(1.3, 1.3 - (difficulty - 5) * 0.08));
-
-  const stabilityDays = +(baseStability * vueltasFactor * cantoRetrievalFactor * reviewsFactor * diffFactor).toFixed(1);
-
-  // 3. Ecuación exponencial de Ebbinghaus diferencial R = e^(-t / S)
-  // t efectivo: si el último contacto fue un cante, el olvido se frenó al 100%; si fue un repaso pasivo, al 65%.
-  const effectiveDays = daysSinceLastCanto !== null && daysSinceLastCanto === daysSinceLastTouch
-    ? daysSinceLastTouch
-    : daysSinceLastTouch * 0.85;
-
-  const retentionRatio = Math.exp(-effectiveDays / stabilityDays);
-  const retentionPct = Math.max(10, Math.min(99, Math.round(retentionRatio * 100)));
-
-  // 4. Diagnóstico de Estado y Factores
-  let status: "consolidado" | "estable" | "desgaste" | "critico" = "estable";
-  let statusLabel = "Memoria Estable";
-  let statusBadgeClass = "bg-emerald-50 text-emerald-800 border-emerald-200";
-  let isUrgent = false;
-
-  if (retentionPct >= 80 && vueltas >= 2) {
-    status = "consolidado";
-    statusLabel = "Tema Consolidado";
-    statusBadgeClass = "bg-indigo-50 text-indigo-800 border-indigo-200";
-  } else if (retentionPct >= 70) {
-    status = "estable";
-    statusLabel = "Retención Estable";
-    statusBadgeClass = "bg-emerald-50 text-emerald-800 border-emerald-200";
-  } else if (retentionPct >= 55) {
-    status = "desgaste";
-    statusLabel = "Desgaste de Curva";
-    statusBadgeClass = "bg-amber-50 text-amber-900 border-amber-200";
-  } else {
-    status = "critico";
-    statusLabel = "Riesgo de Olvido";
-    statusBadgeClass = "bg-rose-50 text-rose-800 border-rose-200";
-    isUrgent = true;
-  }
-
-  // 5. Nivel de confianza estadístico
-  let confidence: "alta" | "media" | "baja" = "baja";
-  if (lastCantoGrade !== null && reviewCount >= 3) {
-    confidence = "alta";
-  } else if (reviewCount >= 2 || vueltas >= 1) {
-    confidence = "media";
-  }
-
-  // 6. Factores justificativos transparentes
-  const ebbinghausFactors: string[] = [];
-  ebbinghausFactors.push(`${daysSinceLastTouch} días transcurridos desde el último contacto (${lastTouchDateStr})`);
-  
-  if (vueltas > 0) {
-    ebbinghausFactors.push(`${vueltas} ${vueltas === 1 ? "vuelta completa acumulada" : "vueltas completas acumuladas"} (estabilidad x${vueltasFactor.toFixed(1)})`);
-  }
-  
-  if (lastCantoGrade !== null) {
-    ebbinghausFactors.push(`Último cante evaluado con nota ${lastCantoGrade.toFixed(1)}/10 (evidencia activa x${cantoRetrievalFactor.toFixed(1)})`);
-  } else if (reviewCount > 0) {
-    ebbinghausFactors.push(`${reviewCount} repasos acumulados sin nota oficial de cante`);
-  }
-
-  if (difficulty >= 7) {
-    ebbinghausFactors.push(`Dificultad alta (${difficulty}/10): mayor tasa de desvanecimiento neuronal`);
-  }
-
-  // 7. Acción pedagógica recomendada
-  let recommendedAction: string;
-  if (status === "consolidado") {
-    recommendedAction = `Retención sólida (~${retentionPct}%). Se puede espaciar el repaso hasta dentro de ${Math.round(stabilityDays * 0.4)} días.`;
-  } else if (status === "estable") {
-    recommendedAction = `Retención correcta (~${retentionPct}%). Mantener en el radar para la próxima vuelta o cante programado.`;
-  } else if (status === "desgaste") {
-    recommendedAction = `La retención ha descendido al ${retentionPct}%. Conviene programar un repaso de consolidación en los próximos 5 días.`;
-  } else {
-    recommendedAction = `Riesgo elevado (${retentionPct}% estimado, ${daysSinceLastTouch} días sin contacto). Prioridad alta para añadir al plan semanal.`;
-  }
-
-  // Fecha sugerida para el repaso (cuando R descienda a ~68%)
-  const daysUntilThreshold = Math.max(1, Math.round(stabilityDays * 0.38 - daysSinceLastTouch));
-  const suggestedDate = new Date(today);
-  suggestedDate.setDate(today.getDate() + daysUntilThreshold);
-
+  const context = profileContexts.get(_profile);
+  const analysis = topic.retentionEstimate ? calculateCanonicalRetention(topic)
+    : calculateCanonicalRetention(topic, { history: context?.history || _sessions, topics: context?.topics || new Map([[topic.id, topic]]) });
+  const daysSinceLastCanto = topic.lastCantoDate
+    ? Math.max(0, Math.floor((Date.now() - safeParseDate(topic.lastCantoDate).getTime()) / 86_400_000)) : null;
+  const status = analysis.status === 'excelente' ? 'consolidado'
+    : analysis.status === 'bueno' ? 'estable' : analysis.status === 'atencion' ? 'desgaste' : 'critico';
+  const grade = analysis.factors.lastCantoGrade;
   return {
-    retentionPct,
-    confidence,
-    status,
-    statusLabel,
-    statusBadgeClass,
-    stabilityDays,
-    daysSinceLastTouch,
-    daysSinceLastCanto,
-    lastCantoGrade,
-    evidenceLevel,
-    ebbinghausFactors,
-    recommendedAction,
-    suggestedReviewDate: getLocalDateString(suggestedDate),
-    isUrgent
+    retentionPct: analysis.currentRetention,
+    confidence: analysis.adaptive?.confidence === 'alta' ? 'alta' : analysis.adaptive?.confidence === 'media' ? 'media' : 'baja',
+    status, statusLabel: analysis.statusTitle, statusBadgeClass: analysis.statusBadgeClass,
+    stabilityDays: analysis.stabilityDays,
+    daysSinceLastTouch: analysis.daysSinceLastAction,
+    daysSinceLastCanto, lastCantoGrade: grade,
+    evidenceLevel: !analysis.hasData ? 'sin_evidencia' : grade !== null ? 'canto_evaluado'
+      : topic.reviewCount > 0 ? 'repaso_activo' : 'estudio_reciente',
+    ebbinghausFactors: [analysis.diagnostic],
+    recommendedAction: analysis.actionAdvice,
+    suggestedReviewDate: getCanonicalReviewDate(topic, analysis),
+    isUrgent: analysis.hasData && analysis.isBelowCritical80,
   };
 }

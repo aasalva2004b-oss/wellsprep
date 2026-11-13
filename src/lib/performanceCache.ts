@@ -1,197 +1,67 @@
-import { Topic } from "../types";
-import { TopicProgressData } from "./prediction";
+import type { Topic } from "../types";
+import type { TopicProgressData } from "./prediction";
 import { calculateTopicCycle } from "./oposicionCycle";
-import { calculateNextSRSState } from "./srs";
 import { safeParseDate, getLocalDateString } from "./utils";
-import { calculateEstimatedReviewTime, RepasoPredictionResult } from "./repasoPredictor";
-import { getLatestCantoForTopic, sessionMatchesTopic } from "./cantoUtils";
-import { calculateEbbinghausCurve, TopicMemoryStatus } from "./ebbinghaus";
+import { calculateCanonicalReviewTime, type RepasoPredictionResult } from "./repasoPredictor";
+import { buildLearnerProfile } from './adaptiveLearningEngine';
+import { getLatestCantoForTopic } from "./cantoUtils";
+import { calculateCanonicalRetention, getCanonicalReviewDate, type TopicMemoryStatus, type EbbinghausAnalysis } from "./ebbinghaus";
+import { buildCanonicalTopicMap, type CanonicalTopic } from './canonicalTopicService';
 
 export interface FastTopicTelemetry {
+  canonical: CanonicalTopic;
   sessions: any[];
   lastCanto: {
-    hasCanto: boolean;
-    formatted: string;
-    mins: number;
-    secs: number;
-    grade: number | null;
-    date: string | null;
-    count: number;
+    hasCanto: boolean; formatted: string; mins: number; secs: number;
+    grade: number | null; date: string | null; count: number;
   };
   cycle: ReturnType<typeof calculateTopicCycle>;
   srs: {
-    isDueToday: boolean;
-    isOverdue: boolean;
-    nextDate: string | null;
-    daysDiff: number | null;
+    isDueToday: boolean; isOverdue: boolean; nextDate: string | null; daysDiff: number | null;
   };
   reviewEstimate: RepasoPredictionResult;
+  memory: EbbinghausAnalysis;
   ebbinghaus: {
-    retention: number;
-    status: TopicMemoryStatus;
-    statusTitle: string;
-    isDue: boolean;
-    daysUntil80: number;
-    stabilityDays: number;
-    critical80DateStr: string | null;
+    hasData: boolean; retention: number; status: TopicMemoryStatus; statusTitle: string;
+    isDue: boolean; daysUntil80: number; stabilityDays: number; critical80DateStr: string | null;
   };
 }
 
-/**
- * Builds an O(N) indexed telemetry dictionary for all topics in the active subject or entire syllabus.
- * Calling this once per data update reduces O(N * M) nested computations to instant O(1) lookups.
- */
+/** Shared projections only: never reads Firebase or writes cached derived values. */
 export function buildSubjectTelemetryIndex(
-  topics: Topic[],
-  userProgress: Record<string, TopicProgressData>,
-  recentSessions: any[]
+  topics: Topic[], userProgress: Record<string, TopicProgressData>, recentSessions: any[],
+  topicState?: Map<string, CanonicalTopic>,
 ): Map<string, FastTopicTelemetry> {
-  // 1. Bucket sessions by topicId and by number for high speed lookup
-  const sessionsMap = new Map<string, any[]>();
-  for (let i = 0; i < recentSessions.length; i++) {
-    const s = recentSessions[i];
-    if (!s) continue;
-    const key = String(s.topicId || "").trim();
-    if (key) {
-      let list = sessionsMap.get(key);
-      if (!list) {
-        list = [];
-        sessionsMap.set(key, list);
-      }
-      list.push(s);
-    }
-  }
-
-  const todayStr = getLocalDateString();
-  const todayDate = new Date(todayStr);
-  const nowTime = new Date().getTime();
+  const canonicalMap = topicState || buildCanonicalTopicMap(topics, userProgress, recentSessions);
+  const learnerProfile = buildLearnerProfile(recentSessions, canonicalMap);
+  const today = safeParseDate(getLocalDateString());
   const index = new Map<string, FastTopicTelemetry>();
-
-  // 2. Compute telemetry for each topic
-  for (let i = 0; i < topics.length; i++) {
-    const topic = topics[i];
-    const topicId = topic.id;
-    const progress = userProgress[topicId];
-
-    // Combine direct topicId matches, numeric topicId matches, and universal matcher
-    const directSessions = sessionsMap.get(topicId) || [];
-    const numberSessions = topic.number ? sessionsMap.get(String(topic.number)) || [] : [];
-    
-    // Deduplicate merged sessions by session ID
-    const sessionSeen = new Set<string>();
-    const topicSessions: any[] = [];
-
-    for (const s of directSessions) {
-      const sid = s.id || JSON.stringify(s);
-      if (!sessionSeen.has(sid) && sessionMatchesTopic(s, topic)) {
-        sessionSeen.add(sid);
-        topicSessions.push(s);
-      }
-    }
-
-    for (const s of numberSessions) {
-      const sid = s.id || JSON.stringify(s);
-      if (!sessionSeen.has(sid) && sessionMatchesTopic(s, topic)) {
-        sessionSeen.add(sid);
-        topicSessions.push(s);
-      }
-    }
-
-    // Always merge any matches from recentSessions to ensure zero missed records across all topics
-    for (const s of recentSessions) {
-      const sid = s.id || JSON.stringify(s);
-      if (!sessionSeen.has(sid) && sessionMatchesTopic(s, topic)) {
-        sessionSeen.add(sid);
-        topicSessions.push(s);
-      }
-    }
-
-
-    // Cycle computation
-    const cycle = calculateTopicCycle(topicId, progress, topicSessions);
-
-    // Canto telemetry using the rock-solid engine
-    const latestCantoData = getLatestCantoForTopic(topicSessions, topic, progress);
-    const lastCanto = {
-      hasCanto: latestCantoData.hasCanto,
-      formatted: latestCantoData.hasCanto ? latestCantoData.formatted : "Sin cante",
-      mins: latestCantoData.mins,
-      secs: latestCantoData.secs,
-      grade: latestCantoData.grade,
-      date: latestCantoData.date,
-      count: latestCantoData.count,
-    };
-
-    // SRS computation
-    const srsState = {
-      easinessFactor: progress?.srsEasinessFactor || 2.5,
-      interval: progress?.srsInterval || 0,
-      repetitions: progress?.srsRepetitions || 0,
-    };
-
-    let nextDate: string | null = null;
-    let isOverdue = false;
-    let isDueToday = false;
-    let daysDiff: number | null = null;
-
-    if (progress?.firstStudyDate) {
-      nextDate =
-        progress?.nextReviewDate ||
-        calculateNextSRSState(
-          progress?.difficulty || 5,
-          srsState,
-          progress?.lastReviewDate || progress?.firstStudyDate
-        ).nextReviewDate;
-
-      if (nextDate) {
-        const parsed = safeParseDate(nextDate);
-        isOverdue = parsed < todayDate;
-        isDueToday = parsed.toDateString() === todayDate.toDateString() || isOverdue;
-        daysDiff = Math.ceil((parsed.getTime() - nowTime) / (1000 * 3600 * 24));
-      }
-    }
-
-    // Review prediction (cached)
-    const reviewEstimate = calculateEstimatedReviewTime(
-      topic,
-      progress,
-      topicSessions,
-      topics,
-      userProgress,
-      recentSessions
-    );
-
-    // Ebbinghaus memory retention calculation
-    const ebbAnalysis = calculateEbbinghausCurve(
-      topicId,
-      progress?.pages || topic.pages || 15,
-      progress?.difficulty || topic.difficulty || 5,
-      progress,
-      topicSessions
-    );
-
-    index.set(topicId, {
-      sessions: topicSessions,
-      lastCanto,
-      cycle,
-      srs: {
-        isDueToday,
-        isOverdue,
-        nextDate,
-        daysDiff,
-      },
-      reviewEstimate,
+  for (const topic of topics) {
+    const canonical = canonicalMap.get(topic.id);
+    if (!canonical) continue;
+    const sessions = (canonical as CanonicalTopic & { sessions?: any[] }).sessions || [];
+    const memory = calculateCanonicalRetention(canonical);
+    const nextDate = getCanonicalReviewDate(canonical, memory);
+    const next = nextDate ? safeParseDate(nextDate) : null;
+    const daysDiff = next ? Math.round((next.getTime() - today.getTime()) / 86_400_000) : null;
+    const isOverdue = daysDiff !== null && daysDiff < 0;
+    const isDueToday = daysDiff !== null && daysDiff <= 0;
+    const progress = userProgress[topic.id];
+    const cycle = calculateTopicCycle(topic.id, progress, sessions, canonical);
+    const canto = getLatestCantoForTopic(sessions, topic, progress);
+    index.set(topic.id, {
+      canonical, sessions, cycle, memory,
+      lastCanto: { hasCanto: canto.hasCanto, formatted: canto.formatted, mins: canto.mins,
+        secs: canto.secs, grade: canto.grade, date: canto.date, count: canto.count },
+      srs: { nextDate, daysDiff, isOverdue, isDueToday },
+      reviewEstimate: calculateCanonicalReviewTime(canonical, learnerProfile),
       ebbinghaus: {
-        retention: Math.round(ebbAnalysis.currentRetention),
-        status: ebbAnalysis.status,
-        statusTitle: ebbAnalysis.statusTitle,
-        isDue: ebbAnalysis.isBelowCritical80 || isDueToday || isOverdue,
-        daysUntil80: ebbAnalysis.daysUntilCritical80,
-        stabilityDays: ebbAnalysis.stabilityDays,
-        critical80DateStr: ebbAnalysis.critical80DateStr,
+        hasData: memory.hasData, retention: memory.currentRetention, status: memory.status,
+        statusTitle: memory.statusTitle, isDue: memory.hasData && (isDueToday || isOverdue),
+        daysUntil80: memory.daysUntilCritical80, stabilityDays: memory.stabilityDays,
+        critical80DateStr: memory.critical80DateStr,
       },
     });
   }
-
   return index;
 }
