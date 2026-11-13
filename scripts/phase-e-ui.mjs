@@ -7,6 +7,7 @@ import { chromium } from '@playwright/test';
 
 // Only independent invented observations. Never accepts a private backup path.
 const stage = process.argv.includes('--before') ? 'before' : 'after';
+const port = 5183;
 const directory = resolve('.cache/phase-e');
 await mkdir(directory, { recursive: true });
 const today = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Paris' }).format(new Date());
@@ -39,26 +40,26 @@ const fixture = { schemaVersion: 2, progress: topics, sessions, settings: {
 }, quarantine: [], timestamp: new Date().toISOString() };
 const fixturePath = resolve(directory, 'synthetic-input.json');
 await writeFile(fixturePath, JSON.stringify(fixture));
-const server = spawn(process.execPath, ['node_modules/vite/bin/vite.js', '--force'], {
+const server = spawn(process.execPath, ['node_modules/vite/bin/vite.js', '--port', String(port), '--strictPort', '--force'], {
   stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, WELLSPREP_BACKUP_PATH: fixturePath, VITE_FIREBASE_MODE: 'emulator', VITE_FIREBASE_PROJECT_ID: 'demo-wellsprep' },
 });
 let output = '', browser;
 server.stdout.on('data', chunk => { output += chunk; }); server.stderr.on('data', chunk => { output += chunk; });
 const report = { stage, syntheticOnly: true, transport: 'in-memory SDK replay', productionAccess: false, externalRequests: 0, errors: [], screens: [], checks: [] };
 try {
-  for (let i = 0; i < 150 && !output.includes('ready in'); i++) { if (server.exitCode !== null) throw new Error('UI audit server failed; port 5173 must be free.'); await delay(100); }
+  for (let i = 0; i < 150 && !output.includes('ready in'); i++) { if (server.exitCode !== null) throw new Error(`UI audit server failed; port ${port} must be free.`); await delay(100); }
   assert.ok(output.includes('ready in'), 'UI audit server startup timeout');
   browser = await chromium.launch({ executablePath: process.env.CHROMIUM_EXECUTABLE || '/usr/bin/chromium', headless: true, args: ['--no-sandbox', '--disable-dev-shm-usage'] });
   for (const width of stage === 'before' ? [390, 1440] : [320, 390, 768, 1440]) {
     const context = await browser.newContext({ viewport: { width, height: width < 768 ? 844 : 1050 }, timezoneId: 'Europe/Paris', reducedMotion: 'reduce' });
     await context.route('**/*', route => {
       const url = new URL(route.request().url());
-      if (url.hostname === '127.0.0.1' && url.port === '5173' || ['data:', 'blob:'].includes(url.protocol)) return route.continue();
+      if (url.hostname === '127.0.0.1' && url.port === String(port) || ['data:', 'blob:'].includes(url.protocol)) return route.continue();
       report.externalRequests++; return route.abort();
     });
     const page = await context.newPage(); page.setDefaultTimeout(12000);
     page.on('pageerror', error => report.errors.push(error.message));
-    await page.goto('http://127.0.0.1:5173/', { waitUntil: 'domcontentloaded', timeout: 90000 }); await page.waitForFunction(() => window.__WELLSPREP_REPLAY__?.ready, null, { timeout: 90000 });
+    await page.goto(`http://127.0.0.1:${port}/`, { waitUntil: 'domcontentloaded', timeout: 90000 }); await page.waitForFunction(() => window.__WELLSPREP_REPLAY__?.ready, null, { timeout: 90000 });
     await page.getByRole('button', { name: /Temario/ }).filter({ visible: true }).first().waitFor();
     const nav = async name => {
       let target = page.getByRole('button', { name }).filter({ visible: true }).first();
