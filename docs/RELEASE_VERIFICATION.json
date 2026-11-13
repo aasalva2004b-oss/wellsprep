@@ -179,7 +179,16 @@
     }
   },
   "github": {
-    "status": "pending final documentation commit and authenticated push attempt"
+    "status": "review_branch_pushed_pr_creation_blocked",
+    "branch": "release/wells-prep-production-fixes",
+    "pushedCommitBeforeThisMetadataUpdate": "d9094f3c17ce8cd132fc9b2fd86600e706c045e0",
+    "branchUrl": "https://github.com/aasalva2004b-oss/wellsprep/tree/release/wells-prep-production-fixes",
+    "pullRequestCreated": false,
+    "apiError": "Forbidden: both GraphQL PR creation and REST pull request creation failed with exit 1",
+    "manualPullRequestUrl": "https://github.com/aasalva2004b-oss/wellsprep/compare/main...release/wells-prep-production-fixes?expand=1",
+    "preparedBody": "docs/PULL_REQUEST_BODY.md",
+    "mainMerged": false,
+    "deployed": false
   },
   "verifiedCodeCommit": "5e5f78a267ae009f3e92c8603c939b19614e4a1d",
   "commands": [

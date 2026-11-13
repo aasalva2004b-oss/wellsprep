@@ -39,7 +39,7 @@ Si la rama no pudo subirse desde este entorno, el informe final indicará el mot
 git push -u origin release/wells-prep-production-fixes
 ```
 
-Abre una PR hacia `main`, revisa el diff completo y las pruebas. La aprobación y la fusión las realiza el propietario. No elegir solamente los archivos modificados: los nuevos servicios y componentes también son necesarios.
+La rama ya se subió desde este entorno. La creación automática de la PR devolvió `Forbidden`; puedes abrir [esta comparación](https://github.com/aasalva2004b-oss/wellsprep/compare/main...release/wells-prep-production-fixes?expand=1) y usar `docs/PULL_REQUEST_BODY.md` como descripción. Abre una PR hacia `main`, revisa el diff completo y las pruebas. La aprobación y la fusión las realiza el propietario. No elegir solamente los archivos modificados: los nuevos servicios y componentes también son necesarios.
 
 ## 3. Llevar el código a la app existente
 

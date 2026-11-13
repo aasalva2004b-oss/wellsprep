@@ -80,3 +80,8 @@ El servidor remoto necesita una identidad administrada con permisos de datos Fir
 La imagen local y los emuladores no prueban OAuth de Google en un dominio publicado, IAM remoto, Gemini, las reglas desplegadas ni la interfaz de importación de tu cuenta de AI Studio. Permanece una advertencia de tamaño del bundle inicial; es una optimización pendiente, no se oculta como prueba fallida.
 
 La guía exacta de continuidad es `GOOGLE_AI_STUDIO_RELEASE_GUIDE.md`. No se recomienda conectar directamente esta primera vista previa a tus registros para probarla.
+
+
+## Entrega en GitHub
+
+Rama subida: [release/wells-prep-production-fixes](https://github.com/aasalva2004b-oss/wellsprep/tree/release/wells-prep-production-fixes). El intento automático de crear la PR fue rechazado con `Forbidden`, tanto por GraphQL como por REST; no se afirma que la PR exista. [Abrir la comparación y crear la PR](https://github.com/aasalva2004b-oss/wellsprep/compare/main...release/wells-prep-production-fixes?expand=1), usando `PULL_REQUEST_BODY.md` como descripción. Seleccionar `main` como base y conservar la revisión manual. No se fusionó ni desplegó.

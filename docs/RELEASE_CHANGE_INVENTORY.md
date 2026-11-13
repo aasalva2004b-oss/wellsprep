@@ -15,7 +15,7 @@ La tabla compara el resultado con `81321f0`, e incluye todos los documentos nuev
 
 ## Archivos
 
-Total frente a `81321f0`: **181 archivos** (incluida documentación).
+Total frente a `81321f0`: **182 archivos** (incluida documentación).
 
 | Estado | Archivo | Área |
 | --- | --- | --- |
@@ -45,6 +45,7 @@ Total frente a `81321f0`: **181 archivos** (incluida documentación).
 | A | `docs/PHASE_C_RETENTION.md` | Documentación y evidencias |
 | A | `docs/PHASE_D_PLANNING.md` | Documentación y evidencias |
 | A | `docs/PHASE_E_UX_AUDIT.md` | Documentación y evidencias |
+| A | `docs/PULL_REQUEST_BODY.md` | Documentación y evidencias |
 | A | `docs/RELEASE_CHANGE_INVENTORY.md` | Documentación y evidencias |
 | A | `docs/RELEASE_READINESS.md` | Documentación y evidencias |
 | A | `docs/RELEASE_VERIFICATION.json` | Documentación y evidencias |
