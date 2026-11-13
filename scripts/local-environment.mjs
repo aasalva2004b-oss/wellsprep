@@ -11,7 +11,7 @@ if (!['test', 'auth-test', 'dev', 'emulators'].includes(mode)) {
 // Never consult a real project alias or inherit administrator/CLI credentials.
 const env = { ...process.env };
 for (const name of Object.keys(env)) {
-  if (/^(GOOGLE_APPLICATION_CREDENTIALS|GOOGLE_OAUTH_ACCESS_TOKEN|FIREBASE_TOKEN|FIREBASE_CONFIG|CLOUDSDK_AUTH_ACCESS_TOKEN|GOOGLE_CLOUD_QUOTA_PROJECT|VITE_FIREBASE_.*)$/.test(name)) delete env[name];
+  if (/^(GEMINI_API_KEY|GOOGLE_API_KEY|GOOGLE_APPLICATION_CREDENTIALS|GOOGLE_OAUTH_ACCESS_TOKEN|FIREBASE_TOKEN|FIREBASE_CONFIG|CLOUDSDK_AUTH_ACCESS_TOKEN|GOOGLE_CLOUD_QUOTA_PROJECT|VITE_FIREBASE_.*)$/.test(name)) delete env[name];
 }
 Object.assign(env, {
   GCLOUD_PROJECT: 'demo-wellsprep',

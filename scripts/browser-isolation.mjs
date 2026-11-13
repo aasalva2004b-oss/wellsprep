@@ -5,10 +5,11 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { chromium } from '@playwright/test';
 
 const full = process.argv.includes('--with-emulators');
+const backend = process.argv.includes('--with-server');
 const url = 'http://127.0.0.1:5173/';
-const server = spawn(process.execPath, ['node_modules/vite/bin/vite.js'], {
+const server = spawn(process.execPath, backend ? ['--import','tsx','server.ts'] : ['node_modules/vite/bin/vite.js'], {
   stdio: ['ignore', 'pipe', 'pipe'],
-  env: { ...process.env, VITE_FIREBASE_MODE: 'emulator', VITE_FIREBASE_PROJECT_ID: 'demo-wellsprep' },
+  env: { ...process.env, NODE_ENV: 'development', PORT: '5173', DISABLE_HMR: 'true', VITE_FIREBASE_MODE: 'emulator', VITE_FIREBASE_PROJECT_ID: 'demo-wellsprep' },
 });
 let output = '';
 server.stdout.on('data', data => { output += data; });
@@ -18,7 +19,7 @@ try {
   let ready = false;
   for (let i = 0; i < 100; i++) {
     if (server.exitCode !== null) throw new Error(`Local Vite failed (port 5173 must be free): ${output}`);
-    if (output.includes('ready in')) { ready = true; break; }
+    if (output.includes(backend ? 'Wells Prep server ready' : 'ready in')) { ready = true; break; }
     await delay(100);
   }
   assert.ok(ready, `Vite startup timed out: ${output}`);
@@ -55,6 +56,19 @@ try {
     assert.ok(firebaseDestinations.some(origin => origin.endsWith(':8080')));
     assert.ok(firebaseDestinations.some(origin => origin.endsWith(':9099')));
     console.log('Browser: synthetic Auth login and Firestore topic rendered successfully.');
+    if (backend) {
+      const roundTrip = await page.evaluate(async () => {
+        const { authenticatedFetch } = await import('/src/lib/authenticatedApi.ts');
+        const credential = await (await authenticatedFetch('/api/webhook/credentials', {method:'POST'})).json();
+        const incoming = await fetch('/api/webhook/aerofocus', {method:'POST',headers:{'Content-Type':'application/json','X-Webhook-Token':credential.token},body:JSON.stringify({flightId:'synthetic-browser-runtime',date:'2026-10-01',topics:[{topicId:'civil-1',effectiveMinutes:20,modality:'repaso'}]})});
+        const events = await (await authenticatedFetch('/api/webhook/events')).json();
+        const privateStatuses = await Promise.all(['/server.ts','/server/app.ts','/@fs'+location.pathname+'server.ts','/.env','/build/server.cjs','/uploads/private.json'].map(async path => (await fetch(path)).status));
+        return {status: incoming.status, count: events.events.filter(event=>event.flightId==='synthetic-browser-runtime'||event.id==='synthetic-browser-runtime').length,privateStatuses};
+      });
+      assert.equal(roundTrip.status,200);assert.equal(roundTrip.count,1);
+      assert.ok(roundTrip.privateStatuses.every(status=>status===404||status===403));
+      console.log('Browser: real Express credentials/ingestion/read round-trip passed; private development sources denied.');
+    }
   }
   assert.deepEqual(external, [], 'Browser attempted an external HTTP request');
   assert.deepEqual(errors, [], 'Browser reported an unhandled application error');

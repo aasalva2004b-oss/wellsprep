@@ -10,7 +10,7 @@ const seed = spawnSync(process.execPath, [
   '--require', './scripts/local-only-network.cjs', '--import', 'tsx', 'scripts/seed-emulator.ts',
 ], { stdio: 'inherit', env: process.env });
 if (seed.status !== 0) process.exit(seed.status ?? 1);
-const browser = spawnSync(process.execPath, ['scripts/browser-isolation.mjs', '--with-emulators'], {
+const browser = spawnSync(process.execPath, ['scripts/browser-isolation.mjs', '--with-emulators', '--with-server'], {
   stdio: 'inherit', env: process.env,
 });
 process.exitCode = browser.status ?? 1;

@@ -50,6 +50,9 @@ export default defineConfig(({mode, command}) => {
       port: 5173,
       strictPort: true,
       headers: localHeaders,
+      fs: { deny: ['.env', '.env.*', '*.{crt,pem,key,p12,pfx}', '**/.git/**', '**/.npmrc',
+        '**/server.ts', '**/server/**', '**/build/**', '**/uploads/**', '**/api/**', '**/app/api/**',
+        '**/*service-account*.json', '**/*firebase-adminsdk*.json', '**/credentials*.json'] },
       // HMR is disabled in AI Studio via DISABLE_HMR env var.
       // Do not modifyâfile watching is disabled to prevent flickering during agent edits.
       hmr: process.env.DISABLE_HMR !== 'true',

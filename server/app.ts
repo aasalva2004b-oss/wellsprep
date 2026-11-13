@@ -137,7 +137,14 @@ export function createApp(options: AppOptions) {
     });
     app.get(['/', '/index.html'],(_req,res)=>res.sendFile(path.join(options.staticDirectory!,'index.html')));
   }
-  if(options.developmentMiddleware)app.use((req,res,next)=>req.path.startsWith('/api/')?next():options.developmentMiddleware!(req,res,next));
+  if(options.developmentMiddleware)app.use((req,res,next)=>{
+    let pathname: string;
+    try { pathname=decodeURIComponent(req.path).replace(/\\/g,'/'); } catch { return res.sendStatus(400); }
+    // Vite exposes application modules for development, never private server files.
+    if (/(?:^|\/)(?:server(?:\.[cm]?[jt]s)?|build|uploads|\.git)(?:\/|$)/i.test(pathname)
+      || /(?:^|\/)(?:\.env(?:\.[^/]*)?|\.npmrc|[^/]*(?:service-account|firebase-adminsdk|credentials)[^/]*\.json|[^/]+\.(?:pem|key|p12|pfx))$/i.test(pathname)) return res.sendStatus(404);
+    return pathname.startsWith('/api/')?next():options.developmentMiddleware!(req,res,next);
+  });
   app.use((_req,res)=>res.status(404).json({error:'Ruta no encontrada.'}));
   app.use((error:any,_req:Request,res:Response,_next:NextFunction)=>{
     if(res.headersSent){res.end();return;}

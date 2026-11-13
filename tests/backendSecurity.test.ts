@@ -61,3 +61,16 @@ test('server configuration refuses implicit remote access and test production cr
  assert.throws(()=>validateServerEnvironment({FIREBASE_SERVER_MODE:'production',FIREBASE_PROJECT_ID:'real-project'}));
  assert.equal(validateServerEnvironment({FIREBASE_PROJECT_ID:'demo-wellsprep',FIRESTORE_EMULATOR_HOST:'127.0.0.1:8080',FIREBASE_AUTH_EMULATOR_HOST:'127.0.0.1:9099'}).mode,'emulator');
 });
+
+test('development middleware serves client modules but never private backend paths', async()=>{
+ const app=createApp({store:{} as any,verifyIdToken:async()=>{throw new Error('not authenticated');},
+  developmentMiddleware:(_req,res)=>{res.status(200).send('synthetic client module');}});
+ const server=app.listen(3322,'127.0.0.1');await new Promise<void>(resolve=>server.once('listening',resolve));
+ const developmentBase='http://127.0.0.1:3322';
+ try {
+  assert.equal((await fetch(developmentBase+'/src/App.tsx')).status,200);
+  for(const path of ['/server.ts','/server/app.ts','/@fs/private/project/server.ts','/server%2fapp.ts','/.env.local','/uploads/private.pdf','/build/server.cjs','/credentials-test.json','/private.key']) {
+   assert.equal((await fetch(developmentBase+path)).status,404,path);
+  }
+ } finally { server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve())); }
+});

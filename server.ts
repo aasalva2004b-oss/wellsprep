@@ -7,7 +7,7 @@ import { createFirestoreAeroFocusStore } from './server/aerofocusStore';
 async function main() {
   const backend = createServerFirebase();
   const store = createFirestoreAeroFocusStore(backend.db);
-  const key = process.env.GEMINI_API_KEY;
+  const key = backend.config.mode === 'production' ? process.env.GEMINI_API_KEY : undefined;
   const parsePdf = key ? async (bytes: Buffer) => {
     const { GoogleGenAI } = await import('@google/genai');
     const ai = new GoogleGenAI({ apiKey: key });
