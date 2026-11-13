@@ -201,3 +201,8 @@ Total frente a `81321f0`: **182 archivos** (incluida documentación).
 | M | `tsconfig.json` | Configuración, reglas, dependencias o empaquetado |
 | D | `uploads/aerofocus_events.json` | Configuración, reglas, dependencias o empaquetado |
 | M | `vite.config.ts` | Configuración, reglas, dependencias o empaquetado |
+
+
+## Corrección posterior de arranque — 14 de noviembre
+
+La rama `fix/ai-studio-startup` modifica `package.json`, `vite.config.ts`, `src/components/AuthGate.tsx` y la documentación de arranque; añade `scripts/dev-preview.mjs`, `scripts/test-hosted-preview.mjs` y `docs/AI_STUDIO_STARTUP_FIX.md`. La tabla anterior conserva el inventario de la entrega inicial. La vista previa sin Java es sintética, sin API externa ni persistencia.

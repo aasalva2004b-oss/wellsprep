@@ -263,5 +263,21 @@
       "log": ".cache/final-fix/deps-final.all.json",
       "explanation": "19 moderate development advisories; runtime tree has zero known advisories"
     }
-  ]
+  ],
+  "hostedPreviewFix": {
+    "date": "2026-11-14",
+    "branch": "fix/ai-studio-startup",
+    "command": "npm run dev -- --port 3000 --host 0.0.0.0",
+    "syntheticOnly": true,
+    "javaRequired": false,
+    "browserCheckPassed": true,
+    "externalRequests": 0,
+    "reloadDiscardsChangesVerified": true,
+    "typecheck": true,
+    "unitPassed": 321,
+    "unitFailed": 0,
+    "buildPassed": true,
+    "actualAIStudioReimportVerified": false,
+    "details": "docs/AI_STUDIO_STARTUP_FIX.md"
+  }
 }
